@@ -30,14 +30,28 @@ module.exports = {
       autorestart: true,
       env: {
         NODE_ENV: "production",
-        // Set on the VPS: pm2 env quant-breeder OPENROUTER_API_KEY=sk-or-...
-        // OPENROUTER_API_KEY: "",
       },
       exp_backoff_restart_delay: 5000,
       log_date_format: "YYYY-MM-DD HH:mm:ss Z",
       merge_logs: true,
       error_file: "./logs/breeder-error.log",
       out_file: "./logs/breeder-out.log",
+    },
+    {
+      name: "quant-telegram",
+      script: "./dist/telegram.js",
+      instances: 1,
+      exec_mode: "fork",
+      max_memory_restart: "256M",
+      autorestart: true,
+      env: {
+        NODE_ENV: "production",
+      },
+      exp_backoff_restart_delay: 5000,
+      log_date_format: "YYYY-MM-DD HH:mm:ss Z",
+      merge_logs: true,
+      error_file: "./logs/telegram-error.log",
+      out_file: "./logs/telegram-out.log",
     },
   ],
 };
