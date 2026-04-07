@@ -143,7 +143,7 @@ function startPmBookChannel(): void {
           const book = parsePmL2(entry);
           if (book && book.bids.length && book.asks.length) {
             latestPmBook = book;
-            // Don't emit tick for book-only updates — price channel is primary
+            lastPmDataTs = Date.now(); // book updates count as "alive" for stale detection
             pulseEvents.emit("pm_book", book);
           }
         }
