@@ -23,9 +23,10 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
 const ANALYST_MODEL = process.env.ANALYST_MODEL || "google/gemini-2.0-flash-001";
 const CODER_MODEL = process.env.CODER_MODEL || "anthropic/claude-sonnet-4-5-20250514";
 const MAX_RETRIES = 3;
-const ENGINES_DIR = path.resolve(__dirname, "engines");
+const PROJECT_ROOT = path.resolve(__dirname, "..");
+const ENGINES_DIR = path.resolve(PROJECT_ROOT, "src", "engines"); // always read/write TypeScript source
 const MAX_ENGINES = 8; // don't let the arena get too crowded
-const DATA_DIR = path.resolve(__dirname, "..", "data");
+const DATA_DIR = path.resolve(PROJECT_ROOT, "data");
 
 // ── OpenRouter Client ───────────────────────────────────────────────────────
 
@@ -111,7 +112,7 @@ function readExampleEngine(): string {
 }
 
 function readTypes(): string {
-  return fs.readFileSync(path.resolve(__dirname, "types.ts"), "utf-8");
+  return fs.readFileSync(path.resolve(PROJECT_ROOT, "src", "types.ts"), "utf-8");
 }
 
 // ── Analysis (Gemini Flash) ─────────────────────────────────────────────────
@@ -300,6 +301,14 @@ async function breed(): Promise<void> {
       const result = validateEngine(filePath);
       if (result.valid) {
         console.log(`[breeder] ${className} compiles successfully`);
+
+        // Rebuild dist/ so arena picks up the new engine
+        try {
+          execSync("npm run build", { encoding: "utf-8", timeout: 30000, cwd: PROJECT_ROOT });
+          console.log("[breeder] TypeScript rebuilt");
+        } catch (buildErr: any) {
+          console.error("[breeder] Build failed:", buildErr.message);
+        }
 
         // Restart arena to pick up new engine
         try {
