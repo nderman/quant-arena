@@ -334,10 +334,11 @@ async function processActionNoLatency(
         toxicFlowHit: false, orderType: "taker",
       };
     }
-    const currentPrice = action.price; // current price of the side we hold
 
-    // Cost of buying opposite side
-    const oppositePrice = 1 - currentPrice;
+    // Use position's avgEntry as our side price (NOT action.price which engines can set to anything)
+    // This is the real cost we paid — the opposite side costs (1 - avgEntry)
+    const ourPrice = pos.avgEntry;
+    const oppositePrice = 1 - ourPrice;
     const oppositeCost = oppositePrice * shares;
     const oppositeFee = calculateFee(oppositePrice, oppositeCost);
 
@@ -359,9 +360,9 @@ async function processActionNoLatency(
       };
     }
 
-    // Deduct costs, add merged USDC back
-    // P&L: merge payout ($1/share) minus cost basis of our side minus opposite buy cost
-    const costBasis = pos.avgEntry * shares;
+    // P&L: merge payout ($1/share) minus what we paid for our side minus opposite buy cost
+    // With correct pricing: pnl = $1 - avgEntry - (1-avgEntry) - fees = -fees (always a small loss)
+    const costBasis = ourPrice * shares;
     const pnl = mergeValue - costBasis - totalCost;
 
     state.cashBalance -= totalCost;
