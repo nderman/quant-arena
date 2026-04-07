@@ -14,7 +14,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { CONFIG } from "./config";
-import { pulseEvents, startSimulatedPulse, startPmChannel, startBinanceChannel, startMarketRotation, shutdown as shutdownPulse } from "./pulse";
+import { pulseEvents, startSimulatedPulse, startPmChannel, startBinanceChannel, startMarketRotation, setPmSubscriptionTokens, shutdown as shutdownPulse } from "./pulse";
 import { processActions, markToMarket, clearFeePool } from "./referee";
 import { recordFill, recordRoundStart, recordRoundEnd, getRoundSummary, closeDb } from "./ledger";
 import { fetchSignalSnapshot } from "./signals";
@@ -360,6 +360,7 @@ async function main(): Promise<void> {
         CONFIG.PM_CONDITION_ID = pick.yesTokenId;
         currentActiveTokenId = pick.yesTokenId;
         currentActiveDownTokenId = pick.noTokenId;
+        setPmSubscriptionTokens([pick.yesTokenId, pick.noTokenId]);
         console.log(`\n[arena] Auto-selected: "${pick.title}"`);
         console.log(`  UP token:   ${pick.yesTokenId.slice(0, 20)}...`);
         console.log(`  DOWN token: ${pick.noTokenId.slice(0, 20)}...\n`);
@@ -437,7 +438,7 @@ async function main(): Promise<void> {
         }
       }
 
-      return picked.yesTokenId;
+      return { yesTokenId: picked.yesTokenId, noTokenId: picked.noTokenId };
     }, 120_000);
   }
 

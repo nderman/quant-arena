@@ -38,6 +38,16 @@ let staleCheckInterval: ReturnType<typeof setInterval> | null = null;
 
 export function getLatestPmBook(): OrderBook { return latestPmBook; }
 
+// Both token IDs for subscription (set by arena on discovery)
+let pmSubscriptionTokens: string[] = [];
+export function setPmSubscriptionTokens(tokens: string[]): void {
+  pmSubscriptionTokens = tokens.filter(Boolean);
+}
+function getPmTokens(): string[] {
+  if (pmSubscriptionTokens.length > 0) return pmSubscriptionTokens;
+  return CONFIG.PM_CONDITION_ID ? [CONFIG.PM_CONDITION_ID] : [];
+}
+
 // ── Polymarket CLOB WebSocket ────────────────────────────────────────────────
 
 function parsePmL2(data: any): OrderBook | null {
@@ -128,7 +138,7 @@ function startPmBookChannel(): void {
     pmBookWs?.send(JSON.stringify({
       type: "subscribe",
       channel: "book",
-      assets_ids: [CONFIG.PM_CONDITION_ID],
+      assets_ids: getPmTokens(),
     }));
 
     if (pmBookHeartbeat) clearInterval(pmBookHeartbeat);
@@ -182,13 +192,14 @@ function startPmPriceChannel(): void {
     console.log("[pulse] PM Price WS connected");
     pmPriceReconnectDelay = 1000;
 
+    const tokens = getPmTokens();
     pmPriceWs?.send(JSON.stringify({
-      assets_ids: [CONFIG.PM_CONDITION_ID],
+      assets_ids: tokens,
       type: "market",
       level: 2,
       custom_feature_enabled: true,
     }));
-    console.log(`[pulse] Price subscribed: ${CONFIG.PM_CONDITION_ID.slice(0, 20)}...`);
+    console.log(`[pulse] Price subscribed: ${tokens.length} tokens (${tokens[0]?.slice(0, 20)}...)`);
 
     if (pmPriceHeartbeat) clearInterval(pmPriceHeartbeat);
     pmPriceHeartbeat = setInterval(() => {
@@ -414,28 +425,29 @@ let rotationInterval: ReturnType<typeof setInterval> | null = null;
  * Calls `discoverFn` to get the current token ID, then sends a new WS subscribe.
  */
 export function startMarketRotation(
-  discoverFn: () => Promise<string | null>,
+  discoverFn: () => Promise<{ yesTokenId: string; noTokenId: string } | null>,
   intervalMs = 120_000, // check every 2 min
 ): void {
   let currentToken = "";
 
   const rotate = async () => {
     try {
-      const newToken = await discoverFn();
-      if (!newToken || newToken === currentToken) return;
+      const result = await discoverFn();
+      if (!result || result.yesTokenId === currentToken) return;
 
-      currentToken = newToken;
-      console.log(`[pulse] Rotating to new market: ${newToken.slice(0, 20)}...`);
+      currentToken = result.yesTokenId;
+      const bothTokens = [result.yesTokenId, result.noTokenId].filter(Boolean);
+      console.log(`[pulse] Rotating to new market: ${currentToken.slice(0, 20)}... (${bothTokens.length} tokens)`);
 
-      // Subscribe on both book and price channels
+      // Subscribe BOTH tokens on book and price channels
       if (pmBookWs?.readyState === WebSocket.OPEN) {
         pmBookWs.send(JSON.stringify({
-          type: "subscribe", channel: "book", assets_ids: [newToken],
+          type: "subscribe", channel: "book", assets_ids: bothTokens,
         }));
       }
       if (pmPriceWs?.readyState === WebSocket.OPEN) {
         pmPriceWs.send(JSON.stringify({
-          assets_ids: [newToken], type: "market", level: 2, custom_feature_enabled: true,
+          assets_ids: bothTokens, type: "market", level: 2, custom_feature_enabled: true,
         }));
       }
     } catch (err: any) {
