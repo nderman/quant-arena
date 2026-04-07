@@ -304,14 +304,25 @@ async function processActionNoLatency(
   // size = number of shares to merge (must buy opposite side first).
   // Cost: opposite-side buy (at 1-price, with parabolic fee) + flat merge fee + gas.
   if (action.side === "MERGE") {
-    if (action.size < CONFIG.MIN_ORDER_SIZE) {
+    // Must hold a position to merge — reject if no position or insufficient shares
+    const pos = state.positions.get(action.tokenId);
+    if (!pos || pos.shares < CONFIG.MIN_ORDER_SIZE) {
       return {
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: false, orderType: "taker",
       };
     }
-    const shares = action.size;
+
+    // Clamp merge size to actual position — can't merge more than you hold
+    const shares = Math.min(action.size, pos.shares);
+    if (shares < CONFIG.MIN_ORDER_SIZE) {
+      return {
+        action, filled: false, fillPrice: 0, fillSize: 0,
+        fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
+        toxicFlowHit: false, orderType: "taker",
+      };
+    }
     const currentPrice = action.price; // current price of the side we hold
 
     // Cost of buying opposite side
@@ -339,8 +350,7 @@ async function processActionNoLatency(
 
     // Deduct costs, add merged USDC back
     // P&L: merge payout ($1/share) minus cost basis of our side minus opposite buy cost
-    const pos = state.positions.get(action.tokenId);
-    const costBasis = pos ? pos.avgEntry * shares : currentPrice * shares;
+    const costBasis = pos.avgEntry * shares;
     const pnl = mergeValue - costBasis - totalCost;
 
     state.cashBalance -= totalCost;
