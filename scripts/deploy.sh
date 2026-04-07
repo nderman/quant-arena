@@ -26,7 +26,7 @@ echo "[3/3] Installing deps and restarting..."
 ssh "$REMOTE_HOST" << 'EOF'
   cd ~/quant-arena
   mkdir -p data logs
-  npm install --production
+  npm install
   pm2 restart ecosystem.config.js --env production 2>/dev/null || pm2 start ecosystem.config.js --env production
   pm2 save
 EOF

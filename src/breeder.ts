@@ -286,12 +286,16 @@ async function breed(): Promise<void> {
 
   // 3. Generate + validate (with retries)
   let attempts = 0;
+  let lastError = "";
   while (attempts < MAX_RETRIES) {
     attempts++;
     console.log(`[breeder] Generation attempt ${attempts}/${MAX_RETRIES}...`);
 
     try {
-      const { code, className, fileName } = await generateEngine(analysis);
+      const errorContext = lastError
+        ? `\n\n## PREVIOUS ATTEMPT FAILED TO COMPILE\nFix these TypeScript errors:\n${lastError}`
+        : "";
+      const { code, className, fileName } = await generateEngine(analysis + errorContext);
       const filePath = path.join(ENGINES_DIR, fileName + ".ts");
 
       // Write the file
@@ -323,8 +327,9 @@ async function breed(): Promise<void> {
         return;
       }
 
-      // Compilation failed — delete and retry
+      // Compilation failed — delete and retry with error context
       console.error(`[breeder] Compilation failed:\n${result.error}`);
+      lastError = result.error || "";
       fs.unlinkSync(filePath);
     } catch (err: any) {
       console.error(`[breeder] Generation failed: ${err.message}`);
