@@ -94,12 +94,19 @@ export function startPmChannel(): void {
   startPmBookChannel();
   startPmPriceChannel();
 
-  // Stale data detector: force hard reconnect if PM feed goes silent
+  // Stale data detector: only reconnect if websocket is open but no data received
+  // Quiet markets (0.50/0.50 with no trades) produce no events — that's normal, not stale
   if (staleCheckInterval) clearInterval(staleCheckInterval);
   staleCheckInterval = setInterval(() => {
-    if (lastPmDataTs > 0 && Date.now() - lastPmDataTs > CONFIG.STALE_DATA_THRESHOLD_MS) {
-      console.warn(`[pulse] PM data stale for ${CONFIG.STALE_DATA_THRESHOLD_MS / 1000}s — forcing reconnect`);
-      lastPmDataTs = Date.now(); // prevent spam
+    const staleMs = lastPmDataTs > 0 ? Date.now() - lastPmDataTs : 0;
+    const bookOpen = pmBookWs?.readyState === 1; // WebSocket.OPEN
+    const priceOpen = pmPriceWs?.readyState === 1;
+
+    // Only reconnect if we've been connected for a while but never got any data at all,
+    // or if the websocket itself is in a broken state
+    if (staleMs > CONFIG.STALE_DATA_THRESHOLD_MS && (!bookOpen || !priceOpen)) {
+      console.warn(`[pulse] PM WS disconnected (book=${bookOpen}, price=${priceOpen}) — reconnecting`);
+      lastPmDataTs = Date.now();
       pmBookWs?.close();
       pmPriceWs?.close();
     }
