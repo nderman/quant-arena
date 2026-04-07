@@ -91,6 +91,10 @@ const defaultConfig: RefereeConfig = {
 
 let config: RefereeConfig = { ...defaultConfig };
 
+// Precomputed maker adverse selection multipliers (avoid division per fill)
+const MAKER_ADVERSE_BUY = 1 + CONFIG.MAKER_ADVERSE_BPS / 10000;   // worse entry (higher price)
+const MAKER_ADVERSE_SELL = 1 - CONFIG.MAKER_ADVERSE_BPS / 10000;  // worse exit (lower price)
+
 export function setRefereeConfig(overrides: Partial<RefereeConfig>): void {
   config = { ...defaultConfig, ...overrides };
 }
@@ -398,7 +402,11 @@ async function processActionNoLatency(
     }
 
     const fillSize = walked.filledSize;
-    const fillPrice = isMaker ? walked.effectivePrice : Math.max(walked.effectivePrice, adjustedPrice);
+    // Makers fill at their limit but suffer adverse selection (price was moving through them)
+    let fillPrice = isMaker ? walked.effectivePrice : Math.max(walked.effectivePrice, adjustedPrice);
+    if (isMaker) {
+      fillPrice *= MAKER_ADVERSE_BUY;
+    }
     const totalCost = fillPrice * fillSize;
 
     // Makers pay 0% fee; takers pay parabolic fee
@@ -499,7 +507,11 @@ async function processActionNoLatency(
     }
 
     const fillSize = walked.filledSize;
-    const fillPrice = isMaker ? walked.effectivePrice : Math.min(walked.effectivePrice, adjustedPrice);
+    // Makers suffer adverse selection on sells too (price crashing through your ask)
+    let fillPrice = isMaker ? walked.effectivePrice : Math.min(walked.effectivePrice, adjustedPrice);
+    if (isMaker) {
+      fillPrice *= MAKER_ADVERSE_SELL;
+    }
     const proceeds = fillPrice * fillSize;
 
     // Makers pay 0% fee; takers pay parabolic fee

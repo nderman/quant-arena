@@ -169,7 +169,14 @@ async function runRound(
       const state = states.get(engine.id)!;
 
       try {
+        // Safety timeout: kill onTick if engine takes too long (OpenClaw LLM-generated code protection)
+        const tickStart = Date.now();
         const actions = engine.onTick(tick, state, latestSignals);
+        const tickMs = Date.now() - tickStart;
+        if (tickMs > CONFIG.ENGINE_TICK_TIMEOUT_MS) {
+          console.warn(`[arena] ${engine.id} onTick took ${tickMs}ms (limit: ${CONFIG.ENGINE_TICK_TIMEOUT_MS}ms) — skipping`);
+          continue;
+        }
         if (actions.length === 0) continue;
 
         // Process through referee (fees, latency, toxic flow)

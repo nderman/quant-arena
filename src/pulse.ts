@@ -33,6 +33,8 @@ let binanceHeartbeat: ReturnType<typeof setInterval> | null = null;
 // Latest books for the referee to peek at during latency window
 let latestPmBook: OrderBook = { bids: [], asks: [], timestamp: 0 };
 let latestBinanceBook: OrderBook = { bids: [], asks: [], timestamp: 0 };
+let lastPmDataTs = 0; // timestamp of last PM data received
+let staleCheckInterval: ReturnType<typeof setInterval> | null = null;
 
 export function getLatestPmBook(): OrderBook { return latestPmBook; }
 
@@ -91,6 +93,17 @@ export function startPmChannel(): void {
 
   startPmBookChannel();
   startPmPriceChannel();
+
+  // Stale data detector: force hard reconnect if PM feed goes silent
+  if (staleCheckInterval) clearInterval(staleCheckInterval);
+  staleCheckInterval = setInterval(() => {
+    if (lastPmDataTs > 0 && Date.now() - lastPmDataTs > CONFIG.STALE_DATA_THRESHOLD_MS) {
+      console.warn(`[pulse] PM data stale for ${CONFIG.STALE_DATA_THRESHOLD_MS / 1000}s — forcing reconnect`);
+      lastPmDataTs = Date.now(); // prevent spam
+      pmBookWs?.close();
+      pmPriceWs?.close();
+    }
+  }, CONFIG.STALE_DATA_CHECK_MS);
 }
 
 // ── PM Book Channel (L2 depth) ──────────────────────────────────────────────
@@ -198,6 +211,7 @@ function startPmPriceChannel(): void {
               tick.bestBid = bestBid;
               tick.bestAsk = bestAsk;
               tick.spread = bestAsk > 0 && bestBid > 0 ? bestAsk - bestBid : 0;
+              lastPmDataTs = Date.now();
               pulseEvents.emit("tick", tick);
               pulseEvents.emit("pm_tick", tick);
             }
@@ -434,6 +448,7 @@ export function shutdown(): void {
   if (pmPriceHeartbeat) clearInterval(pmPriceHeartbeat);
   if (binanceHeartbeat) clearInterval(binanceHeartbeat);
   if (rotationInterval) clearInterval(rotationInterval);
+  if (staleCheckInterval) clearInterval(staleCheckInterval);
   pmBookWs?.close();
   pmPriceWs?.close();
   binanceWs?.close();

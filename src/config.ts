@@ -38,7 +38,17 @@ export const CONFIG = {
   // ── Maker / Taker ──────────────────────────────────────────────────────────
   MAKER_FILL_PROBABILITY: num("MAKER_FILL_PROBABILITY", 0.60),          // 60% chance maker order fills per tick (queue position)
   MAKER_REBATE_RATE:      num("MAKER_REBATE_RATE", 0.20),               // makers get 20% of taker fees collected
+  MAKER_ADVERSE_BPS:      num("MAKER_ADVERSE_BPS", 5),                  // 5bps adverse selection on maker fills
   MIN_ORDER_SIZE:          num("MIN_ORDER_SIZE", 5),                     // CLOB rejects < 5 shares
+
+  // ── Engine Safety ─────────────────────────────────────────────────────────
+  ENGINE_TICK_TIMEOUT_MS:  num("ENGINE_TICK_TIMEOUT_MS", 50),            // kill onTick if > 50ms (OpenClaw safety)
+  STALE_DATA_THRESHOLD_MS: num("STALE_DATA_THRESHOLD_MS", 30_000),      // force PM reconnect if no data for this long
+  STALE_DATA_CHECK_MS:     num("STALE_DATA_CHECK_MS", 10_000),          // how often to check for stale data
+
+  // ── Settlement ────────────────────────────────────────────────────────────
+  SETTLEMENT_DELAY_MS_MIN: num("SETTLEMENT_DELAY_MS_MIN", 30_000),      // min oracle purgatory (30s)
+  SETTLEMENT_DELAY_MS_MAX: num("SETTLEMENT_DELAY_MS_MAX", 120_000),     // max oracle purgatory (2min)
 
   // ── Oracle / Settlement ────────────────────────────────────────────────────
   ORACLE_NOISE_ENABLED:   bool("ORACLE_NOISE_ENABLED", true),

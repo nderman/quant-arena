@@ -24,6 +24,7 @@ export interface TrackedMarket {
   windowEnd: number;       // unix ms — candle close / resolution time
   openPrice: number;       // Binance price at candle open (strike)
   symbol: string;          // e.g. "BTCUSDT"
+  settlementDelay?: number; // random oracle purgatory delay (ms), set on first check
 }
 
 export interface SettlementResult {
@@ -93,6 +94,16 @@ export function settleExpiredMarkets(
 
   for (const [tokenId, market] of trackedMarkets) {
     if (now < market.windowEnd) continue; // not expired yet
+
+    // Oracle purgatory: settlement doesn't happen instantly after window end.
+    // Random delay (30s-2min) simulates UMA/Chainlink oracle lag.
+    // Cash is effectively locked during this period.
+    if (market.settlementDelay == null) {
+      const min = CONFIG.SETTLEMENT_DELAY_MS_MIN;
+      const max = CONFIG.SETTLEMENT_DELAY_MS_MAX;
+      market.settlementDelay = min + Math.random() * (max - min);
+    }
+    if (now < market.windowEnd + market.settlementDelay) continue;
 
     // Get current Binance price for this symbol
     const binancePrice = latestBinancePrices.get(market.symbol);
