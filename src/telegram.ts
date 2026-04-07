@@ -17,7 +17,7 @@ dotenv.config({ path: path.resolve(__dirname, "..", ".env") });
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || "";
-const MODEL = process.env.TELEGRAM_MODEL || "google/gemini-2.0-flash-001";
+const MODEL = process.env.TELEGRAM_MODEL || "anthropic/claude-sonnet-4-5";
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 
 if (!TELEGRAM_TOKEN) { console.error("TELEGRAM_BOT_TOKEN not set"); process.exit(1); }
@@ -54,6 +54,19 @@ ${logs}
 
 ## Bred Engines on Disk
 ${engines}`;
+}
+
+function getEngineCode(): string {
+  const files = run("ls src/engines/BredEngine_* 2>/dev/null").trim().split("\n").filter(Boolean);
+  if (files.length === 0) return "No bred engines found.";
+
+  let code = "";
+  for (const file of files) {
+    const name = file.replace("src/engines/", "");
+    const content = run(`head -60 ${file}`);
+    code += `\n### ${name}\n\`\`\`typescript\n${content}\`\`\`\n`;
+  }
+  return code;
 }
 
 // ── LLM summarizer ──────────────────────────────────────────────────────────
@@ -112,7 +125,10 @@ bot.on("message", async (msg) => {
   // Everything else goes through LLM
   bot.sendChatAction(chatId, "typing");
   const snapshot = getArenaSnapshot();
-  const reply = await askLLM(text, snapshot);
+  // Include engine source code if user asks about strategies/code
+  const wantsCode = /strat|code|source|engine|bred|logic|how.*(work|trade)/i.test(text);
+  const context = wantsCode ? snapshot + "\n\n## Bred Engine Source Code\n" + getEngineCode() : snapshot;
+  const reply = await askLLM(text, context);
   bot.sendMessage(chatId, reply, { parse_mode: "Markdown" }).catch(() => {
     // Fallback without markdown if parsing fails
     bot.sendMessage(chatId, reply);
