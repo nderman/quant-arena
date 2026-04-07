@@ -180,7 +180,8 @@ async function runRound(
         if (actions.length === 0) continue;
 
         // Sanity check: reject actions if engine state looks exploited
-        if (state.cashBalance > CONFIG.STARTING_CASH * 100 || state.cashBalance < -CONFIG.STARTING_CASH) {
+        // 10x starting cash is already unrealistic for 5M binary markets
+        if (state.cashBalance > CONFIG.STARTING_CASH * 10 || state.cashBalance < -CONFIG.STARTING_CASH) {
           console.warn(`[arena] ${engine.id} DISQUALIFIED: cash=$${state.cashBalance.toFixed(2)} (exploit detected)`);
           continue;
         }

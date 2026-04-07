@@ -286,6 +286,17 @@ async function processActionNoLatency(
   state: EngineState,
 ): Promise<FillResult> {
 
+  // ── Price sanity: PM prices must be 0-1, reject Binance price contamination ──
+  if (action.side !== "HOLD" && action.side !== "MERGE") {
+    if (action.price < 0.001 || action.price > 1.0) {
+      return {
+        action, filled: false, fillPrice: 0, fillSize: 0,
+        fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: 0,
+        toxicFlowHit: false, orderType: action.orderType ?? "taker",
+      };
+    }
+  }
+
   // HOLD — no-op
   if (action.side === "HOLD") {
     return {
