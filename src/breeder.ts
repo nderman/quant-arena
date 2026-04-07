@@ -21,7 +21,7 @@ dotenv.config({ path: path.resolve(__dirname, "..", ".env") });
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
 const ANALYST_MODEL = process.env.ANALYST_MODEL || "google/gemini-2.0-flash-001";
-const CODER_MODEL = process.env.CODER_MODEL || "anthropic/claude-sonnet-4-5-20250514";
+const CODER_MODEL = process.env.CODER_MODEL || "anthropic/claude-sonnet-4-5";
 const MAX_RETRIES = 3;
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const ENGINES_DIR = path.resolve(PROJECT_ROOT, "src", "engines"); // always read/write TypeScript source
