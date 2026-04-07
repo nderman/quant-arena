@@ -1,0 +1,145 @@
+/**
+ * Quant Farm — Base Engine
+ *
+ * Abstract base class for all arena engines.
+ * Provides:
+ *   - Fee-Adjusted Edge calculator (the critical pre-trade check)
+ *   - Position helpers
+ *   - State accessors
+ *
+ * Engines extend this and implement onTick() with their strategy.
+ */
+
+import { calculateFeeAdjustedEdge, cheaperExit } from "../referee";
+import type {
+  BaseEngine as IBaseEngine,
+  EngineAction,
+  EngineState,
+  MarketTick,
+  SignalSnapshot,
+  FeeAdjustedEdge,
+  PositionState,
+} from "../types";
+
+export abstract class AbstractEngine implements IBaseEngine {
+  abstract id: string;
+  abstract name: string;
+  abstract version: string;
+
+  protected state!: EngineState;
+
+  init(state: EngineState): void {
+    this.state = state;
+  }
+
+  abstract onTick(tick: MarketTick, state: EngineState, signals?: SignalSnapshot): EngineAction[];
+
+  onRoundEnd(_state: EngineState): void {
+    // Override in subclass for cleanup
+  }
+
+  // ── Fee-Aware Helpers ────────────────────────────────────────────────────
+
+  /**
+   * Calculate if a trade is profitable AFTER the parabolic fee.
+   *
+   * This is THE critical function. A bot that ignores this will bleed out
+   * at mid-prices where the fee is 1.8%.
+   *
+   * Usage:
+   *   const edge = this.feeAdjustedEdge(0.65, 0.50);
+   *   if (!edge.profitable) return []; // skip — fee eats the edge
+   */
+  protected feeAdjustedEdge(modelProb: number, marketPrice: number): FeeAdjustedEdge {
+    return calculateFeeAdjustedEdge(modelProb, marketPrice);
+  }
+
+  /**
+   * Determine the cheapest way to exit a position.
+   * At mid-prices, MERGE is often cheaper than SELL due to the parabolic fee.
+   */
+  protected cheapestExit(price: number, shares: number) {
+    return cheaperExit(price, shares);
+  }
+
+  // ── Position Helpers ─────────────────────────────────────────────────────
+
+  protected getPosition(tokenId: string): PositionState | undefined {
+    return this.state.positions.get(tokenId);
+  }
+
+  protected hasPosition(tokenId: string): boolean {
+    return this.state.positions.has(tokenId);
+  }
+
+  protected totalPositionValue(currentPrice: number): number {
+    let value = 0;
+    for (const [, pos] of this.state.positions) {
+      value += pos.shares * currentPrice;
+    }
+    return value;
+  }
+
+  protected portfolioValue(currentPrice: number): number {
+    return this.state.cashBalance + this.totalPositionValue(currentPrice);
+  }
+
+  // ── Token Helpers ────────────────────────────────────────────────────────
+
+  /** Get the DOWN (NO) token ID for the current market */
+  protected getDownTokenId(): string {
+    return this.state.activeDownTokenId || "";
+  }
+
+  /** Get the UP (YES) token ID for the current market */
+  protected getUpTokenId(): string {
+    return this.state.activeTokenId || "";
+  }
+
+  // ── Action Builders ──────────────────────────────────────────────────────
+
+  protected buy(tokenId: string, price: number, size: number, opts?: {
+    note?: string; signalSource?: string; orderType?: "maker" | "taker";
+  }): EngineAction {
+    return {
+      side: "BUY",
+      tokenId,
+      price,
+      size,
+      orderType: opts?.orderType,
+      note: opts?.note,
+      signalSource: opts?.signalSource,
+    };
+  }
+
+  protected sell(tokenId: string, price: number, size: number, opts?: {
+    note?: string; signalSource?: string; orderType?: "maker" | "taker";
+  }): EngineAction {
+    return {
+      side: "SELL",
+      tokenId,
+      price,
+      size,
+      orderType: opts?.orderType,
+      note: opts?.note,
+      signalSource: opts?.signalSource,
+    };
+  }
+
+  protected merge(tokenId: string, amount: number, opts?: {
+    note?: string; signalSource?: string;
+  }): EngineAction {
+    return {
+      side: "MERGE",
+      tokenId,
+      price: 1.0,
+      size: amount,
+      note: opts?.note,
+      signalSource: opts?.signalSource ?? "merge_exit",
+    };
+  }
+
+  protected hold(): EngineAction {
+    return { side: "HOLD", tokenId: "", price: 0, size: 0 };
+  }
+}

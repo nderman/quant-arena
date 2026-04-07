@@ -1,0 +1,28 @@
+{
+  "name": "quant-farm",
+  "version": "0.1.0",
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc",
+    "arena": "ts-node src/arena.ts",
+    "arena:dry": "DRY_RUN=true ts-node src/arena.ts",
+    "arena:live": "ts-node src/arena.ts",
+    "arena:1round": "MAX_ROUNDS=1 ts-node src/arena.ts",
+    "arena:1round:dry": "DRY_RUN=true MAX_ROUNDS=1 ROUND_DURATION_MS=60000 TICK_INTERVAL_MS=200 ts-node src/arena.ts",
+    "discover": "ts-node src/discovery.ts",
+    "signals": "ts-node src/signals.ts",
+    "pulse:test": "ts-node src/pulse.ts",
+    "test:unit": "ts-node src/tests/unitTests.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.8",
+    "@types/node": "^20.11.0",
+    "@types/ws": "^8.5.10",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.0.0"
+  }
+}
