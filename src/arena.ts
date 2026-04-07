@@ -179,6 +179,12 @@ async function runRound(
         }
         if (actions.length === 0) continue;
 
+        // Sanity check: reject actions if engine state looks exploited
+        if (state.cashBalance > CONFIG.STARTING_CASH * 100 || state.cashBalance < -CONFIG.STARTING_CASH) {
+          console.warn(`[arena] ${engine.id} DISQUALIFIED: cash=$${state.cashBalance.toFixed(2)} (exploit detected)`);
+          continue;
+        }
+
         // Process through referee (fees, latency, toxic flow)
         const fills = await processActions(actions, state);
 
