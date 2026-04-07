@@ -12,7 +12,9 @@
     "discover": "ts-node src/discovery.ts",
     "signals": "ts-node src/signals.ts",
     "pulse:test": "ts-node src/pulse.ts",
-    "test:unit": "ts-node src/tests/unitTests.ts"
+    "test:unit": "ts-node src/tests/unitTests.ts",
+    "deploy": "bash scripts/deploy.sh",
+    "logs": "ssh ${VPS_HOST:-root@YOUR_VPS_IP} 'pm2 logs quant-arena --lines 50'"
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0",
