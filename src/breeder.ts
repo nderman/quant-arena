@@ -27,6 +27,7 @@ const PROJECT_ROOT = path.resolve(__dirname, "..");
 const ENGINES_DIR = path.resolve(PROJECT_ROOT, "src", "engines"); // always read/write TypeScript source
 const MAX_ENGINES = 8; // don't let the arena get too crowded
 const DATA_DIR = path.resolve(PROJECT_ROOT, "data");
+const ARCHIVE_DIR = path.resolve(DATA_DIR, "engines_archive");
 
 // ── OpenRouter Client ───────────────────────────────────────────────────────
 
@@ -265,7 +266,13 @@ function pruneEngines(intel: any): void {
 
   if (worstFile) {
     console.log(`[breeder] Pruning worst performer: ${worstFile} (P&L: $${worstPnl.toFixed(2)})`);
-    fs.unlinkSync(path.join(ENGINES_DIR, worstFile + ".ts"));
+    // Archive before deleting
+    if (!fs.existsSync(ARCHIVE_DIR)) fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
+    const srcPath = path.join(ENGINES_DIR, worstFile + ".ts");
+    const archivePath = path.join(ARCHIVE_DIR, `${worstFile}_pruned_${Date.now()}.ts`);
+    fs.copyFileSync(srcPath, archivePath);
+    fs.unlinkSync(srcPath);
+    console.log(`[breeder] Archived to ${archivePath}`);
   }
 }
 

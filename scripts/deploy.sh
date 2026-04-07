@@ -19,14 +19,17 @@ rsync -avz --delete \
   --exclude 'data' \
   --exclude 'logs' \
   --exclude '.env' \
+  --exclude 'src/engines/BredEngine_*' \
+  --exclude 'dist/engines/BredEngine_*' \
   ./ "$REMOTE_HOST:$REMOTE_DIR/"
 
 # 3. Remote: install deps and restart
 echo "[3/3] Installing deps and restarting..."
 ssh "$REMOTE_HOST" << 'EOF'
   cd ~/quant-arena
-  mkdir -p data logs
+  mkdir -p data logs data/engines_archive
   npm install
+  npx tsc
   pm2 restart ecosystem.config.js --env production 2>/dev/null || pm2 start ecosystem.config.js --env production
   pm2 save
 EOF
