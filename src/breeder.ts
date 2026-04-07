@@ -220,12 +220,13 @@ Write a NEW engine class named ${className} that implements a strategy designed 
 
 // ── Validation ──────────────────────────────────────────────────────────────
 
-function validateEngine(filePath: string): { valid: boolean; error?: string } {
+function validateEngine(_filePath: string): { valid: boolean; error?: string } {
   try {
-    execSync(`npx tsc --noEmit --strict "${filePath}" 2>&1`, {
+    // Run full project compilation — checks the new engine in context of all imports
+    execSync("npx tsc --noEmit 2>&1", {
       encoding: "utf-8",
-      timeout: 30000,
-      cwd: path.resolve(__dirname, ".."),
+      timeout: 60000,
+      cwd: PROJECT_ROOT,
     });
     return { valid: true };
   } catch (err: any) {
