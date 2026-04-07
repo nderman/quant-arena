@@ -51,13 +51,17 @@ const fee01 = calculateFee(0.01, 100);
 assert(approx(fee01, fee99, 0.001), `Symmetry: P=0.01 should equal P=0.99`);
 console.log(`  P=0.01: fee=$${fee01.toFixed(4)} (symmetric with P=0.99)`);
 
-// Fee at P=0 should be exactly 0
+// Fee at P=0 should be near-zero (clamped to 0.001 to prevent negative fees)
 const fee0 = calculateFee(0, 100);
-assert(fee0 === 0, `Fee at P=0: expected 0, got ${fee0}`);
+assert(fee0 < 0.01, `Fee at P=0: expected near-zero, got ${fee0}`);
 
-// Fee at P=1 should be exactly 0
+// Fee at P=1 should be near-zero (clamped to 0.999)
 const fee1 = calculateFee(1, 100);
-assert(fee1 === 0, `Fee at P=1: expected 0, got ${fee1}`);
+assert(fee1 < 0.01, `Fee at P=1: expected near-zero, got ${fee1}`);
+
+// Fee at P>1 must still be positive (no negative fee exploit)
+const feeBad = calculateFee(500, 100);
+assert(feeBad > 0, `Fee at P=500: must be positive, got ${feeBad}`);
 
 // ── Merge Fee Tests ──────────────────────────────────────────────────────────
 

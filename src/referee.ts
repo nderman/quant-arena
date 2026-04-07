@@ -112,8 +112,9 @@ export function setRefereeConfig(overrides: Partial<RefereeConfig>): void {
  */
 export function calculateFee(price: number, amount: number): number {
   const peakRate = config.peakFeeRate;
-  // Parabolic decay: highest at 0.5, zero at 0 and 1
-  return amount * peakRate * 4 * price * (1 - price);
+  // Clamp price to valid PM range — prevents negative fees when Binance prices leak in
+  const p = Math.max(0.001, Math.min(0.999, price));
+  return amount * peakRate * 4 * p * (1 - p);
 }
 
 /**
@@ -429,6 +430,16 @@ async function processActionNoLatency(
     if (isMaker) {
       fillPrice *= MAKER_ADVERSE_BUY;
     }
+
+    // Reject if fill price is outside PM range (Binance price contamination via book)
+    if (fillPrice < 0.001 || fillPrice > 1.0) {
+      return {
+        action, filled: false, fillPrice: 0, fillSize: 0,
+        fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
+        toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+      };
+    }
+
     const totalCost = fillPrice * fillSize;
 
     // Makers pay 0% fee; takers pay parabolic fee
@@ -534,6 +545,16 @@ async function processActionNoLatency(
     if (isMaker) {
       fillPrice *= MAKER_ADVERSE_SELL;
     }
+
+    // Reject if fill price is outside PM range
+    if (fillPrice < 0.001 || fillPrice > 1.0) {
+      return {
+        action, filled: false, fillPrice: 0, fillSize: 0,
+        fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
+        toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+      };
+    }
+
     const proceeds = fillPrice * fillSize;
 
     // Makers pay 0% fee; takers pay parabolic fee
