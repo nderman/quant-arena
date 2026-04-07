@@ -13,70 +13,65 @@
 import * as fs from "fs";
 import * as path from "path";
 import { execSync } from "child_process";
-import { fetchJson } from "./http";
+import * as dotenv from "dotenv";
+
+dotenv.config({ path: path.resolve(__dirname, "..", ".env") });
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-4-5-20250514";
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
+const ANALYST_MODEL = process.env.ANALYST_MODEL || "google/gemini-2.0-flash-001";
+const CODER_MODEL = process.env.CODER_MODEL || "anthropic/claude-sonnet-4-5-20250514";
 const MAX_RETRIES = 3;
 const ENGINES_DIR = path.resolve(__dirname, "engines");
 const MAX_ENGINES = 8; // don't let the arena get too crowded
 const DATA_DIR = path.resolve(__dirname, "..", "data");
 
-// ── LLM Clients ─────────────────────────────────────────────────────────────
+// ── OpenRouter Client ───────────────────────────────────────────────────────
 
-async function callGemini(prompt: string): Promise<string> {
-  if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY not set");
+async function callLLM(
+  model: string,
+  messages: { role: string; content: string }[],
+  maxTokens = 4096,
+): Promise<string> {
+  if (!OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY not set");
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-  const body = {
-    contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0.7, maxOutputTokens: 4096 },
-  };
-
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-
-  if (!resp.ok) {
-    const err = await resp.text();
-    throw new Error(`Gemini API error ${resp.status}: ${err}`);
-  }
-
-  const data = await resp.json();
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-}
-
-async function callClaude(systemPrompt: string, userPrompt: string): Promise<string> {
-  if (!ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set");
-
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+  const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
+      "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+      "X-Title": "quant-arena-breeder",
     },
     body: JSON.stringify({
-      model: CLAUDE_MODEL,
-      max_tokens: 8192,
-      system: systemPrompt,
-      messages: [{ role: "user", content: userPrompt }],
+      model,
+      max_tokens: maxTokens,
+      messages,
     }),
   });
 
   if (!resp.ok) {
     const err = await resp.text();
-    throw new Error(`Claude API error ${resp.status}: ${err}`);
+    throw new Error(`OpenRouter error ${resp.status} (${model}): ${err}`);
   }
 
   const data = await resp.json();
-  return data.content?.[0]?.text || "";
+  const usage = data.usage;
+  if (usage) {
+    console.log(`[breeder] ${model}: ${usage.prompt_tokens} in / ${usage.completion_tokens} out tokens`);
+  }
+  return data.choices?.[0]?.message?.content || "";
+}
+
+function callAnalyst(prompt: string): Promise<string> {
+  return callLLM(ANALYST_MODEL, [{ role: "user", content: prompt }]);
+}
+
+function callCoder(systemPrompt: string, userPrompt: string): Promise<string> {
+  return callLLM(CODER_MODEL, [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userPrompt },
+  ], 8192);
 }
 
 // ── Arena Intel ─────────────────────────────────────────────────────────────
@@ -155,8 +150,8 @@ Analyze what's working and what's failing. Identify:
 
 Be specific and quantitative. Reference actual trade data. Output your analysis in 300 words or less.`;
 
-  console.log("[breeder] Analyzing arena with Gemini Flash...");
-  return callGemini(prompt);
+  console.log(`[breeder] Analyzing arena with ${ANALYST_MODEL}...`);
+  return callAnalyst(prompt);
 }
 
 // ── Code Generation (Claude Sonnet) ─────────────────────────────────────────
@@ -209,8 +204,8 @@ ${exampleEngine}
 
 Write a NEW engine class named ${className} that implements a strategy designed to beat the current leader based on the analysis above. Be creative but realistic — the referee simulates toxic flow, book walking, and parabolic fees. The engine that wins is the one that manages fees and timing, not the one that trades the most.`;
 
-  console.log("[breeder] Generating engine with Claude Sonnet...");
-  const code = await callClaude(systemPrompt, userPrompt);
+  console.log(`[breeder] Generating engine with ${CODER_MODEL}...`);
+  const code = await callCoder(systemPrompt, userPrompt);
 
   // Strip markdown code fences if Claude includes them despite instructions
   const cleaned = code

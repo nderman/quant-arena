@@ -2,7 +2,7 @@
 set -e
 
 # Config — set your VPS IP here or via env
-REMOTE_HOST="${VPS_HOST:-root@YOUR_VPS_IP}"
+REMOTE_HOST="${VPS_HOST:-root@165.22.29.245}"
 REMOTE_DIR="~/quant-arena"
 
 echo "Deploying to $REMOTE_HOST..."

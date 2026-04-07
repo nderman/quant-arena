@@ -30,9 +30,8 @@ module.exports = {
       autorestart: true,
       env: {
         NODE_ENV: "production",
-        // Set these on the VPS via .env or pm2 env
-        // GEMINI_API_KEY: "",
-        // ANTHROPIC_API_KEY: "",
+        // Set on the VPS: pm2 env quant-breeder OPENROUTER_API_KEY=sk-or-...
+        // OPENROUTER_API_KEY: "",
       },
       exp_backoff_restart_delay: 5000,
       log_date_format: "YYYY-MM-DD HH:mm:ss Z",
