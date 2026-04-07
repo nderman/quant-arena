@@ -20,5 +20,25 @@ module.exports = {
       error_file: "./logs/error.log",
       out_file: "./logs/out.log",
     },
+    {
+      name: "quant-breeder",
+      script: "./dist/breeder.js",
+      args: "--loop",
+      instances: 1,
+      exec_mode: "fork",
+      max_memory_restart: "512M",
+      autorestart: true,
+      env: {
+        NODE_ENV: "production",
+        // Set these on the VPS via .env or pm2 env
+        // GEMINI_API_KEY: "",
+        // ANTHROPIC_API_KEY: "",
+      },
+      exp_backoff_restart_delay: 5000,
+      log_date_format: "YYYY-MM-DD HH:mm:ss Z",
+      merge_logs: true,
+      error_file: "./logs/breeder-error.log",
+      out_file: "./logs/breeder-out.log",
+    },
   ],
 };

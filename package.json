@@ -13,8 +13,11 @@
     "signals": "ts-node src/signals.ts",
     "pulse:test": "ts-node src/pulse.ts",
     "test:unit": "ts-node src/tests/unitTests.ts",
+    "breed": "ts-node src/breeder.ts",
+    "breed:analyze": "ts-node src/breeder.ts --analyze",
+    "breed:loop": "ts-node src/breeder.ts --loop",
     "deploy": "bash scripts/deploy.sh",
-    "logs": "ssh ${VPS_HOST:-root@YOUR_VPS_IP} 'pm2 logs quant-arena --lines 50'"
+    "logs": "ssh ${VPS_HOST:-root@165.22.29.245} 'pm2 logs quant-arena --lines 50'"
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0",
