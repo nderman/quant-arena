@@ -36,21 +36,26 @@ function run(cmd: string): string {
 function getArenaSnapshot(): string {
   const pm2 = run("pm2 ls --no-color");
   const recent = run(`sqlite3 data/ledger.db "SELECT engine_id, action, printf('%.4f',price) as price, printf('%.0f',size) as shares, printf('%.2f',pnl) as pnl, substr(note,1,50) as note FROM trades ORDER BY id DESC LIMIT 20"`);
-  const summary = run(`sqlite3 data/ledger.db "SELECT engine_id, COUNT(*) as trades, printf('%.4f',SUM(fee)) as fees, printf('%.2f',SUM(pnl)) as pnl FROM trades WHERE engine_id NOT LIKE 'bred-p28h' GROUP BY engine_id ORDER BY SUM(pnl) DESC"`);
-  const logs = run("pm2 logs quant-arena --lines 10 --nostream --no-color 2>&1 | tail -10");
+  const lifetimeLb = run(`sqlite3 data/ledger.db "SELECT engine_id, COUNT(*) as trades, printf('%.4f',SUM(fee)) as fees, printf('%.2f',SUM(pnl)) as pnl FROM trades WHERE engine_id NOT LIKE 'bred-p28h' GROUP BY engine_id ORDER BY SUM(pnl) DESC"`);
+  // Current round: extract from latest arena tick output (shows cash, mtm, pnl per engine)
+  const currentRound = run("pm2 logs quant-arena --lines 80 --nostream --no-color 2>&1 | grep 'pnl=' | tail -30");
+  const settlements = run("grep -E '(WIN|LOSS)' logs/out.log 2>/dev/null | tail -10");
   const engines = run("ls src/engines/BredEngine_* 2>/dev/null || echo 'none'");
 
   return `## Process Status
 ${pm2}
 
-## Engine Leaderboard (lifetime, excluding cheater)
-${summary || "No trades yet"}
+## Current Round (live state — cash, MTM, P&L from $50 start)
+${currentRound || "No round data"}
+
+## Recent Settlements
+${settlements || "No settlements yet"}
+
+## Lifetime Leaderboard (all rounds cumulative)
+${lifetimeLb || "No trades yet"}
 
 ## Recent 20 Trades
 ${recent || "No trades yet"}
-
-## Latest Arena Log
-${logs}
 
 ## Bred Engines on Disk
 ${engines}`;
@@ -90,18 +95,19 @@ async function askLLM(userMessage: string, arenaData: string): Promise<string> {
 CRITICAL RULES:
 - NEVER invent, estimate, or round numbers. ONLY use exact values from the data provided below.
 - If a number isn't in the data, say "not available" — do NOT guess.
-- The "fees" column in the leaderboard IS the total fees paid. Do not multiply or recalculate.
-- The "pnl" column is P&L AFTER fees (net). Do not separate fees from P&L.
-- Engines start with $50. Cash can't go below $0. If you see impossible numbers, say the data looks wrong.
-- bred-p28h and bred-4trt were cheaters (merge exploits) — exclude from rankings.
-- Each engine's P&L = final cash - $50 starting cash.
+- There are TWO leaderboards: "Current Round" (live state this round) and "Lifetime" (cumulative across all rounds).
+- When asked for "leaderboard" or "lb", show BOTH. Label them clearly.
+- Current Round data comes from arena logs: cash=X mtm=Y pnl=Z. P&L is from $50 starting cash.
+- Lifetime data comes from the ledger DB: cumulative trades, fees, and P&L across all rounds.
+- bred-p28h and bred-4trt were cheaters — exclude from rankings.
+- Settlement results show WIN/LOSS with exact payout and P&L. Include recent settlements when relevant.
 
 Arena context:
-- 5M Polymarket binary markets (BTC/ETH/XRP up or down)
-- Parabolic fee: max 1.8% at P=0.50, near 0% at edges
+- 5M Polymarket binary markets (BTC up or down in 5-minute windows)
+- Quartic fee: max 1.56% at P=0.50, only 0.20% at P=0.90, near 0% at P=0.99
 - Makers pay 0% fee + 20% rebate
-- Settlement: $1/share if correct, $0 if wrong
-- Breeder generates new AI engines every 6 hours` },
+- Settlement: $1/share if correct, $0 if wrong. Candles resolve every 5 minutes.
+- Breeder generates new AI engines every 1 hour` },
         { role: "user", content: `User asks: "${userMessage}"\n\nCurrent arena data (USE THESE EXACT NUMBERS):\n${arenaData}` },
       ],
     }),

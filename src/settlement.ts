@@ -43,20 +43,16 @@ export interface SettlementResult {
 const trackedMarkets = new Map<string, TrackedMarket>(); // tokenId → market
 const latestBinancePrices = new Map<string, number>();      // symbol → price
 
-let uninitializedMarkets = 0; // skip scan when all markets have open prices
-
 pulseEvents.on("binance_tick", (tick: MarketTick) => {
   const symbol = tick.symbol.toUpperCase();
   latestBinancePrices.set(symbol, tick.midPrice);
 
-  // Only scan if there are uninitialized markets
-  if (uninitializedMarkets <= 0) return;
+  // Fill in open prices for markets whose window has started
   const now = Date.now();
   for (const [, market] of trackedMarkets) {
     if (market.symbol === symbol && market.openPrice <= 0 && now >= market.windowStart) {
       market.openPrice = tick.midPrice;
-      uninitializedMarkets = Math.max(0, uninitializedMarkets - 1);
-      console.log(`[settlement] Open price set via WS: ${symbol} = $${tick.midPrice.toFixed(2)} for ${market.side} ${market.tokenId.slice(0, 16)}... (${uninitializedMarkets} remaining)`);
+      console.log(`[settlement] Open price set via WS: ${symbol} = $${tick.midPrice.toFixed(2)} for ${market.side} ${market.tokenId.slice(0, 16)}...`);
     }
   }
 });
@@ -89,15 +85,13 @@ export async function fetchStrikePrice(symbol: string, windowStartMs: number): P
 export function trackMarketForSettlement(market: TrackedMarket): void {
   const existing = trackedMarkets.get(market.tokenId);
   if (existing) {
-    // Don't overwrite a good openPrice with 0
+    // Update openPrice if we now have a good one
     if (market.openPrice > 0 && existing.openPrice <= 0) {
       existing.openPrice = market.openPrice;
-      uninitializedMarkets = Math.max(0, uninitializedMarkets - 1);
       console.log(`[settlement] Updated open price: ${market.side} ${market.tokenId.slice(0, 16)}... openPrice=$${market.openPrice.toFixed(2)}`);
     }
-    return; // don't overwrite existing tracking
+    return;
   }
-  if (market.openPrice <= 0) uninitializedMarkets++;
   trackedMarkets.set(market.tokenId, market);
   console.log(`[settlement] Tracking ${market.side} token ${market.tokenId.slice(0, 16)}... symbol=${market.symbol} openPrice=$${market.openPrice.toFixed(2)} windowEnd=${new Date(market.windowEnd).toISOString()}`);
 }
@@ -223,5 +217,4 @@ export function getTrackedMarkets(): TrackedMarket[] {
  */
 export function clearTrackedMarkets(): void {
   trackedMarkets.clear();
-  uninitializedMarkets = 0;
 }
