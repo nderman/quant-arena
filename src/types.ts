@@ -21,6 +21,7 @@ export interface OrderBook {
 export interface MarketTick {
   source: "polymarket" | "binance";
   symbol: string;       // e.g. "BTC-USD-5min" or "BTCUSDT"
+  tokenSide?: "UP" | "DOWN"; // which token this tick is for (PM only)
   midPrice: number;
   bestBid: number;
   bestAsk: number;
@@ -64,6 +65,7 @@ export interface EngineState {
   slippageCost: number;
   activeTokenId: string;    // current market's UP (YES) token ID (set by arena on rotation)
   activeDownTokenId: string; // current market's DOWN (NO) token ID
+  expiringTokenIds: Map<string, string>; // old tokenId → its paired opposite tokenId (for correct MERGE pricing)
 }
 
 export interface PositionState {

@@ -88,11 +88,17 @@ function readRecentTrades(): string {
   try {
     const dbPath = path.join(DATA_DIR, "ledger.db");
     if (!fs.existsSync(dbPath)) return "No ledger found.";
-    const output = execSync(
+    const trades = execSync(
       `sqlite3 "${dbPath}" "SELECT engine_id, action, order_type, printf('%.4f',price) as price, printf('%.0f',size) as shares, printf('%.4f',fee) as fee, printf('%.2f',pnl) as pnl, signal_source, substr(note,1,80) as note FROM trades ORDER BY id DESC LIMIT 100"`,
       { encoding: "utf-8", timeout: 5000 },
     );
-    return output || "No trades yet.";
+    const toxicSummary = execSync(
+      `sqlite3 "${dbPath}" "SELECT engine_id, COUNT(*) as trades, SUM(toxic_flow) as toxic_hits, printf('%.1f', 100.0*SUM(toxic_flow)/COUNT(*)) as toxic_pct, printf('%.2f', SUM(pnl)) as total_pnl FROM trades GROUP BY engine_id ORDER BY SUM(pnl) DESC"`,
+      { encoding: "utf-8", timeout: 5000 },
+    );
+    return (trades || "No trades yet.") +
+      "\n\n## Toxic Flow Summary by Engine\n" +
+      (toxicSummary || "No data.");
   } catch {
     return "Could not read ledger.";
   }
@@ -136,19 +142,24 @@ ${engines.join(", ")}
 
 ## Market Rules
 - Polymarket 5M binary markets: BTC/ETH/XRP go UP or DOWN in a 5-minute window
-- Taker fee: amount × 0.018 × 4 × P × (1-P) — max 1.8% at P=0.50, near 0% at edges
-- Maker fee: 0% + 20% rebate of taker fees collected (but 60% fill probability, 5bps adverse selection)
-- Engines can buy UP tokens (YES) or DOWN tokens (NO) via getUpTokenId()/getDownTokenId()
-- Engines can place maker orders via buy(..., { orderType: "maker" })
+- Quartic taker fee: 0.25 × (P×(1-P))² — max 1.56% at P=0.50, only 0.20% at P=0.90, near 0% at P=0.99
+- Maker fee: 0% + 20% rebate of taker fees (but 60% fill probability, 5bps adverse selection)
+- UP and DOWN tokens have independent orderbooks (UP + DOWN ≠ $1 — the gap is merge arb)
 - Settlement: $1 per share if correct, $0 if wrong
-- Merge: buy opposite side + 0.1% flat fee + $0.04 gas (on-chain)
+- Merge: buy opposite side at real book price + dynamic gas (on-chain, 3s finality)
+
+## Key Performance Metrics
+- **sharpeRatio** (in allResults): profit-to-costs ratio. Higher = better risk-adjusted returns.
+- **Toxic Flow %** (in toxic flow summary): how often Binance moved against the engine during execution. High toxic % = engine is getting picked off by HFTs.
+- Winning engines have HIGH Sharpe (>2) AND LOW toxic flow (<20%). An engine with high P&L but 50% toxic hits is lucky, not skilled.
+- Prioritize strategies that AVOID toxic flow (trade during quiet periods, use maker orders) over strategies that trade frequently.
 
 ## Your Task
 Analyze what's working and what's failing. Identify:
-1. Which strategies are profitable and WHY (edge vs fees vs timing)
+1. Which strategies are profitable and WHY (edge vs fees vs timing vs toxic avoidance)
 2. Which strategies are losing and what specific flaw causes the losses
-3. What UNTRIED approach could beat the current leader
-4. Whether maker orders, DOWN token bets, or specific entry timing could help
+3. What UNTRIED approach could beat the current leader (consider: maker-only, toxic flow avoidance, Sharpe optimization)
+4. Whether maker orders, DOWN token bets, merge arb, or specific entry timing could help
 
 Be specific and quantitative. Reference actual trade data. Output your analysis in 300 words or less.`;
 
@@ -185,9 +196,12 @@ The engine must:
 - Optionally use { orderType: "maker" } for 0% fee maker orders
 - Clean up state in onRoundEnd()
 
-Fee formula: fee = amount × 0.018 × 4 × P × (1-P)
-At P=0.50: 1.8% (kills most edges). At P=0.90: 0.65%. At P=0.99: 0.07%.
-Maker orders: 0% fee but only 60% fill probability and 5bps adverse selection.`;
+Quartic fee: fee = amount × 0.25 × (P×(1-P))²
+At P=0.50: 1.56% (kills most edges). At P=0.90: 0.20% (sweet spot). At P=0.99: 0.003%.
+Maker orders: 0% fee but only 60% fill probability and 5bps adverse selection.
+UP and DOWN tokens have independent books (UP + DOWN ≠ $1) — merge arb exists in the gap.
+The arena tracks Sharpe ratio (profit/costs) and toxic flow (adverse selection hits).
+Engines that avoid toxic flow and maximize Sharpe survive evolution; high-frequency P&L chasers get pruned.`;
 
   const userPrompt = `## Analysis of Current Arena
 ${analysis}
@@ -239,41 +253,43 @@ function validateEngine(_filePath: string): { valid: boolean; error?: string } {
 
 function pruneEngines(intel: any): void {
   const engines = listEngines();
-  const bredEngines = engines.filter(e => e.startsWith("BredEngine_"));
+  const prunableEngines = engines.filter(e => e !== "BaseEngine");
 
-  if (bredEngines.length < MAX_ENGINES - 4) return; // 4 slots reserved for built-in engines
+  if (prunableEngines.length <= MAX_ENGINES) return;
 
-  // Find the worst bred engine by P&L
+  // How many to prune this cycle
+  const toPrune = Math.min(prunableEngines.length - MAX_ENGINES, 5);
+
   if (!intel?.allResults) return;
 
-  let worstId = "";
-  let worstPnl = Infinity;
-  for (const result of intel.allResults) {
-    if (!result.engineId.startsWith("bred-engine-")) continue;
-    if (result.totalPnl < worstPnl) {
-      worstPnl = result.totalPnl;
-      worstId = result.engineId;
+  // Rank ALL engines by P&L (worst first) — built-in engines are prunable too
+  const ranked = intel.allResults
+    .sort((a: any, b: any) => a.totalPnl - b.totalPnl);
+
+  if (!fs.existsSync(ARCHIVE_DIR)) fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
+
+  let pruned = 0;
+  for (const result of ranked) {
+    if (pruned >= toPrune) break;
+
+    const worstFile = prunableEngines.find(f => {
+      try {
+        const content = fs.readFileSync(path.join(ENGINES_DIR, f + ".ts"), "utf-8");
+        return content.includes(`id = "${result.engineId}"`);
+      } catch { return false; } // file already pruned
+    });
+
+    if (worstFile) {
+      console.log(`[breeder] Pruning #${pruned + 1}: ${worstFile} (P&L: $${result.totalPnl.toFixed(2)})`);
+      const srcPath = path.join(ENGINES_DIR, worstFile + ".ts");
+      const archivePath = path.join(ARCHIVE_DIR, `${worstFile}_pruned_${Date.now()}.ts`);
+      fs.copyFileSync(srcPath, archivePath);
+      fs.unlinkSync(srcPath);
+      pruned++;
     }
   }
 
-  if (!worstId) return;
-
-  // Map engine ID back to filename
-  const worstFile = bredEngines.find(f => {
-    const content = fs.readFileSync(path.join(ENGINES_DIR, f + ".ts"), "utf-8");
-    return content.includes(`id = "${worstId}"`);
-  });
-
-  if (worstFile) {
-    console.log(`[breeder] Pruning worst performer: ${worstFile} (P&L: $${worstPnl.toFixed(2)})`);
-    // Archive before deleting
-    if (!fs.existsSync(ARCHIVE_DIR)) fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
-    const srcPath = path.join(ENGINES_DIR, worstFile + ".ts");
-    const archivePath = path.join(ARCHIVE_DIR, `${worstFile}_pruned_${Date.now()}.ts`);
-    fs.copyFileSync(srcPath, archivePath);
-    fs.unlinkSync(srcPath);
-    console.log(`[breeder] Archived to ${archivePath}`);
-  }
+  if (pruned > 0) console.log(`[breeder] Pruned ${pruned} engines (${prunableEngines.length - pruned} remaining)`);
 }
 
 // ── Main Breed Loop ─────────────────────────────────────────────────────────
@@ -357,7 +373,7 @@ if (args.includes("--analyze")) {
   }).catch(console.error);
 } else if (args.includes("--loop")) {
   // Continuous breeding loop — run after each round
-  const intervalMs = 6 * 3600_000; // every 6 hours
+  const intervalMs = 1 * 3600_000; // every 1 hour (accelerated evolution)
   console.log(`[breeder] Starting continuous loop (every ${intervalMs / 3600_000}h)`);
   breed().catch(console.error);
   setInterval(() => breed().catch(console.error), intervalMs);

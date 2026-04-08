@@ -38,7 +38,7 @@ export class MeanRevertEngine extends AbstractEngine {
       if (absDeviation < this.exitThreshold) {
         const exit = this.cheapestExit(mid, pos.shares);
         if (exit.method === "MERGE") {
-          return [this.merge(this.tokenId, pos.shares * mid, {
+          return [this.merge(this.tokenId, pos.shares, {
             note: `reversion complete, merge saves $${exit.savings.toFixed(4)}`,
             signalSource: "mean_revert_exit",
           })];

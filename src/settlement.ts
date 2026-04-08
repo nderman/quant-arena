@@ -13,6 +13,7 @@
 
 import { pulseEvents } from "./pulse";
 import { CONFIG } from "./config";
+import { fetchJson } from "./http";
 import type { EngineState, MarketTick } from "./types";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -25,6 +26,7 @@ export interface TrackedMarket {
   openPrice: number;       // Binance price at candle open (strike)
   symbol: string;          // e.g. "BTCUSDT"
   settlementDelay?: number; // random oracle purgatory delay (ms), set on first check
+  closePrice?: number;     // Binance price snapshot at window end (locked at expiry)
 }
 
 export interface SettlementResult {
@@ -58,6 +60,25 @@ pulseEvents.on("binance_tick", (tick: MarketTick) => {
     }
   }
 });
+
+// ── Strike Price Fetch ──────────────────────────────────────────────────
+
+/**
+ * Fetch the strike price (previous 5m candle close) from Binance kline API.
+ * Returns 0 on failure — the WS-reactive fallback will fill it in later.
+ */
+export async function fetchStrikePrice(symbol: string, windowStartMs: number): Promise<number> {
+  try {
+    const startTime = windowStartMs - 300_000; // previous candle's open
+    const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=5m&startTime=${startTime}&limit=1`;
+    const klines = await fetchJson<any[]>(url, 3000);
+    if (klines && klines.length > 0) {
+      const close = parseFloat(klines[0][4]); // index 4 = close price
+      if (close > 0) return close;
+    }
+  } catch { /* fallback to WS reactive path */ }
+  return 0;
+}
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
@@ -95,6 +116,12 @@ export function settleExpiredMarkets(
   for (const [tokenId, market] of trackedMarkets) {
     if (now < market.windowEnd) continue; // not expired yet
 
+    // Snapshot Binance price at window end — locked so engines can't trade on known outcomes
+    if (market.closePrice == null) {
+      const livePrice = latestBinancePrices.get(market.symbol);
+      if (livePrice) market.closePrice = livePrice;
+    }
+
     // Oracle purgatory: settlement doesn't happen instantly after window end.
     // Random delay (30s-2min) simulates UMA/Chainlink oracle lag.
     // Cash is effectively locked during this period.
@@ -105,8 +132,8 @@ export function settleExpiredMarkets(
     }
     if (now < market.windowEnd + market.settlementDelay) continue;
 
-    // Get current Binance price for this symbol
-    const binancePrice = latestBinancePrices.get(market.symbol);
+    // Use the snapshot price taken at window end (not current live price)
+    const binancePrice = market.closePrice;
     if (!binancePrice || market.openPrice <= 0) {
       // Stale market with no price data — clean up if expired > 5 min ago
       if (now - market.windowEnd > 300_000) trackedMarkets.delete(tokenId);

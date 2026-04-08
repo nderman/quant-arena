@@ -15,13 +15,14 @@ import * as fs from "fs";
 import * as path from "path";
 import { CONFIG } from "./config";
 import { pulseEvents, startSimulatedPulse, startPmChannel, startBinanceChannel, startMarketRotation, setPmSubscriptionTokens, shutdown as shutdownPulse } from "./pulse";
-import { processActions, markToMarket, clearFeePool } from "./referee";
-import { recordFill, recordRoundStart, recordRoundEnd, getRoundSummary, closeDb } from "./ledger";
+import { processActions, processMergeActions, markToMarket, clearFeePool, clearFeePoolForMarket } from "./referee";
+import { recordFill, recordRoundStart, recordRoundEnd, getRoundSummary, closeDb, flushLedger } from "./ledger";
 import { fetchSignalSnapshot } from "./signals";
 import { discoverCryptoMarkets, discoverUpDownMarkets, discover5mMarkets } from "./discovery";
-import { settleExpiredMarkets, trackMarketForSettlement, clearTrackedMarkets } from "./settlement";
+import { settleExpiredMarkets, trackMarketForSettlement, clearTrackedMarkets, fetchStrikePrice } from "./settlement";
 import type {
   BaseEngine,
+  EngineAction,
   EngineState,
   MarketTick,
   SignalSnapshot,
@@ -112,6 +113,7 @@ function createEngineState(engineId: string): EngineState {
     slippageCost: 0,
     activeTokenId: currentActiveTokenId,
     activeDownTokenId: currentActiveDownTokenId,
+    expiringTokenIds: new Map(),
   };
 }
 
@@ -147,6 +149,7 @@ async function runRound(
   // Track last tick for mark-to-market (PM only — Binance prices are in a different range)
   let lastPmTick: MarketTick | undefined;
   let tickCount = 0;
+  const allPendingMerges: { engineId: string; state: EngineState; merges: EngineAction[] }[] = [];
 
   // ── Fetch signals periodically (every 60s) ──
   let latestSignals: SignalSnapshot | undefined;
@@ -186,28 +189,47 @@ async function runRound(
           continue;
         }
 
-        // Process through referee (fees, latency, toxic flow)
-        const fills = await processActions(actions, state);
+        // Process CLOB actions (BUY/SELL) — merges deferred for global on-chain delay
+        const { results: fills, pendingMerges } = await processActions(actions, state);
 
-        // Record to ledger
+        // Record CLOB fills to ledger
         for (const fill of fills) {
           if (fill.filled) {
             recordFill(roundId, engine.id, fill, state, fill.pnl);
-
             if (fill.toxicFlowHit) {
               console.log(`[arena] ${engine.id} TOXIC FLOW: ${fill.action.side} ${fill.fillSize}@${fill.fillPrice.toFixed(4)} (slippage: ${fill.slippage.toFixed(4)})`);
             }
           }
+        }
+
+        // Queue merges for global delay
+        if (pendingMerges.length > 0) {
+          allPendingMerges.push({ engineId: engine.id, state, merges: pendingMerges });
         }
       } catch (err: any) {
         console.error(`[arena] Engine ${engine.id} error on tick:`, err.message);
       }
     }
 
+    // ── Process all pending MERGEs with single on-chain delay ──
+    if (allPendingMerges.length > 0) {
+      await new Promise(resolve => setTimeout(resolve, CONFIG.ON_CHAIN_LATENCY_MS));
+      for (const { engineId, state, merges } of allPendingMerges) {
+        const mergeFills = await processMergeActions(merges, state);
+        for (const fill of mergeFills) {
+          if (fill.filled) recordFill(roundId, engineId, fill, state, fill.pnl);
+        }
+      }
+      allPendingMerges.length = 0;
+    }
+
     // ── Settlement check (every 50 ticks) ──
     if (tickCount % 50 === 0) {
       settleExpiredMarkets(statesForSettlement);
     }
+
+    // Flush ledger buffer to disk every 50 ticks (not every tick — defeats buffering)
+    if (tickCount % 50 === 0) flushLedger();
 
     // Periodic status (every 100 ticks, PM price only)
     if (tickCount % 100 === 0 && lastPmTick) {
@@ -366,18 +388,28 @@ async function main(): Promise<void> {
         console.log(`  DOWN token: ${pick.noTokenId.slice(0, 20)}...\n`);
 
         // Register initial market + all discovered 5M markets for settlement (both UP and DOWN tokens)
-        for (const m of all.filter(m => m.slug?.includes("-5m-"))) {
+        const fiveMinMarkets = all.filter(m => m.slug?.includes("-5m-"));
+        const strikes = await Promise.allSettled(
+          fiveMinMarkets.map(m => {
+            const sym = (m.slug.split("-updown-")[0]?.toUpperCase() || "BTC") + "USDT";
+            return fetchStrikePrice(sym, new Date(m.endDate).getTime() - 300_000);
+          })
+        );
+        for (let i = 0; i < fiveMinMarkets.length; i++) {
+          const m = fiveMinMarkets[i];
           const tokenSlug = m.slug.split("-updown-")[0]?.toUpperCase() || "BTC";
           const windowStart = new Date(m.endDate).getTime() - 300_000;
           const windowEnd = new Date(m.endDate).getTime();
           const symbol = tokenSlug + "USDT";
+          const sr = strikes[i];
+          const openPrice = sr.status === "fulfilled" ? sr.value : 0;
           trackMarketForSettlement({
             tokenId: m.yesTokenId, side: "UP",
-            windowStart, windowEnd, openPrice: 0, symbol,
+            windowStart, windowEnd, openPrice, symbol,
           });
           trackMarketForSettlement({
             tokenId: m.noTokenId, side: "DOWN",
-            windowStart, windowEnd, openPrice: 0, symbol,
+            windowStart, windowEnd, openPrice, symbol,
           });
         }
       } else {
@@ -406,19 +438,28 @@ async function main(): Promise<void> {
       const markets = await discover5mMarkets({ tokens: ["btc", "eth", "xrp"] });
       if (markets.length === 0) return null;
 
-      // Register all discovered markets for settlement (both UP and DOWN tokens)
-      for (const m of markets) {
+      // Fetch strike prices in parallel, then register for settlement
+      const strikeResults = await Promise.allSettled(
+        markets.map(m => {
+          const sym = (m.slug.split("-updown-")[0]?.toUpperCase() || "BTC") + "USDT";
+          return fetchStrikePrice(sym, new Date(m.endDate).getTime() - 300_000);
+        })
+      );
+      for (let i = 0; i < markets.length; i++) {
+        const m = markets[i];
         const tokenSlug = m.slug.split("-updown-")[0]?.toUpperCase() || "BTC";
         const binanceSymbol = tokenSlug + "USDT";
         const windowStart = new Date(m.endDate).getTime() - 300_000;
         const windowEnd = new Date(m.endDate).getTime();
+        const sr2 = strikeResults[i];
+        const openPrice = sr2.status === "fulfilled" ? sr2.value : 0;
         trackMarketForSettlement({
           tokenId: m.yesTokenId, side: "UP",
-          windowStart, windowEnd, openPrice: 0, symbol: binanceSymbol,
+          windowStart, windowEnd, openPrice, symbol: binanceSymbol,
         });
         trackMarketForSettlement({
           tokenId: m.noTokenId, side: "DOWN",
-          windowStart, windowEnd, openPrice: 0, symbol: binanceSymbol,
+          windowStart, windowEnd, openPrice, symbol: binanceSymbol,
         });
       }
 
@@ -428,7 +469,11 @@ async function main(): Promise<void> {
       );
       const picked = markets[0];
 
-      // Update all engine states with both UP and DOWN tokens
+      // Clean up fee pool for rotated-out markets
+      if (currentActiveTokenId) clearFeePoolForMarket(currentActiveTokenId);
+      if (currentActiveDownTokenId) clearFeePoolForMarket(currentActiveDownTokenId);
+
+      // Update to new market — old positions settle via settlement.ts ($1 or $0)
       currentActiveTokenId = picked.yesTokenId;
       currentActiveDownTokenId = picked.noTokenId;
       if (activeStates) {
@@ -487,6 +532,7 @@ async function main(): Promise<void> {
 // ── Graceful shutdown ────────────────────────────────────────────────────────
 
 function gracefulShutdown(code = 0): void {
+  flushLedger(); // commit buffered trades before closing
   shutdownPulse();
   closeDb();
   process.exit(code);

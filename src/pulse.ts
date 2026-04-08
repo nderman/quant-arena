@@ -30,18 +30,62 @@ let pmBookHeartbeat: ReturnType<typeof setInterval> | null = null;
 let pmPriceHeartbeat: ReturnType<typeof setInterval> | null = null;
 let binanceHeartbeat: ReturnType<typeof setInterval> | null = null;
 
-// Latest books for the referee to peek at during latency window
-let latestPmBook: OrderBook = { bids: [], asks: [], timestamp: 0 };
-let latestBinanceBook: OrderBook = { bids: [], asks: [], timestamp: 0 };
+// Dual orderbooks: UP and DOWN tokens have independent books (UP + DOWN ≠ $1.00)
+// The gap between them is where merge arb profit lives
+const emptyBook: OrderBook = { bids: [], asks: [], timestamp: 0 };
+let latestUpBook: OrderBook = { ...emptyBook };
+let latestDownBook: OrderBook = { ...emptyBook };
+let latestBinanceBook: OrderBook = { ...emptyBook };
 let lastPmDataTs = 0; // timestamp of last PM data received
 let staleCheckInterval: ReturnType<typeof setInterval> | null = null;
 
-export function getLatestPmBook(): OrderBook { return latestPmBook; }
+// ── Binance Volume Tracking (for toxic flow scaling) ────────────────────────
+const binanceVolState = new Map<string, { prevTotalSize: number; sizeChange: number; avgChange: number }>();
+
+function trackBinanceVolume(symbol: string, book: OrderBook): void {
+  const totalSize = book.bids.reduce((s, l) => s + l.size, 0) + book.asks.reduce((s, l) => s + l.size, 0);
+  const prev = binanceVolState.get(symbol);
+  if (!prev) {
+    binanceVolState.set(symbol, { prevTotalSize: totalSize, sizeChange: 0, avgChange: totalSize * 0.05 });
+    return;
+  }
+  const change = Math.abs(totalSize - prev.prevTotalSize);
+  const alpha = 0.1; // EMA smoothing
+  const avgChange = prev.avgChange * (1 - alpha) + change * alpha;
+  binanceVolState.set(symbol, { prevTotalSize: totalSize, sizeChange: change, avgChange });
+}
+
+/** Returns ratio of current book size change to EMA average (>1 = spike) */
+export function getBinanceVolumeSpike(symbol?: string): number {
+  const sym = (symbol || CONFIG.BINANCE_SYMBOL).toUpperCase();
+  const state = binanceVolState.get(sym);
+  if (!state || state.avgChange <= 0) return 0;
+  return state.sizeChange / state.avgChange;
+}
+
+/** Get the UP token's book (backwards compat) */
+export function getLatestPmBook(): OrderBook { return latestUpBook; }
+
+/** Reset both books (call on market rotation to avoid stale data) */
+export function resetBooks(): void {
+  latestUpBook = { bids: [], asks: [], timestamp: 0 };
+  latestDownBook = { bids: [], asks: [], timestamp: 0 };
+}
+
+/** Get the correct book for a specific token */
+export function getBookForToken(tokenId: string): OrderBook {
+  if (tokenId === pmDownTokenId) return latestDownBook;
+  return latestUpBook; // UP token or unknown → UP book
+}
 
 // Both token IDs for subscription (set by arena on discovery)
 let pmSubscriptionTokens: string[] = [];
+let pmUpTokenId = "";
+let pmDownTokenId = "";
 export function setPmSubscriptionTokens(tokens: string[]): void {
   pmSubscriptionTokens = tokens.filter(Boolean);
+  pmUpTokenId = tokens[0] || "";
+  pmDownTokenId = tokens[1] || "";
 }
 function getPmTokens(): string[] {
   if (pmSubscriptionTokens.length > 0) return pmSubscriptionTokens;
@@ -73,7 +117,7 @@ function buildPmTickFromPrice(price: number, assetId: string): MarketTick {
     bestAsk: price,
     spread: 0,
     distanceFrom50: Math.abs(price - 0.5),
-    book: latestPmBook, // attach latest known book
+    book: assetId === pmDownTokenId ? latestDownBook : latestUpBook,
     timestamp: Date.now(),
   };
 }
@@ -135,6 +179,7 @@ function startPmBookChannel(): void {
     console.log("[pulse] PM Book WS connected");
     pmBookReconnectDelay = 1000;
 
+    // Subscribe BOTH tokens — each gets routed to its own book
     pmBookWs?.send(JSON.stringify({
       type: "subscribe",
       channel: "book",
@@ -159,8 +204,14 @@ function startPmBookChannel(): void {
         if (entry.bids || entry.asks) {
           const book = parsePmL2(entry);
           if (book && book.bids.length && book.asks.length) {
-            latestPmBook = book;
-            lastPmDataTs = Date.now(); // book updates count as "alive" for stale detection
+            // Route to correct book based on asset_id
+            const assetId = entry.asset_id || entry.market || "";
+            if (assetId === pmDownTokenId) {
+              latestDownBook = book;
+            } else {
+              latestUpBook = book;
+            }
+            lastPmDataTs = Date.now();
             pulseEvents.emit("pm_book", book);
           }
         }
@@ -229,6 +280,7 @@ function startPmPriceChannel(): void {
               tick.bestBid = bestBid;
               tick.bestAsk = bestAsk;
               tick.spread = bestAsk > 0 && bestBid > 0 ? bestAsk - bestBid : 0;
+              tick.tokenSide = assetId === pmDownTokenId ? "DOWN" : "UP";
               lastPmDataTs = Date.now();
               pulseEvents.emit("tick", tick);
               pulseEvents.emit("pm_tick", tick);
@@ -239,9 +291,11 @@ function startPmPriceChannel(): void {
 
         // ── last_trade_price (older API format) ──
         if (msg.event_type === "last_trade_price") {
+          const assetId = msg.asset_id || "";
           const price = Number(msg.price);
           if (price > 0 && price <= 1) {
-            const tick = buildPmTickFromPrice(price, msg.asset_id || "");
+            const tick = buildPmTickFromPrice(price, assetId);
+            tick.tokenSide = assetId === pmDownTokenId ? "DOWN" : "UP";
             pulseEvents.emit("tick", tick);
             pulseEvents.emit("pm_tick", tick);
           }
@@ -329,6 +383,7 @@ export function startBinanceChannel(): void {
       const book = parseBinanceDepth(data);
       if (book && book.bids.length && book.asks.length) {
         latestBinanceBook = book;
+        trackBinanceVolume(sym, book);
         const tick = buildBinanceTick(book, sym);
         pulseEvents.emit("tick", tick);
         pulseEvents.emit("binance_tick", tick);
@@ -390,7 +445,7 @@ export function startSimulatedPulse(opts: {
       timestamp: Date.now(),
     };
 
-    latestPmBook = book;
+    latestUpBook = book;
 
     const tick: MarketTick = {
       source: "polymarket",
@@ -436,15 +491,19 @@ export function startMarketRotation(
       if (!result || result.yesTokenId === currentToken) return;
 
       currentToken = result.yesTokenId;
+      pmUpTokenId = result.yesTokenId;
+      pmDownTokenId = result.noTokenId;
+      resetBooks(); // clear stale data from previous market
       const bothTokens = [result.yesTokenId, result.noTokenId].filter(Boolean);
-      console.log(`[pulse] Rotating to new market: ${currentToken.slice(0, 20)}... (${bothTokens.length} tokens)`);
+      console.log(`[pulse] Rotating to new market: ${currentToken.slice(0, 20)}... (dual books: UP + DOWN)`);
 
-      // Subscribe BOTH tokens on book and price channels
+      // Subscribe BOTH tokens to book channel — routed to separate books
       if (pmBookWs?.readyState === WebSocket.OPEN) {
         pmBookWs.send(JSON.stringify({
           type: "subscribe", channel: "book", assets_ids: bothTokens,
         }));
       }
+      // Price channel: both tokens
       if (pmPriceWs?.readyState === WebSocket.OPEN) {
         pmPriceWs.send(JSON.stringify({
           assets_ids: bothTokens, type: "market", level: 2, custom_feature_enabled: true,

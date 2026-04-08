@@ -19,9 +19,9 @@ export const CONFIG = {
   ENGINES_DIR:            str("ENGINES_DIR", "./engines"),
 
   // ── Referee ────────────────────────────────────────────────────────────────
-  PEAK_FEE_RATE:          num("PEAK_FEE_RATE", 0.018),                  // 1.8% crypto 2026
-  LATENCY_MS:             num("LATENCY_MS", 300),                        // simulated fill delay
-  MERGE_FEE_RATE:         num("MERGE_FEE_RATE", 0.001),                 // 0.1% flat gas offset
+  PEAK_FEE_RATE:          num("PEAK_FEE_RATE", 0.015625),               // 1.5625% max (quartic formula, Apr 2026)
+  LATENCY_MS:             num("LATENCY_MS", 50),                         // 50ms realistic API/WS lag (500ms delay removed Feb 2026)
+  MERGE_FEE_RATE:         num("MERGE_FEE_RATE", 0),                     // merge contract is free (just gas + opposite buy fee)
   TOXIC_FLOW_ENABLED:     bool("TOXIC_FLOW_ENABLED", true),
   TOXIC_FLOW_PROBABILITY: num("TOXIC_FLOW_PROBABILITY", 0.15),          // 15% chance per fill
   TOXIC_FLOW_BPS:         num("TOXIC_FLOW_BPS", 50),                    // 50bps adverse move
@@ -31,7 +31,8 @@ export const CONFIG = {
   FILL_DECAY_MULTIPLIER:  num("FILL_DECAY_MULTIPLIER", 1.2),           // 1.2x worse per level consumed
 
   // ── Network Layer (Polygon gas + MEV) ──────────────────────────────────────
-  GAS_COST_USD:           num("GAS_COST_USD", 0.04),                    // $0.04 flat per tx
+  GAS_COST_USD:           num("GAS_COST_USD", 0.04),                    // $0.04 base per tx (scales with vol)
+  GAS_VOL_MULTIPLIER:     num("GAS_VOL_MULTIPLIER", 5),                 // gas multiplier at peak vol (5x = $0.20)
   MEV_THRESHOLD_USD:      num("MEV_THRESHOLD_USD", 100),                // orders > $100 get MEV'd
   MEV_SLIPPAGE_BPS:       num("MEV_SLIPPAGE_BPS", 5),                   // 5bps hidden slippage
 
@@ -40,11 +41,15 @@ export const CONFIG = {
   MAKER_REBATE_RATE:      num("MAKER_REBATE_RATE", 0.20),               // makers get 20% of taker fees collected
   MAKER_ADVERSE_BPS:      num("MAKER_ADVERSE_BPS", 5),                  // 5bps adverse selection on maker fills
   MIN_ORDER_SIZE:          num("MIN_ORDER_SIZE", 5),                     // CLOB rejects < 5 shares
+  MIN_MERGE_SIZE:          num("MIN_MERGE_SIZE", 1),                     // merge is on-chain, not CLOB (1 share min)
 
   // ── Engine Safety ─────────────────────────────────────────────────────────
   ENGINE_TICK_TIMEOUT_MS:  num("ENGINE_TICK_TIMEOUT_MS", 50),            // kill onTick if > 50ms (OpenClaw safety)
   STALE_DATA_THRESHOLD_MS: num("STALE_DATA_THRESHOLD_MS", 30_000),      // force PM reconnect if no data for this long
   STALE_DATA_CHECK_MS:     num("STALE_DATA_CHECK_MS", 10_000),          // how often to check for stale data
+
+  // ── On-Chain ──────────────────────────────────────────────────────────────
+  ON_CHAIN_LATENCY_MS:    num("ON_CHAIN_LATENCY_MS", 3000),              // 3s Polygon tx finality for MERGE
 
   // ── Settlement ────────────────────────────────────────────────────────────
   SETTLEMENT_DELAY_MS_MIN: num("SETTLEMENT_DELAY_MS_MIN", 30_000),      // min oracle purgatory (30s)
@@ -52,7 +57,7 @@ export const CONFIG = {
 
   // ── Oracle / Settlement ────────────────────────────────────────────────────
   ORACLE_NOISE_ENABLED:   bool("ORACLE_NOISE_ENABLED", true),
-  ORACLE_NOISE_BPS:       num("ORACLE_NOISE_BPS", 15),                  // ±15bps std dev vs Binance spot
+  ORACLE_NOISE_BPS:       num("ORACLE_NOISE_BPS", 35),                  // ±35bps std dev vs Binance spot (UMA 30-min TWAP divergence)
 
   // ── Pulse / Data ───────────────────────────────────────────────────────────
   PM_WS_URL:              str("PM_WS_URL", "wss://ws-subscriptions-clob.polymarket.com/ws/market"),

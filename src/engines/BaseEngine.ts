@@ -11,6 +11,7 @@
  */
 
 import { calculateFeeAdjustedEdge, cheaperExit } from "../referee";
+import { getBookForToken } from "../pulse";
 import type {
   BaseEngine as IBaseEngine,
   EngineAction,
@@ -56,10 +57,15 @@ export abstract class AbstractEngine implements IBaseEngine {
 
   /**
    * Determine the cheapest way to exit a position.
-   * At mid-prices, MERGE is often cheaper than SELL due to the parabolic fee.
+   * Uses real opposite-side book price (UP + DOWN ≠ $1.00 in real markets).
    */
-  protected cheapestExit(price: number, shares: number) {
-    return cheaperExit(price, shares);
+  protected cheapestExit(price: number, shares: number, tokenId?: string) {
+    const pos = tokenId ? this.state.positions.get(tokenId) : undefined;
+    const isDown = pos ? pos.side === "NO" : false;
+    const oppositeTokenId = isDown ? this.getUpTokenId() : this.getDownTokenId();
+    const oppositeBook = oppositeTokenId ? getBookForToken(oppositeTokenId) : null;
+    const oppositeAsk = oppositeBook?.asks[0]?.price;
+    return cheaperExit(price, shares, oppositeAsk);
   }
 
   // ── Position Helpers ─────────────────────────────────────────────────────
@@ -72,10 +78,12 @@ export abstract class AbstractEngine implements IBaseEngine {
     return this.state.positions.has(tokenId);
   }
 
-  protected totalPositionValue(currentPrice: number): number {
+  protected totalPositionValue(_currentPrice?: number): number {
     let value = 0;
-    for (const [, pos] of this.state.positions) {
-      value += pos.shares * currentPrice;
+    for (const [tokenId, pos] of this.state.positions) {
+      const book = getBookForToken(tokenId);
+      const bestBid = book.bids[0]?.price;
+      value += pos.shares * (bestBid && bestBid > 0 ? bestBid : pos.avgEntry);
     }
     return value;
   }

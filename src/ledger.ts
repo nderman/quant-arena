@@ -81,7 +81,10 @@ function insertStmt() {
   return _insertStmt;
 }
 
-// ── Write ────────────────────────────────────────────────────────────────────
+// ── Write (buffered for performance) ─────────────────────────────────────────
+
+let logBuffer: any[][] = [];
+const BUFFER_FLUSH_THRESHOLD = 50;
 
 export function recordFill(
   roundId: string,
@@ -92,7 +95,7 @@ export function recordFill(
 ): void {
   if (!fill.filled) return;
 
-  insertStmt().run(
+  logBuffer.push([
     roundId,
     engineId,
     new Date().toISOString(),
@@ -110,7 +113,22 @@ export function recordFill(
     fill.toxicFlowHit ? 1 : 0,
     fill.latencyMs,
     fill.orderType,
-  );
+  ]);
+
+  if (logBuffer.length >= BUFFER_FLUSH_THRESHOLD) {
+    flushLedger();
+  }
+}
+
+/** Commit buffered trades in a single transaction. Call at end of tick cycle. */
+export function flushLedger(): void {
+  if (logBuffer.length === 0) return;
+  const insert = insertStmt();
+  const transaction = getDb().transaction((rows: any[][]) => {
+    for (const row of rows) insert.run(...row);
+  });
+  transaction(logBuffer);
+  logBuffer = [];
 }
 
 export function recordRoundStart(roundId: string): void {

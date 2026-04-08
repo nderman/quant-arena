@@ -2,20 +2,16 @@
  * Quant Farm — Referee
  *
  * High-fidelity trade simulation with:
- * 1. Dynamic Parabolic Fee Model (2026 Polymarket crypto)
- * 2. Latency Injection (300ms delay before fill)
- * 3. Toxic Flow Check (adverse selection during latency window)
- * 4. MERGE action bypass (flat 0.1% gas offset)
- *
- * Fee Formula: fee = amount * peakRate * 4 * P * (1 - P)
- *   - peakRate = 0.018 (1.8% for crypto)
- *   - Maximum at P = 0.50, decays to 0 at P = 0.01 and P = 0.99
- *
- * Borrowed patterns: executor.ts fill logic, sizer.ts edge calculations.
+ * 1. Quartic Fee Model (2026 Polymarket): fee = 0.25 * (P*(1-P))², peaks at 1.56%
+ * 2. Dual Orderbooks: UP and DOWN tokens have independent books (UP + DOWN ≠ $1)
+ * 3. Directional Maker Fills: fill probability scales with Binance momentum
+ * 4. Toxic Flow: adverse selection correlated with Binance delta
+ * 5. MERGE: buy opposite side at real book price + dynamic gas
+ * 6. Fill Decay: reactive MMs pull liquidity as you consume levels
  */
 
 import { CONFIG } from "./config";
-import { getLatestPmBook, pulseEvents } from "./pulse";
+import { getBookForToken, getBinanceVolumeSpike, pulseEvents } from "./pulse";
 import type {
   EngineAction,
   FillResult,
@@ -60,12 +56,17 @@ function addToTakerFeePool(tokenId: string, fee: number, size: number): void {
   takerFeePool.set(tokenId, entry);
 }
 
-/** Calculate maker rebate: pro-rata share of accumulated taker fees based on actual market volume */
+/** Calculate maker rebate: pro-rata share of accumulated taker fees based on actual market volume.
+ *  Debits the pool so the same fees can't be claimed multiple times. */
 function calculateMakerRebate(tokenId: string, fillSize: number): number {
   const entry = takerFeePool.get(tokenId);
   if (!entry || entry.fees <= 0 || entry.volume <= 0) return 0;
   const shareOfPool = Math.min(fillSize / entry.volume, 1);
-  return entry.fees * CONFIG.MAKER_REBATE_RATE * shareOfPool;
+  const rebate = entry.fees * CONFIG.MAKER_REBATE_RATE * shareOfPool;
+  // Debit the pool so these fees can't be claimed again
+  entry.fees = Math.max(0, entry.fees - rebate / CONFIG.MAKER_REBATE_RATE);
+  entry.volume = Math.max(0, entry.volume - fillSize);
+  return rebate;
 }
 
 /** Clear the fee pool (round reset) */
@@ -102,19 +103,22 @@ export function setRefereeConfig(overrides: Partial<RefereeConfig>): void {
 // ── Fee Calculation ──────────────────────────────────────────────────────────
 
 /**
- * 2026 Polymarket Dynamic Probabilistic Fee
+ * 2026 Polymarket Dynamic Taker Fee (Quartic)
  *
- * fee = amount * peakRate * 4 * P * (1 - P)
+ * fee = amount * 0.25 * (P * (1-P))²
  *
- * At P=0.50: fee = amount * 0.018 * 4 * 0.25 = amount * 0.018 (full peak rate)
- * At P=0.90: fee = amount * 0.018 * 4 * 0.09 = amount * 0.00648 (64% discount)
- * At P=0.99: fee = amount * 0.018 * 4 * 0.0099 = amount * 0.000713 (96% discount)
+ * At P=0.50: 1.5625% (maximum — kills most edges at mid-price)
+ * At P=0.90: 0.20% (very manageable — edge trading sweet spot)
+ * At P=0.99: 0.002% (near zero)
+ *
+ * Drops off much faster than the old parabolic curve, heavily favoring edge trades.
  */
 export function calculateFee(price: number, amount: number): number {
-  const peakRate = config.peakFeeRate;
-  // Clamp price to valid PM range — prevents negative fees when Binance prices leak in
   const p = Math.max(0.001, Math.min(0.999, price));
-  return amount * peakRate * 4 * p * (1 - p);
+  const pq = p * (1 - p);
+  // Quartic coefficient = peakRate / 0.0625 (0.0625 = pq² at P=0.50)
+  const coeff = config.peakFeeRate / 0.0625;
+  return amount * coeff * pq * pq;
 }
 
 /**
@@ -123,6 +127,11 @@ export function calculateFee(price: number, amount: number): number {
  */
 export function calculateMergeFee(amount: number): number {
   return amount * config.mergeFeeRate;
+}
+
+/** Round price to PM tick size ($0.001) */
+function tickRound(price: number): number {
+  return Math.round(price * 1000) / 1000;
 }
 
 /**
@@ -136,7 +145,9 @@ export function calculateFeeAdjustedEdge(
   marketPrice: number,
 ): FeeAdjustedEdge {
   const rawEdge = modelProb - marketPrice;
-  const feePerDollar = config.peakFeeRate * 4 * marketPrice * (1 - marketPrice);
+  const pq = marketPrice * (1 - marketPrice);
+  const coeff = config.peakFeeRate / 0.0625;
+  const feePerDollar = coeff * pq * pq;
   const netEdge = rawEdge - feePerDollar;
   return {
     rawEdge,
@@ -171,6 +182,7 @@ function walkBook(
   size: number,
   side: "BUY" | "SELL",
   book: OrderBook,
+  minFillSize: number = CONFIG.MIN_ORDER_SIZE,
 ): { effectivePrice: number; totalCost: number; filledSize: number } | null {
   const levels = side === "BUY" ? book.asks : book.bids;
   if (!levels.length) return null;
@@ -191,9 +203,9 @@ function walkBook(
     if (decayEnabled && levelsConsumed > 0) {
       const decayFactor = Math.pow(decayMult, levelsConsumed);
       if (side === "BUY") {
-        levelPrice = level.price * decayFactor;       // asks get more expensive
+        levelPrice = Math.min(level.price * decayFactor, 0.999);  // cap at PM max
       } else {
-        levelPrice = level.price / decayFactor;       // bids get cheaper (worse for seller)
+        levelPrice = Math.max(level.price / decayFactor, 0.001);  // floor at PM min
       }
     }
 
@@ -205,7 +217,7 @@ function walkBook(
     if (remaining <= 0) break;
   }
 
-  if (filledSize < CONFIG.MIN_ORDER_SIZE) return null;
+  if (filledSize < minFillSize) return null;
 
   return {
     effectivePrice: totalCost / filledSize,
@@ -233,9 +245,15 @@ function simulateToxicFlow(
   }
 
   const absDelta = Math.abs(getBinanceDelta());
-  const toxicProb = absDelta > 0.001 ? 0.90   // Binance moved >10bps → 90% toxic
+  let toxicProb = absDelta > 0.001 ? 0.90     // Binance moved >10bps → 90% toxic
     : absDelta > 0.0005 ? 0.50                 // 5-10bps → 50%
     : config.toxicFlowProbability;              // quiet → base 15%
+
+  // Volume spikes increase toxic flow — large turnover = informed flow
+  const volSpike = getBinanceVolumeSpike();
+  if (volSpike > 3) toxicProb = Math.min(0.95, toxicProb + 0.40);
+  else if (volSpike > 2) toxicProb = Math.min(0.95, toxicProb + 0.20);
+  else if (volSpike > 1.5) toxicProb = Math.min(0.95, toxicProb + 0.10);
 
   if (Math.random() > toxicProb) {
     return { adjustedPrice: action.price, toxicHit: false, slippage: 0 };
@@ -246,8 +264,8 @@ function simulateToxicFlow(
 
   if (action.side === "BUY") {
     const adversePrice = action.price * (1 + bpsMagnitude);
-    // Use current book ask if available and worse
-    const currentBook = getLatestPmBook();
+    // Use the correct token's book (not always UP)
+    const currentBook = getBookForToken(action.tokenId);
     const currentAsk = currentBook.asks[0]?.price ?? action.price;
     const fillPrice = Math.max(currentAsk, adversePrice);
     return {
@@ -257,7 +275,7 @@ function simulateToxicFlow(
     };
   } else if (action.side === "SELL") {
     const adversePrice = action.price * (1 - bpsMagnitude);
-    const currentBook = getLatestPmBook();
+    const currentBook = getBookForToken(action.tokenId);
     const currentBid = currentBook.bids[0]?.price ?? action.price;
     const fillPrice = Math.min(currentBid, adversePrice);
     return {
@@ -287,6 +305,19 @@ async function processActionNoLatency(
   state: EngineState,
 ): Promise<FillResult> {
 
+  // ── TokenId validation: reject trades for unknown tokens ──
+  // Only the current active market's tokens are tradeable. Expired markets settle at $1/$0.
+  if (action.side !== "HOLD") {
+    const isActiveToken = action.tokenId === state.activeTokenId || action.tokenId === state.activeDownTokenId;
+    if (!isActiveToken) {
+      return {
+        action, filled: false, fillPrice: 0, fillSize: 0,
+        fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: 0,
+        toxicFlowHit: false, orderType: action.orderType ?? "taker",
+      };
+    }
+  }
+
   // ── Price sanity: PM prices must be 0-1, reject Binance price contamination ──
   if (action.side !== "HOLD" && action.side !== "MERGE") {
     if (action.price < 0.001 || action.price > 1.0) {
@@ -307,18 +338,16 @@ async function processActionNoLatency(
     };
   }
 
-  // Snapshot the book after batch latency has already been applied
-  const bookSnapshot = getLatestPmBook();
   const actualLatency = config.latencyMs;
 
   // ── MERGE action (on-chain — gas applies here) ──
-  // To merge, you must hold equal YES and NO shares.
-  // size = number of shares to merge (must buy opposite side first).
-  // Cost: opposite-side buy (at 1-price, with parabolic fee) + flat merge fee + gas.
+  // To merge, you buy the opposite token and redeem both for $1.
+  // Cost: walk the opposite token's REAL book (not 1-price), pay fees + gas.
+  // Merge arb exists because UP_ask + DOWN_ask > $1 (the market gap).
   if (action.side === "MERGE") {
     // Must hold a position to merge — reject if no position or insufficient shares
     const pos = state.positions.get(action.tokenId);
-    if (!pos || pos.shares < CONFIG.MIN_ORDER_SIZE) {
+    if (!pos || pos.shares < CONFIG.MIN_MERGE_SIZE) {
       return {
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
@@ -328,7 +357,7 @@ async function processActionNoLatency(
 
     // Clamp merge size to actual position — can't merge more than you hold
     const shares = Math.min(action.size, pos.shares);
-    if (shares < CONFIG.MIN_ORDER_SIZE) {
+    if (shares < CONFIG.MIN_MERGE_SIZE) {
       return {
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
@@ -336,11 +365,24 @@ async function processActionNoLatency(
       };
     }
 
-    // Use position's avgEntry as our side price (NOT action.price which engines can set to anything)
-    // This is the real cost we paid — the opposite side costs (1 - avgEntry)
-    const ourPrice = pos.avgEntry;
-    const oppositePrice = 1 - ourPrice;
-    const oppositeCost = oppositePrice * shares;
+    // Walk the OPPOSITE token's real book to buy the other side
+    // For expiring tokens, use the stored paired opposite (not the current active market)
+    const storedOpposite = state.expiringTokenIds?.get(action.tokenId);
+    const isHoldingDown = pos.side === "NO";
+    const oppositeTokenId = storedOpposite || (isHoldingDown ? state.activeTokenId : state.activeDownTokenId);
+    const oppositeBook = getBookForToken(oppositeTokenId);
+    const oppositeWalk = walkBook(shares, "BUY", oppositeBook, CONFIG.MIN_MERGE_SIZE);
+
+    if (!oppositeWalk) {
+      return {
+        action, filled: false, fillPrice: 0, fillSize: 0,
+        fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
+        toxicFlowHit: false, orderType: "taker",
+      };
+    }
+
+    const oppositePrice = oppositeWalk.effectivePrice;
+    const oppositeCost = oppositeWalk.totalCost;
     const oppositeFee = calculateFee(oppositePrice, oppositeCost);
 
     // Flat merge fee on the merged value ($1 per pair)
@@ -348,7 +390,10 @@ async function processActionNoLatency(
     const mergeFlatFee = calculateMergeFee(mergeValue);
 
     // Gas cost for the merge transaction (on-chain contract action)
-    const gasCost = CONFIG.GAS_COST_USD;
+    // Scales with Binance volatility — gas spikes during high-vol events
+    const absDelta = Math.abs(getBinanceDelta());
+    const volMultiplier = 1 + (CONFIG.GAS_VOL_MULTIPLIER - 1) * Math.min(absDelta / 0.005, 1);
+    const gasCost = CONFIG.GAS_COST_USD * volMultiplier;
 
     const totalCost = oppositeCost + oppositeFee + mergeFlatFee + gasCost;
     const totalFee = oppositeFee + mergeFlatFee + gasCost;
@@ -361,9 +406,8 @@ async function processActionNoLatency(
       };
     }
 
-    // P&L: merge payout ($1/share) minus what we paid for our side minus opposite buy cost
-    // With correct pricing: pnl = $1 - avgEntry - (1-avgEntry) - fees = -fees (always a small loss)
-    const costBasis = ourPrice * shares;
+    // P&L: merge payout ($1/share) minus our cost basis minus opposite buy cost
+    const costBasis = pos.avgEntry * shares;
     const pnl = mergeValue - costBasis - totalCost;
 
     state.cashBalance -= totalCost;
@@ -372,11 +416,9 @@ async function processActionNoLatency(
     state.roundPnl += pnl;
 
     // Remove merged shares from position
-    if (pos) {
-      pos.shares -= shares;
-      pos.costBasis -= costBasis;
-      if (pos.shares <= 0.001) state.positions.delete(action.tokenId);
-    }
+    pos.shares -= shares;
+    pos.costBasis -= costBasis;
+    if (pos.shares <= 0.001) state.positions.delete(action.tokenId);
 
     return {
       action, filled: true, fillPrice: 1.0, fillSize: shares,
@@ -394,14 +436,26 @@ async function processActionNoLatency(
     };
   }
 
-  // ── Maker fill probability (queue position simulation) ──
+  // ── Directional maker fill probability ──
+  // In a trending market, asks fill instantly (takers snipe them), bids never fill.
   const isMakerOrder = action.orderType === "maker";
-  if (isMakerOrder && Math.random() > CONFIG.MAKER_FILL_PROBABILITY) {
-    return {
-      action, filled: false, fillPrice: 0, fillSize: 0,
-      fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
-      toxicFlowHit: false, orderType: "maker",
-    };
+  if (isMakerOrder) {
+    const delta = getBinanceDelta();
+    const sensitivity = 50.0; // 10bps move = 50% adjustment
+    const adjustment = delta * sensitivity;
+    let fillProb = CONFIG.MAKER_FILL_PROBABILITY;
+    if (action.side === "BUY") {
+      fillProb = Math.max(0.05, Math.min(0.95, fillProb - adjustment)); // price up → bids less likely
+    } else {
+      fillProb = Math.max(0.05, Math.min(0.95, fillProb + adjustment)); // price up → asks more likely
+    }
+    if (Math.random() > fillProb) {
+      return {
+        action, filled: false, fillPrice: 0, fillSize: 0,
+        fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
+        toxicFlowHit: false, orderType: "maker",
+      };
+    }
   }
 
   // ── Toxic flow check (re-check book after latency) ──
@@ -410,10 +464,15 @@ async function processActionNoLatency(
     ? { adjustedPrice: action.price, toxicHit: false, slippage: 0 }
     : simulateToxicFlow(action);
 
+  // Detect DOWN token for position side tracking
+  const isDownToken = !!(state.activeDownTokenId && action.tokenId === state.activeDownTokenId);
+
   // ── BUY action (off-chain CLOB — no gas) ──
+  // Each token has its own real book — no price inversion needed
   if (action.side === "BUY") {
     const isMaker = action.orderType === "maker";
-    const walked = walkBook(action.size, "BUY", bookSnapshot);
+    const tokenBook = getBookForToken(action.tokenId);
+    const walked = walkBook(action.size, "BUY", tokenBook);
 
     // Reject if no book or insufficient liquidity
     if (!walked) {
@@ -430,6 +489,7 @@ async function processActionNoLatency(
     if (isMaker) {
       fillPrice *= MAKER_ADVERSE_BUY;
     }
+    fillPrice = tickRound(fillPrice);
 
     // Reject if fill price is outside PM range (Binance price contamination via book)
     if (fillPrice < 0.001 || fillPrice > 1.0) {
@@ -483,6 +543,7 @@ async function processActionNoLatency(
     state.tradeCount++;
 
     // Update position
+    const positionSide = isDownToken ? "NO" : "YES";
     const existing = state.positions.get(action.tokenId);
     if (existing) {
       const newShares = existing.shares + fillSize;
@@ -493,7 +554,7 @@ async function processActionNoLatency(
     } else {
       state.positions.set(action.tokenId, {
         tokenId: action.tokenId,
-        side: "YES",
+        side: positionSide,
         shares: fillSize,
         avgEntry: fillPrice,
         costBasis: totalCost,
@@ -530,7 +591,9 @@ async function processActionNoLatency(
       };
     }
 
-    const walked = walkBook(sellSize, "SELL", bookSnapshot);
+    // Each token has its own real book — no price inversion needed
+    const tokenBook = getBookForToken(action.tokenId);
+    const walked = walkBook(sellSize, "SELL", tokenBook);
     if (!walked) {
       return {
         action, filled: false, fillPrice: 0, fillSize: 0,
@@ -545,6 +608,7 @@ async function processActionNoLatency(
     if (isMaker) {
       fillPrice *= MAKER_ADVERSE_SELL;
     }
+    fillPrice = tickRound(fillPrice);
 
     // Reject if fill price is outside PM range
     if (fillPrice < 0.001 || fillPrice > 1.0) {
@@ -620,17 +684,33 @@ async function processActionNoLatency(
 
 /**
  * Process multiple actions from an engine.
- * Latency is applied once for the whole batch (not per-action)
- * to avoid blocking N * 300ms on the event loop.
+ * CLOB actions (BUY/SELL) get standard API latency (50ms).
+ * MERGE actions are queued and returned for deferred processing (on-chain latency handled by arena).
  */
 export async function processActions(
   actions: EngineAction[],
   state: EngineState,
-): Promise<FillResult[]> {
-  // Apply latency once for the batch
-  if (actions.length > 0 && actions.some(a => a.side !== "HOLD")) {
+): Promise<{ results: FillResult[]; pendingMerges: EngineAction[] }> {
+  const nonMerge = actions.filter(a => a.side !== "MERGE");
+  const merges = actions.filter(a => a.side === "MERGE");
+  const results: FillResult[] = [];
+
+  // Standard API latency for CLOB actions
+  if (nonMerge.length > 0 && nonMerge.some(a => a.side !== "HOLD")) {
     await new Promise(resolve => setTimeout(resolve, config.latencyMs));
   }
+  for (const action of nonMerge) {
+    results.push(await processActionNoLatency(action, state));
+  }
+
+  return { results, pendingMerges: merges };
+}
+
+/** Process deferred MERGE actions (call after global on-chain delay). */
+export async function processMergeActions(
+  actions: EngineAction[],
+  state: EngineState,
+): Promise<FillResult[]> {
   const results: FillResult[] = [];
   for (const action of actions) {
     results.push(await processActionNoLatency(action, state));
@@ -643,26 +723,30 @@ export async function processActions(
 /**
  * Calculates whether merging is cheaper than selling at the current price.
  *
- * At P=0.50: sell fee = 1.8%, merge fee = 0.1% → MERGE wins
- * At P=0.95: sell fee = 0.34%, merge fee = 0.1% → MERGE still wins but margin shrinks
- * At P=0.99: sell fee = 0.07%, merge fee = 0.1% → SELL wins
+ * Uses REAL opposite-side book price (UP + DOWN ≠ $1.00 in real markets).
+ * The gap between them is where merge arb profit lives.
  *
- * Returns the cheaper exit method and cost savings.
+ * @param price - current token's mid price (what you'd sell at)
+ * @param shares - number of shares to exit
+ * @param oppositeAsk - best ask on the OPPOSITE token's book (real cost to buy other side)
+ *                      If not provided, falls back to 1-price (theoretical)
  */
 export function cheaperExit(
   price: number,
   shares: number,
+  oppositeAsk?: number,
 ): { method: "SELL" | "MERGE"; sellFee: number; mergeFee: number; savings: number } {
   const sellProceeds = price * shares;
   const sellFee = calculateFee(price, sellProceeds);
 
-  // Merge requires buying the opposite side too
-  const oppositePrice = 1 - price;
-  const oppositeCost = oppositePrice * shares;
-  const oppositeBuyFee = calculateFee(oppositePrice, oppositeCost);
+  // Merge requires buying the opposite side from its real book
+  const oppPrice = oppositeAsk ?? (1 - price);
+  const oppositeCost = oppPrice * shares;
+  const oppositeBuyFee = calculateFee(oppPrice, oppositeCost);
   const mergeValue = shares * 1.0; // $1 per pair
   const mergeFlatFee = calculateMergeFee(mergeValue);
-  const totalMergeCost = oppositeBuyFee + mergeFlatFee;
+  const gasCost = CONFIG.GAS_COST_USD; // base gas (excludes vol spike — conservative estimate)
+  const totalMergeCost = oppositeBuyFee + mergeFlatFee + gasCost;
 
   if (totalMergeCost < sellFee) {
     return { method: "MERGE", sellFee, mergeFee: totalMergeCost, savings: sellFee - totalMergeCost };
@@ -674,11 +758,20 @@ export function cheaperExit(
 
 /**
  * Calculate current value of all open positions in an engine state.
+ * Uses each token's own book for valuation (UP and DOWN have independent prices).
  */
-export function markToMarket(state: EngineState, currentPrice: number): number {
+export function markToMarket(state: EngineState, _currentPrice?: number): number {
   let value = 0;
-  for (const [, pos] of state.positions) {
-    value += pos.shares * currentPrice;
+  for (const [tokenId, pos] of state.positions) {
+    const book = getBookForToken(tokenId);
+    // Value at best bid (what you could sell for right now)
+    const bestBid = book.bids[0]?.price;
+    if (bestBid && bestBid > 0) {
+      value += pos.shares * bestBid;
+    } else {
+      // Fallback: use avgEntry if no book data
+      value += pos.shares * pos.avgEntry;
+    }
   }
   return value;
 }
