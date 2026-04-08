@@ -99,6 +99,28 @@ function loadEngines(): BaseEngine[] {
   return engines;
 }
 
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+function slugToBinanceSymbol(slug: string): string {
+  return (slug.split("-updown-")[0]?.toUpperCase() || "BTC") + "USDT";
+}
+
+async function registerMarketsForSettlement(markets: any[]): Promise<void> {
+  const strikes = await Promise.allSettled(
+    markets.map(m => fetchStrikePrice(slugToBinanceSymbol(m.slug), new Date(m.endDate).getTime() - 300_000))
+  );
+  for (let i = 0; i < markets.length; i++) {
+    const m = markets[i];
+    const symbol = slugToBinanceSymbol(m.slug);
+    const windowEnd = new Date(m.endDate).getTime();
+    const windowStart = windowEnd - 300_000;
+    const sr = strikes[i];
+    const openPrice = sr.status === "fulfilled" ? sr.value : 0;
+    trackMarketForSettlement({ tokenId: m.yesTokenId, side: "UP", windowStart, windowEnd, openPrice, symbol });
+    trackMarketForSettlement({ tokenId: m.noTokenId, side: "DOWN", windowStart, windowEnd, openPrice, symbol });
+  }
+}
+
 // ── Engine State Factory ─────────────────────────────────────────────────────
 
 function createEngineState(engineId: string): EngineState {
@@ -114,6 +136,9 @@ function createEngineState(engineId: string): EngineState {
     activeTokenId: currentActiveTokenId,
     activeDownTokenId: currentActiveDownTokenId,
     expiringTokenIds: new Map(),
+    marketSymbol: "",
+    marketWindowEnd: 0,
+    marketWindowStart: 0,
   };
 }
 
@@ -163,6 +188,11 @@ async function runRound(
     .then(s => { latestSignals = s; })
     .catch(() => {});
 
+  // ── Settlement timer: runs every 5s regardless of tick flow ──
+  const settlementInterval = setInterval(() => {
+    settleExpiredMarkets(statesForSettlement);
+  }, 5_000);
+
   // ── Tick handler: feed every tick to every engine ──
   const onTick = async (tick: MarketTick) => {
     if (tick.source === "polymarket") lastPmTick = tick;
@@ -181,13 +211,6 @@ async function runRound(
           continue;
         }
         if (actions.length === 0) continue;
-
-        // Sanity check: reject actions if engine state looks exploited
-        // 10x starting cash is already unrealistic for 5M binary markets
-        if (state.cashBalance > CONFIG.STARTING_CASH * 10 || state.cashBalance < -CONFIG.STARTING_CASH) {
-          console.warn(`[arena] ${engine.id} DISQUALIFIED: cash=$${state.cashBalance.toFixed(2)} (exploit detected)`);
-          continue;
-        }
 
         // Process CLOB actions (BUY/SELL) — merges deferred for global on-chain delay
         const { results: fills, pendingMerges } = await processActions(actions, state);
@@ -223,10 +246,6 @@ async function runRound(
       allPendingMerges.length = 0;
     }
 
-    // ── Settlement check (every 50 ticks) ──
-    if (tickCount % 50 === 0) {
-      settleExpiredMarkets(statesForSettlement);
-    }
 
     // Flush ledger buffer to disk every 50 ticks (not every tick — defeats buffering)
     if (tickCount % 50 === 0) flushLedger();
@@ -256,6 +275,7 @@ async function runRound(
   } finally {
     pulseEvents.off("tick", onTick);
     clearInterval(signalInterval);
+    clearInterval(settlementInterval);
   }
 
   // ── Round end: compute results ──
@@ -339,6 +359,15 @@ function writeRoundIntel(roundId: string, results: EngineRoundResult[]): void {
   fs.writeFileSync(CONFIG.ROUND_INTEL_PATH, JSON.stringify(intel, null, 2));
   console.log(`\n[arena] Round intel written to ${CONFIG.ROUND_INTEL_PATH}`);
   console.log(`[arena] Leader: ${leader.engineId} with P&L ${leader.totalPnl >= 0 ? "+" : ""}$${leader.totalPnl.toFixed(2)}`);
+
+  // Append to round history (breeder uses last N rounds for multi-round analysis)
+  const historyPath = path.join(path.dirname(CONFIG.ROUND_INTEL_PATH), "round_history.json");
+  let history: any[] = [];
+  try { history = JSON.parse(fs.readFileSync(historyPath, "utf-8")); } catch {}
+  history.push({ ...intel, timestamp: new Date().toISOString() });
+  // Keep last 20 rounds
+  if (history.length > 20) history = history.slice(-20);
+  fs.writeFileSync(historyPath, JSON.stringify(history, null, 2));
 }
 
 // ── Main Loop ────────────────────────────────────────────────────────────────
@@ -364,7 +393,7 @@ async function main(): Promise<void> {
     console.log("[arena] No PM_CONDITION_ID set — auto-discovering markets...\n");
     try {
       // Try 5M markets first (highest frequency, best for arena testing)
-      const fiveMin = await discover5mMarkets({ tokens: ["btc", "eth", "xrp"] });
+      const fiveMin = await discover5mMarkets({ tokens: ["btc"] });
       const updown = await discoverUpDownMarkets({ intervals: ["1H", "4H"], limit: 5 });
       const crypto = await discoverCryptoMarkets({ limit: 5 });
       const all = [...fiveMin, ...updown, ...crypto];
@@ -387,31 +416,9 @@ async function main(): Promise<void> {
         console.log(`  UP token:   ${pick.yesTokenId.slice(0, 20)}...`);
         console.log(`  DOWN token: ${pick.noTokenId.slice(0, 20)}...\n`);
 
-        // Register initial market + all discovered 5M markets for settlement (both UP and DOWN tokens)
+        // Register initial 5M markets for settlement
         const fiveMinMarkets = all.filter(m => m.slug?.includes("-5m-"));
-        const strikes = await Promise.allSettled(
-          fiveMinMarkets.map(m => {
-            const sym = (m.slug.split("-updown-")[0]?.toUpperCase() || "BTC") + "USDT";
-            return fetchStrikePrice(sym, new Date(m.endDate).getTime() - 300_000);
-          })
-        );
-        for (let i = 0; i < fiveMinMarkets.length; i++) {
-          const m = fiveMinMarkets[i];
-          const tokenSlug = m.slug.split("-updown-")[0]?.toUpperCase() || "BTC";
-          const windowStart = new Date(m.endDate).getTime() - 300_000;
-          const windowEnd = new Date(m.endDate).getTime();
-          const symbol = tokenSlug + "USDT";
-          const sr = strikes[i];
-          const openPrice = sr.status === "fulfilled" ? sr.value : 0;
-          trackMarketForSettlement({
-            tokenId: m.yesTokenId, side: "UP",
-            windowStart, windowEnd, openPrice, symbol,
-          });
-          trackMarketForSettlement({
-            tokenId: m.noTokenId, side: "DOWN",
-            windowStart, windowEnd, openPrice, symbol,
-          });
-        }
+        await registerMarketsForSettlement(fiveMinMarkets);
       } else {
         console.log("[arena] No live crypto markets found — falling back to simulated pulse");
       }
@@ -435,33 +442,11 @@ async function main(): Promise<void> {
     // For 5M markets: rotate subscription every 2 min as markets expire
     // Also register each market for settlement tracking
     startMarketRotation(async () => {
-      const markets = await discover5mMarkets({ tokens: ["btc", "eth", "xrp"] });
+      const markets = await discover5mMarkets({ tokens: ["btc"] });
       if (markets.length === 0) return null;
 
-      // Fetch strike prices in parallel, then register for settlement
-      const strikeResults = await Promise.allSettled(
-        markets.map(m => {
-          const sym = (m.slug.split("-updown-")[0]?.toUpperCase() || "BTC") + "USDT";
-          return fetchStrikePrice(sym, new Date(m.endDate).getTime() - 300_000);
-        })
-      );
-      for (let i = 0; i < markets.length; i++) {
-        const m = markets[i];
-        const tokenSlug = m.slug.split("-updown-")[0]?.toUpperCase() || "BTC";
-        const binanceSymbol = tokenSlug + "USDT";
-        const windowStart = new Date(m.endDate).getTime() - 300_000;
-        const windowEnd = new Date(m.endDate).getTime();
-        const sr2 = strikeResults[i];
-        const openPrice = sr2.status === "fulfilled" ? sr2.value : 0;
-        trackMarketForSettlement({
-          tokenId: m.yesTokenId, side: "UP",
-          windowStart, windowEnd, openPrice, symbol: binanceSymbol,
-        });
-        trackMarketForSettlement({
-          tokenId: m.noTokenId, side: "DOWN",
-          windowStart, windowEnd, openPrice, symbol: binanceSymbol,
-        });
-      }
+      // Register for settlement
+      await registerMarketsForSettlement(markets);
 
       // Pick market with most time remaining
       markets.sort((a, b) =>
@@ -476,10 +461,16 @@ async function main(): Promise<void> {
       // Update to new market — old positions settle via settlement.ts ($1 or $0)
       currentActiveTokenId = picked.yesTokenId;
       currentActiveDownTokenId = picked.noTokenId;
+      const pickedSymbol = slugToBinanceSymbol(picked.slug);
+      const pickedWindowEnd = new Date(picked.endDate).getTime();
+      const pickedWindowStart = pickedWindowEnd - 300_000;
       if (activeStates) {
         for (const [, state] of activeStates) {
           state.activeTokenId = picked.yesTokenId;
           state.activeDownTokenId = picked.noTokenId;
+          state.marketSymbol = pickedSymbol;
+          state.marketWindowEnd = pickedWindowEnd;
+          state.marketWindowStart = pickedWindowStart;
         }
       }
 

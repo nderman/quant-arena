@@ -104,6 +104,27 @@ export abstract class AbstractEngine implements IBaseEngine {
     return this.state.activeTokenId || "";
   }
 
+  /** Get the Binance symbol for the current market (e.g. "BTCUSDT") */
+  protected getMarketSymbol(): string {
+    return this.state.marketSymbol || "";
+  }
+
+  /** Seconds remaining in the current 5-minute market window. Returns -1 if unknown. */
+  protected getSecondsRemaining(): number {
+    if (!this.state.marketWindowEnd) return -1;
+    return Math.max(0, Math.round((this.state.marketWindowEnd - Date.now()) / 1000));
+  }
+
+  /** Epoch ms when the current 5-minute window started */
+  protected getWindowStart(): number {
+    return this.state.marketWindowStart || 0;
+  }
+
+  /** Epoch ms when the current 5-minute window ends */
+  protected getWindowEnd(): number {
+    return this.state.marketWindowEnd || 0;
+  }
+
   // ── Action Builders ──────────────────────────────────────────────────────
 
   protected buy(tokenId: string, price: number, size: number, opts?: {

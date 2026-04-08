@@ -66,6 +66,10 @@ export interface EngineState {
   activeTokenId: string;    // current market's UP (YES) token ID (set by arena on rotation)
   activeDownTokenId: string; // current market's DOWN (NO) token ID
   expiringTokenIds: Map<string, string>; // old tokenId → its paired opposite tokenId (for correct MERGE pricing)
+  // Market context (set by arena on rotation)
+  marketSymbol: string;      // e.g. "BTCUSDT", "ETHUSDT"
+  marketWindowEnd: number;   // epoch ms when 5-min window closes
+  marketWindowStart: number; // epoch ms when 5-min window opened
 }
 
 export interface PositionState {

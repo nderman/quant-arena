@@ -38,6 +38,7 @@ let latestDownBook: OrderBook = { ...emptyBook };
 let latestBinanceBook: OrderBook = { ...emptyBook };
 let lastPmDataTs = 0; // timestamp of last PM data received
 let staleCheckInterval: ReturnType<typeof setInterval> | null = null;
+let forceRotationFn: (() => void) | null = null; // called by stale detector to re-discover markets
 
 // ── Binance Volume Tracking (for toxic flow scaling) ────────────────────────
 const binanceVolState = new Map<string, { prevTotalSize: number; sizeChange: number; avgChange: number }>();
@@ -148,21 +149,27 @@ export function startPmChannel(): void {
   startPmBookChannel();
   startPmPriceChannel();
 
-  // Stale data detector: only reconnect if websocket is open but no data received
-  // Quiet markets (0.50/0.50 with no trades) produce no events — that's normal, not stale
+  // Stale data detector: reconnect if no PM data received for too long
+  // Forces market re-discovery so we don't reconnect to expired tokens
   if (staleCheckInterval) clearInterval(staleCheckInterval);
   staleCheckInterval = setInterval(() => {
     const staleMs = lastPmDataTs > 0 ? Date.now() - lastPmDataTs : 0;
-    const bookOpen = pmBookWs?.readyState === 1; // WebSocket.OPEN
+    const bookOpen = pmBookWs?.readyState === 1;
     const priceOpen = pmPriceWs?.readyState === 1;
 
-    // Only reconnect if we've been connected for a while but never got any data at all,
-    // or if the websocket itself is in a broken state
-    if (staleMs > CONFIG.STALE_DATA_THRESHOLD_MS && (!bookOpen || !priceOpen)) {
-      console.warn(`[pulse] PM WS disconnected (book=${bookOpen}, price=${priceOpen}) — reconnecting`);
+    if (staleMs > CONFIG.STALE_DATA_THRESHOLD_MS) {
+      // Skip if WS is already mid-reconnect (not OPEN)
+      if (!bookOpen && !priceOpen) return;
+
+      console.warn(`[pulse] PM data stale for ${(staleMs / 1000).toFixed(0)}s — reconnecting + forcing rotation`);
       lastPmDataTs = Date.now();
+      // Reset delays so close handler reconnects fast (don't let exponential backoff stack)
+      pmBookReconnectDelay = 1000;
+      pmPriceReconnectDelay = 1000;
       pmBookWs?.close();
       pmPriceWs?.close();
+      // Force market rotation to re-discover and re-subscribe with fresh tokens
+      if (forceRotationFn) forceRotationFn();
     }
   }, CONFIG.STALE_DATA_CHECK_MS);
 }
@@ -488,32 +495,40 @@ export function startMarketRotation(
   const rotate = async () => {
     try {
       const result = await discoverFn();
-      if (!result || result.yesTokenId === currentToken) return;
+      if (!result) return;
 
-      currentToken = result.yesTokenId;
-      pmUpTokenId = result.yesTokenId;
-      pmDownTokenId = result.noTokenId;
-      resetBooks(); // clear stale data from previous market
-      const bothTokens = [result.yesTokenId, result.noTokenId].filter(Boolean);
-      console.log(`[pulse] Rotating to new market: ${currentToken.slice(0, 20)}... (dual books: UP + DOWN)`);
-
-      // Subscribe BOTH tokens to book channel — routed to separate books
-      if (pmBookWs?.readyState === WebSocket.OPEN) {
-        pmBookWs.send(JSON.stringify({
-          type: "subscribe", channel: "book", assets_ids: bothTokens,
-        }));
+      const tokenChanged = result.yesTokenId !== currentToken;
+      if (tokenChanged) {
+        currentToken = result.yesTokenId;
+        pmUpTokenId = result.yesTokenId;
+        pmDownTokenId = result.noTokenId;
+        resetBooks();
+        console.log(`[pulse] Rotating to new market: ${currentToken.slice(0, 20)}... (dual books: UP + DOWN)`);
       }
-      // Price channel: both tokens
-      if (pmPriceWs?.readyState === WebSocket.OPEN) {
-        pmPriceWs.send(JSON.stringify({
-          assets_ids: bothTokens, type: "market", level: 2, custom_feature_enabled: true,
-        }));
+
+      // Always update so reconnect handlers use current tokens
+      const bothTokens = [result.yesTokenId, result.noTokenId].filter(Boolean);
+      pmSubscriptionTokens = bothTokens;
+
+      // Only send subscribe when tokens changed (reconnect handlers subscribe via getPmTokens)
+      if (tokenChanged) {
+        if (pmBookWs?.readyState === WebSocket.OPEN) {
+          pmBookWs.send(JSON.stringify({
+            type: "subscribe", channel: "book", assets_ids: bothTokens,
+          }));
+        }
+        if (pmPriceWs?.readyState === WebSocket.OPEN) {
+          pmPriceWs.send(JSON.stringify({
+            assets_ids: bothTokens, type: "market", level: 2, custom_feature_enabled: true,
+          }));
+        }
       }
     } catch (err: any) {
       console.error("[pulse] Market rotation failed:", err.message);
     }
   };
 
+  forceRotationFn = rotate; // expose for stale detector
   rotate(); // initial
   rotationInterval = setInterval(rotate, intervalMs);
 }

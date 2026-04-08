@@ -45,8 +45,8 @@ export const CONFIG = {
 
   // ── Engine Safety ─────────────────────────────────────────────────────────
   ENGINE_TICK_TIMEOUT_MS:  num("ENGINE_TICK_TIMEOUT_MS", 50),            // kill onTick if > 50ms (OpenClaw safety)
-  STALE_DATA_THRESHOLD_MS: num("STALE_DATA_THRESHOLD_MS", 30_000),      // force PM reconnect if no data for this long
-  STALE_DATA_CHECK_MS:     num("STALE_DATA_CHECK_MS", 10_000),          // how often to check for stale data
+  STALE_DATA_THRESHOLD_MS: num("STALE_DATA_THRESHOLD_MS", 10_000),      // force PM reconnect if no data for 10s
+  STALE_DATA_CHECK_MS:     num("STALE_DATA_CHECK_MS", 5_000),           // check for stale data every 5s
 
   // ── On-Chain ──────────────────────────────────────────────────────────────
   ON_CHAIN_LATENCY_MS:    num("ON_CHAIN_LATENCY_MS", 3000),              // 3s Polygon tx finality for MERGE

@@ -122,17 +122,68 @@ function readTypes(): string {
   return fs.readFileSync(path.resolve(PROJECT_ROOT, "src", "types.ts"), "utf-8");
 }
 
+// ── Round History ──────────────────────────────────────────────────────────
+
+function loadRoundHistory(): any[] {
+  const historyPath = path.join(DATA_DIR, "round_history.json");
+  try {
+    const history = JSON.parse(fs.readFileSync(historyPath, "utf-8")) as any[];
+    return history;
+  } catch {
+    return [];
+  }
+}
+
+function buildCumulativePnl(history: any[]): Map<string, number> {
+  const pnl = new Map<string, number>();
+  for (const round of history) {
+    for (const r of round.allResults || []) {
+      pnl.set(r.engineId, (pnl.get(r.engineId) || 0) + r.totalPnl);
+    }
+  }
+  return pnl;
+}
+
+function formatRoundHistory(history: any[]): string {
+  if (history.length === 0) return "No round history yet.";
+
+  const engineStats = new Map<string, { rounds: number; wins: number; totalPnl: number; bestPnl: number; worstPnl: number }>();
+  for (const round of history) {
+    for (const r of round.allResults || []) {
+      const stats = engineStats.get(r.engineId) || { rounds: 0, wins: 0, totalPnl: 0, bestPnl: -Infinity, worstPnl: Infinity };
+      stats.rounds++;
+      stats.totalPnl += r.totalPnl;
+      if (r.totalPnl > 0) stats.wins++;
+      stats.bestPnl = Math.max(stats.bestPnl, r.totalPnl);
+      stats.worstPnl = Math.min(stats.worstPnl, r.totalPnl);
+      engineStats.set(r.engineId, stats);
+    }
+  }
+
+  const lines = [`${history.length} rounds recorded.\n`];
+  lines.push("Engine | Rounds | Wins | Total P&L | Best | Worst");
+  lines.push("-------|--------|------|-----------|------|------");
+  for (const [id, s] of [...engineStats.entries()].sort((a, b) => b[1].totalPnl - a[1].totalPnl)) {
+    lines.push(`${id} | ${s.rounds} | ${s.wins} | $${s.totalPnl.toFixed(2)} | $${s.bestPnl.toFixed(2)} | $${s.worstPnl.toFixed(2)}`);
+  }
+  return lines.join("\n");
+}
+
 // ── Analysis (Gemini Flash) ─────────────────────────────────────────────────
 
 async function analyzeArena(): Promise<string> {
   const intel = readRoundIntel();
   const trades = readRecentTrades();
   const engines = listEngines();
+  const history = formatRoundHistory(loadRoundHistory());
 
   const prompt = `You are a quantitative trading analyst reviewing a Polymarket 5-minute crypto prediction market arena.
 
-## Arena Results
+## Latest Round Results
 ${intel ? JSON.stringify(intel, null, 2) : "No round intel available yet."}
+
+## Multi-Round History (engine performance across rounds)
+${history}
 
 ## Recent Trades (last 100)
 ${trades}
@@ -160,6 +211,8 @@ Analyze what's working and what's failing. Identify:
 2. Which strategies are losing and what specific flaw causes the losses
 3. What UNTRIED approach could beat the current leader (consider: maker-only, toxic flow avoidance, Sharpe optimization)
 4. Whether maker orders, DOWN token bets, merge arb, or specific entry timing could help
+
+IMPORTANT: Use multi-round history to distinguish HIGH-VARIANCE winners from consistent losers. An engine that wins big some rounds and loses big others has a REAL edge — it just needs risk management. Don't dismiss engines with negative latest-round P&L if their multi-round history shows big wins. Consistency matters but so does total P&L across rounds.
 
 Be specific and quantitative. Reference actual trade data. Output your analysis in 300 words or less.`;
 
@@ -262,9 +315,13 @@ function pruneEngines(intel: any): void {
 
   if (!intel?.allResults) return;
 
-  // Rank ALL engines by P&L (worst first) — built-in engines are prunable too
+  // Use multi-round cumulative P&L for pruning (not just latest round)
+  const cumulativePnl = buildCumulativePnl(loadRoundHistory());
+
+  // Rank by cumulative P&L if available, otherwise latest round
   const ranked = intel.allResults
-    .sort((a: any, b: any) => a.totalPnl - b.totalPnl);
+    .map((r: any) => ({ ...r, cumulativePnl: cumulativePnl.get(r.engineId) ?? r.totalPnl }))
+    .sort((a: any, b: any) => a.cumulativePnl - b.cumulativePnl);
 
   if (!fs.existsSync(ARCHIVE_DIR)) fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
 
@@ -280,7 +337,7 @@ function pruneEngines(intel: any): void {
     });
 
     if (worstFile) {
-      console.log(`[breeder] Pruning #${pruned + 1}: ${worstFile} (P&L: $${result.totalPnl.toFixed(2)})`);
+      console.log(`[breeder] Pruning #${pruned + 1}: ${worstFile} (cumulative P&L: $${result.cumulativePnl.toFixed(2)})`);
       const srcPath = path.join(ENGINES_DIR, worstFile + ".ts");
       const archivePath = path.join(ARCHIVE_DIR, `${worstFile}_pruned_${Date.now()}.ts`);
       fs.copyFileSync(srcPath, archivePath);

@@ -55,8 +55,8 @@ pulseEvents.on("binance_tick", (tick: MarketTick) => {
   for (const [, market] of trackedMarkets) {
     if (market.symbol === symbol && market.openPrice <= 0 && now >= market.windowStart) {
       market.openPrice = tick.midPrice;
-      uninitializedMarkets--;
-      console.log(`[settlement] Open price set: ${symbol} = $${tick.midPrice.toFixed(2)} for ${market.tokenId.slice(0, 16)}...`);
+      uninitializedMarkets = Math.max(0, uninitializedMarkets - 1);
+      console.log(`[settlement] Open price set via WS: ${symbol} = $${tick.midPrice.toFixed(2)} for ${market.side} ${market.tokenId.slice(0, 16)}... (${uninitializedMarkets} remaining)`);
     }
   }
 });
@@ -87,10 +87,19 @@ export async function fetchStrikePrice(symbol: string, windowStartMs: number): P
  * Call this when the arena discovers a new 5M market.
  */
 export function trackMarketForSettlement(market: TrackedMarket): void {
-  if (!trackedMarkets.has(market.tokenId)) {
-    if (market.openPrice <= 0) uninitializedMarkets++;
+  const existing = trackedMarkets.get(market.tokenId);
+  if (existing) {
+    // Don't overwrite a good openPrice with 0
+    if (market.openPrice > 0 && existing.openPrice <= 0) {
+      existing.openPrice = market.openPrice;
+      uninitializedMarkets = Math.max(0, uninitializedMarkets - 1);
+      console.log(`[settlement] Updated open price: ${market.side} ${market.tokenId.slice(0, 16)}... openPrice=$${market.openPrice.toFixed(2)}`);
+    }
+    return; // don't overwrite existing tracking
   }
+  if (market.openPrice <= 0) uninitializedMarkets++;
   trackedMarkets.set(market.tokenId, market);
+  console.log(`[settlement] Tracking ${market.side} token ${market.tokenId.slice(0, 16)}... symbol=${market.symbol} openPrice=$${market.openPrice.toFixed(2)} windowEnd=${new Date(market.windowEnd).toISOString()}`);
 }
 
 /**
@@ -135,6 +144,10 @@ export function settleExpiredMarkets(
     // Use the snapshot price taken at window end (not current live price)
     const binancePrice = market.closePrice;
     if (!binancePrice || market.openPrice <= 0) {
+      const age = ((now - market.windowEnd) / 1000).toFixed(0);
+      if (now - market.windowEnd > 60_000 && now - market.windowEnd < 65_000) {
+        console.warn(`[settlement] Skipping ${market.side} ${tokenId.slice(0, 16)}...: closePrice=${binancePrice || "none"}, openPrice=$${market.openPrice.toFixed(2)}, expired ${age}s ago`);
+      }
       // Stale market with no price data — clean up if expired > 5 min ago
       if (now - market.windowEnd > 300_000) trackedMarkets.delete(tokenId);
       continue;
