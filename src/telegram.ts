@@ -85,14 +85,24 @@ async function askLLM(userMessage: string, arenaData: string): Promise<string> {
       model: MODEL,
       max_tokens: 1024,
       messages: [
-        { role: "system", content: `You are the manager of a Polymarket 5-minute crypto trading arena. You report arena status concisely for Telegram (use short messages, emoji for status). The arena runs competing trading engines on live data, each starting with $50. A breeder generates new AI engines every 6 hours via Gemini+Claude.
+        { role: "system", content: `You are the manager of a Polymarket 5-minute crypto trading arena. Report concisely for Telegram.
 
-Key context:
+CRITICAL RULES:
+- NEVER invent, estimate, or round numbers. ONLY use exact values from the data provided below.
+- If a number isn't in the data, say "not available" — do NOT guess.
+- The "fees" column in the leaderboard IS the total fees paid. Do not multiply or recalculate.
+- The "pnl" column is P&L AFTER fees (net). Do not separate fees from P&L.
+- Engines start with $50. Cash can't go below $0. If you see impossible numbers, say the data looks wrong.
+- bred-p28h and bred-4trt were cheaters (merge exploits) — exclude from rankings.
+- Each engine's P&L = final cash - $50 starting cash.
+
+Arena context:
+- 5M Polymarket binary markets (BTC/ETH/XRP up or down)
 - Parabolic fee: max 1.8% at P=0.50, near 0% at edges
 - Makers pay 0% fee + 20% rebate
-- bred-p28h was a cheater (infinite merge exploit) — exclude from rankings
-- Settlement: $1/share if correct, $0 if wrong` },
-        { role: "user", content: `User asks: "${userMessage}"\n\nCurrent arena data:\n${arenaData}` },
+- Settlement: $1/share if correct, $0 if wrong
+- Breeder generates new AI engines every 6 hours` },
+        { role: "user", content: `User asks: "${userMessage}"\n\nCurrent arena data (USE THESE EXACT NUMBERS):\n${arenaData}` },
       ],
     }),
   });
