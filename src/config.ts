@@ -9,7 +9,24 @@ const bool = (key: string, def = false): boolean =>
   process.env[key] === "1" || process.env[key] === "true" || (process.env[key] === undefined && def);
 const str = (key: string, def: string): string => process.env[key] ?? def;
 
+// Coin to Binance symbol mapping
+const COIN_TO_BINANCE: Record<string, string> = {
+  btc: "BTCUSDT",
+  eth: "ETHUSDT",
+  sol: "SOLUSDT",
+  xrp: "XRPUSDT",
+};
+
+const _coin = str("ARENA_COIN", "btc").toLowerCase();
+const _binanceSymbol = COIN_TO_BINANCE[_coin] || "BTCUSDT";
+
 export const CONFIG = {
+  // ── Multi-coin ─────────────────────────────────────────────────────────────
+  ARENA_COIN:             _coin,                                         // btc/eth/sol/xrp
+  ARENA_INSTANCE_ID:      str("ARENA_INSTANCE_ID", _coin),                // ledger/intel file suffix
+  ARENA_BINANCE_SYMBOL:   _binanceSymbol,                                  // BTCUSDT/ETHUSDT/etc
+  ARENA_SLUG_PREFIX:      `${_coin}-updown-5m`,                            // for settlement filter
+
   // ── Arena ──────────────────────────────────────────────────────────────────
   ROUND_DURATION_MS:      num("ROUND_DURATION_MS", 6 * 3600_000),       // 6 hours
   STARTING_CASH:          num("STARTING_CASH", 1000),                    // USDC per engine
@@ -67,9 +84,9 @@ export const CONFIG = {
   PM_CONDITION_ID:        str("PM_CONDITION_ID", ""),                    // polymarket market to track (mutable for auto-discovery)
 
   // ── Ledger ─────────────────────────────────────────────────────────────────
-  LEDGER_DB_PATH:         str("LEDGER_DB_PATH", "./data/ledger.db"),
+  LEDGER_DB_PATH:         str("LEDGER_DB_PATH", `./data/ledger_${_coin}.db`),
 
   // ── Logging ────────────────────────────────────────────────────────────────
   LOG_LEVEL:              str("LOG_LEVEL", "info"),
-  ROUND_INTEL_PATH:       str("ROUND_INTEL_PATH", "./data/round_intel.json"),
+  ROUND_INTEL_PATH:       str("ROUND_INTEL_PATH", `./data/round_intel_${_coin}.json`),
 };

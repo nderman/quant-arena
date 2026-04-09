@@ -109,6 +109,20 @@ export abstract class AbstractEngine implements IBaseEngine {
     return this.state.marketSymbol || "";
   }
 
+  /**
+   * Get the latest Chainlink BTC/USD price (from Polygon RPC).
+   * This is the same data Polymarket uses to resolve 5M markets — engine
+   * decisions based on this align with eventual settlement.
+   * Returns null if Chainlink is unavailable or stale (>2min old).
+   */
+  protected getChainlinkPrice(symbol?: string): number | null {
+    const sym = symbol || this.getMarketSymbol() || "BTCUSDT";
+    // Lazy import to avoid circular deps; in practice resolved at module load
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { getLatestChainlinkPrice } = require("../chainlink");
+    return getLatestChainlinkPrice(sym);
+  }
+
   /** Seconds remaining in the current 5-minute market window. Returns -1 if unknown. */
   protected getSecondsRemaining(): number {
     if (!this.state.marketWindowEnd) return -1;

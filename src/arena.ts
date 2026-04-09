@@ -13,6 +13,8 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import * as dotenv from "dotenv";
+dotenv.config({ path: path.resolve(__dirname, "..", ".env") });
 import { CONFIG } from "./config";
 import { pulseEvents, startSimulatedPulse, startPmChannel, startBinanceChannel, startMarketRotation, setPmSubscriptionTokens, shutdown as shutdownPulse } from "./pulse";
 import { processActions, processMergeActions, markToMarket, clearFeePool, clearFeePoolForMarket } from "./referee";
@@ -20,6 +22,7 @@ import { recordFill, recordRoundStart, recordRoundEnd, getRoundSummary, closeDb,
 import { fetchSignalSnapshot } from "./signals";
 import { discoverCryptoMarkets, discoverUpDownMarkets, discover5mMarkets } from "./discovery";
 import { pollAndSettle } from "./settlement";
+import { startChainlinkPoller } from "./chainlink";
 import type {
   BaseEngine,
   EngineAction,
@@ -172,9 +175,8 @@ async function runRound(
     .catch(() => {});
 
   // ── Settlement: poll Gamma API every 30s for closed markets ──
-  // Self-contained — discovers closed markets directly, no dependence on tracking
   const settlementInterval = setInterval(() => {
-    pollAndSettle(statesForSettlement).catch(err =>
+    pollAndSettle(statesForSettlement, { tokenSlugPrefix: CONFIG.ARENA_SLUG_PREFIX }).catch(err =>
       console.error("[arena] settlement error:", err.message)
     );
   }, 30_000);
@@ -347,7 +349,7 @@ function writeRoundIntel(roundId: string, results: EngineRoundResult[]): void {
   console.log(`[arena] Leader: ${leader.engineId} with P&L ${leader.totalPnl >= 0 ? "+" : ""}$${leader.totalPnl.toFixed(2)}`);
 
   // Append to round history (breeder uses last N rounds for multi-round analysis)
-  const historyPath = path.join(path.dirname(CONFIG.ROUND_INTEL_PATH), "round_history.json");
+  const historyPath = path.join(path.dirname(CONFIG.ROUND_INTEL_PATH), `round_history_${CONFIG.ARENA_COIN}.json`);
   let history: any[] = [];
   try { history = JSON.parse(fs.readFileSync(historyPath, "utf-8")); } catch {}
   history.push({ ...intel, timestamp: new Date().toISOString() });
@@ -379,7 +381,7 @@ async function main(): Promise<void> {
     console.log("[arena] No PM_CONDITION_ID set — auto-discovering markets...\n");
     try {
       // Try 5M markets first (highest frequency, best for arena testing)
-      const fiveMin = await discover5mMarkets({ tokens: ["btc"] });
+      const fiveMin = await discover5mMarkets({ tokens: [CONFIG.ARENA_COIN] });
       const updown = await discoverUpDownMarkets({ intervals: ["1H", "4H"], limit: 5 });
       const crypto = await discoverCryptoMarkets({ limit: 5 });
       const all = [...fiveMin, ...updown, ...crypto];
@@ -420,10 +422,11 @@ async function main(): Promise<void> {
   } else {
     startPmChannel();
     startBinanceChannel();
+    startChainlinkPoller([CONFIG.ARENA_BINANCE_SYMBOL], 2000);
 
     // For 5M markets: rotate subscription every 2 min as markets expire
     startMarketRotation(async () => {
-      const markets = await discover5mMarkets({ tokens: ["btc"] });
+      const markets = await discover5mMarkets({ tokens: [CONFIG.ARENA_COIN] });
       if (markets.length === 0) return null;
 
       // Pick market with most time remaining

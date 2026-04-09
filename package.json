@@ -20,6 +20,8 @@
     "logs": "ssh ${VPS_HOST:-root@165.22.29.245} 'pm2 logs quant-arena --lines 50'"
   },
   "dependencies": {
+    "@ethersproject/contracts": "^5.8.0",
+    "@ethersproject/providers": "^5.8.0",
     "better-sqlite3": "^11.0.0",
     "dotenv": "^17.4.1",
     "node-telegram-bot-api": "^0.67.0",

@@ -27,6 +27,7 @@ const PROJECT_ROOT = path.resolve(__dirname, "..");
 const ENGINES_DIR = path.resolve(PROJECT_ROOT, "src", "engines"); // always read/write TypeScript source
 const MAX_ENGINES = 8; // don't let the arena get too crowded
 const DATA_DIR = path.resolve(PROJECT_ROOT, "data");
+const COIN = (process.env.ARENA_COIN || "btc").toLowerCase();
 const ARCHIVE_DIR = path.resolve(DATA_DIR, "engines_archive");
 
 // ── OpenRouter Client ───────────────────────────────────────────────────────
@@ -79,14 +80,14 @@ function callCoder(systemPrompt: string, userPrompt: string): Promise<string> {
 // ── Arena Intel ─────────────────────────────────────────────────────────────
 
 function readRoundIntel(): any | null {
-  const intelPath = path.join(DATA_DIR, "round_intel.json");
+  const intelPath = path.join(DATA_DIR, `round_intel_${COIN}.json`);
   if (!fs.existsSync(intelPath)) return null;
   return JSON.parse(fs.readFileSync(intelPath, "utf-8"));
 }
 
 function readRecentTrades(): string {
   try {
-    const dbPath = path.join(DATA_DIR, "ledger.db");
+    const dbPath = path.join(DATA_DIR, `ledger_${COIN}.db`);
     if (!fs.existsSync(dbPath)) return "No ledger found.";
     const trades = execSync(
       `sqlite3 "${dbPath}" "SELECT engine_id, action, order_type, printf('%.4f',price) as price, printf('%.0f',size) as shares, printf('%.4f',fee) as fee, printf('%.2f',pnl) as pnl, signal_source, substr(note,1,80) as note FROM trades ORDER BY id DESC LIMIT 100"`,
@@ -132,7 +133,7 @@ function readTypes(): string {
 // ── Round History ──────────────────────────────────────────────────────────
 
 function loadRoundHistory(): any[] {
-  const historyPath = path.join(DATA_DIR, "round_history.json");
+  const historyPath = path.join(DATA_DIR, `round_history_${COIN}.json`);
   try {
     const history = JSON.parse(fs.readFileSync(historyPath, "utf-8")) as any[];
     return history;
