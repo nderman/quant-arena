@@ -1,5 +1,5 @@
 // Multi-coin arena: one process per coin, sharing engines but separate ledgers
-const COINS = ["btc", "eth"]; // start with BTC + ETH, validate, then add SOL/XRP
+const COINS = ["btc", "eth", "sol"]; // adding SOL — validated PM uses Chainlink SOL/USD
 
 const arenaApp = (coin) => ({
   name: `quant-arena-${coin}`,
