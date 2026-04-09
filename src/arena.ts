@@ -429,11 +429,13 @@ async function main(): Promise<void> {
       const markets = await discover5mMarkets({ tokens: [CONFIG.ARENA_COIN] });
       if (markets.length === 0) return null;
 
-      // Pick market with most time remaining
-      markets.sort((a, b) =>
-        new Date(b.endDate).getTime() - new Date(a.endDate).getTime()
-      );
-      const picked = markets[0];
+      // Pick the ACTIVE candle: soonest endDate that's still in the future
+      // (Not the latest — that's a future candle whose book is empty/stale)
+      const now = Date.now();
+      const active = markets
+        .filter(m => new Date(m.endDate).getTime() > now)
+        .sort((a, b) => new Date(a.endDate).getTime() - new Date(b.endDate).getTime());
+      const picked = active[0] || markets[0];
 
       // Clean up fee pool for rotated-out markets
       if (currentActiveTokenId) clearFeePoolForMarket(currentActiveTokenId);
