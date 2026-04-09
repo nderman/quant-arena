@@ -15,6 +15,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { DATA_DIR, loadRoundHistory, type RoundHistoryEntry } from "../historyStore";
 
 export const GRADUATION_CRITERIA = {
   MIN_ROUNDS: 10,
@@ -23,23 +24,12 @@ export const GRADUATION_CRITERIA = {
   MAX_LOSS_PER_ROUND: -30,
   MIN_SHARPE: 1.0,
   DEFAULT_BANKROLL_USD: 50,
-  LIVE_ENGINES_PATH: "data/live_engines.json",
+  LIVE_ENGINES_PATH: path.join(DATA_DIR, "live_engines.json"),
+  CANDIDATES_PATH: path.join(DATA_DIR, "live_candidates.json"),
   DEMOTE_SHARPE_THRESHOLD: 0.5,
   DEMOTE_WIN_RATE: 0.40,
   DEMOTE_LOOKBACK: 5,
 };
-
-interface RoundResult {
-  engineId: string;
-  totalPnl: number;
-  tradeCount: number;
-}
-
-interface RoundHistoryEntry {
-  roundId: string;
-  allResults: RoundResult[];
-  timestamp?: string;
-}
 
 export interface EngineStats {
   engineId: string;
@@ -66,13 +56,24 @@ export interface LiveEngineRecord {
 
 export type LiveEnginesFile = Record<string, LiveEngineRecord[]>;
 
-export function computeStats(engineId: string, history: RoundHistoryEntry[]): EngineStats {
-  const pnls: number[] = [];
+function buildPnlMap(history: RoundHistoryEntry[]): Map<string, number[]> {
+  const map = new Map<string, number[]>();
   for (const round of history) {
-    const r = round.allResults?.find(x => x.engineId === engineId);
-    if (r) pnls.push(r.totalPnl);
+    for (const r of round.allResults || []) {
+      const arr = map.get(r.engineId) || [];
+      arr.push(r.totalPnl);
+      map.set(r.engineId, arr);
+    }
   }
+  return map;
+}
 
+export function computeStats(engineId: string, history: RoundHistoryEntry[]): EngineStats {
+  const map = buildPnlMap(history);
+  return computeStatsFromPnls(engineId, map.get(engineId) || []);
+}
+
+function computeStatsFromPnls(engineId: string, pnls: number[]): EngineStats {
   const rounds = pnls.length;
   if (rounds === 0) {
     return {
@@ -129,24 +130,15 @@ export function passesCriteria(stats: EngineStats): { ok: boolean; reasons: stri
  * Evaluate one coin's history, return the engines that pass.
  * Does not write — just returns the candidates.
  */
-export function evaluateCoinHistory(coin: string, historyPath: string): EngineStats[] {
-  if (!fs.existsSync(historyPath)) return [];
-  let history: RoundHistoryEntry[];
-  try {
-    history = JSON.parse(fs.readFileSync(historyPath, "utf-8"));
-  } catch { return []; }
+export function evaluateCoinHistory(coin: string): EngineStats[] {
+  const history = loadRoundHistory(coin);
+  if (history.length === 0) return [];
 
-  // Get all unique engine IDs
-  const engineIds = new Set<string>();
-  for (const round of history) {
-    for (const r of round.allResults || []) engineIds.add(r.engineId);
-  }
-
+  const pnlMap = buildPnlMap(history);
   const passing: EngineStats[] = [];
-  for (const id of engineIds) {
-    const stats = computeStats(id, history);
-    const check = passesCriteria(stats);
-    if (check.ok) passing.push(stats);
+  for (const [id, pnls] of pnlMap) {
+    const stats = computeStatsFromPnls(id, pnls);
+    if (passesCriteria(stats).ok) passing.push(stats);
   }
   return passing.sort((a, b) => b.cumulativePnl - a.cumulativePnl);
 }
@@ -159,35 +151,37 @@ export function shouldDemote(stats: EngineStats): boolean {
          stats.recentWinRate < GRADUATION_CRITERIA.DEMOTE_WIN_RATE;
 }
 
+function readJsonSafe<T>(filePath: string, fallback: T): T {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJsonAtomic(filePath: string, data: unknown): void {
+  const tmp = filePath + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  fs.renameSync(tmp, filePath);
+}
+
 /**
  * Evaluate graduation candidates for a coin. FLAGS engines that pass criteria
  * but does NOT auto-promote. Writes to data/live_candidates.json for manual review.
- *
- * To actually promote: edit data/live_engines.json by hand (or via Telegram cmd later).
  */
-export function flagGraduationCandidates(coin: string, historyPath: string, currentRoundId: string): void {
-  const passing = evaluateCoinHistory(coin, historyPath);
+export function flagGraduationCandidates(coin: string, currentRoundId: string): void {
+  const passing = evaluateCoinHistory(coin);
   if (passing.length === 0) return;
 
-  // Load existing live_engines.json to skip already-promoted ones
-  let existing: LiveEnginesFile = {};
-  if (fs.existsSync(GRADUATION_CRITERIA.LIVE_ENGINES_PATH)) {
-    try {
-      existing = JSON.parse(fs.readFileSync(GRADUATION_CRITERIA.LIVE_ENGINES_PATH, "utf-8"));
-    } catch {}
-  }
+  const existing = readJsonSafe<LiveEnginesFile>(GRADUATION_CRITERIA.LIVE_ENGINES_PATH, {});
   const liveIds = new Set((existing[coin] || []).map(r => r.engineId));
 
   const newCandidates = passing.filter(s => !liveIds.has(s.engineId));
   if (newCandidates.length === 0) return;
 
-  const candidatesPath = "data/live_candidates.json";
-  let candidates: Record<string, EngineStats[]> = {};
-  if (fs.existsSync(candidatesPath)) {
-    try { candidates = JSON.parse(fs.readFileSync(candidatesPath, "utf-8")); } catch {}
-  }
+  const candidates = readJsonSafe<Record<string, EngineStats[]>>(GRADUATION_CRITERIA.CANDIDATES_PATH, {});
   candidates[coin] = newCandidates;
-  fs.writeFileSync(candidatesPath, JSON.stringify(candidates, null, 2));
+  writeJsonAtomic(GRADUATION_CRITERIA.CANDIDATES_PATH, candidates);
 
   console.log(`[graduation] ${coin}: ${newCandidates.length} new candidates flagged for review`);
   for (const c of newCandidates) {
@@ -199,22 +193,14 @@ export function flagGraduationCandidates(coin: string, historyPath: string, curr
  * Manually promote an engine from candidates to live (called from CLI/Telegram).
  */
 export function promoteEngine(coin: string, engineId: string, currentRoundId: string, bankrollUsd?: number): boolean {
-  const candidatesPath = "data/live_candidates.json";
-  if (!fs.existsSync(candidatesPath)) {
-    console.warn(`[graduation] no candidates file at ${candidatesPath}`);
-    return false;
-  }
-  const candidates: Record<string, EngineStats[]> = JSON.parse(fs.readFileSync(candidatesPath, "utf-8"));
+  const candidates = readJsonSafe<Record<string, EngineStats[]>>(GRADUATION_CRITERIA.CANDIDATES_PATH, {});
   const stats = (candidates[coin] || []).find(c => c.engineId === engineId);
   if (!stats) {
     console.warn(`[graduation] ${engineId} not found in ${coin} candidates`);
     return false;
   }
 
-  let existing: LiveEnginesFile = {};
-  if (fs.existsSync(GRADUATION_CRITERIA.LIVE_ENGINES_PATH)) {
-    try { existing = JSON.parse(fs.readFileSync(GRADUATION_CRITERIA.LIVE_ENGINES_PATH, "utf-8")); } catch {}
-  }
+  const existing = readJsonSafe<LiveEnginesFile>(GRADUATION_CRITERIA.LIVE_ENGINES_PATH, {});
   const list = existing[coin] || [];
   if (list.some(r => r.engineId === engineId)) {
     console.warn(`[graduation] ${engineId} already live on ${coin}`);
@@ -229,10 +215,7 @@ export function promoteEngine(coin: string, engineId: string, currentRoundId: st
     stats,
   });
   existing[coin] = list;
-
-  const tmp = GRADUATION_CRITERIA.LIVE_ENGINES_PATH + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(existing, null, 2));
-  fs.renameSync(tmp, GRADUATION_CRITERIA.LIVE_ENGINES_PATH);
+  writeJsonAtomic(GRADUATION_CRITERIA.LIVE_ENGINES_PATH, existing);
 
   console.log(`[graduation] PROMOTED ${engineId} to live on ${coin} with $${bankrollUsd ?? GRADUATION_CRITERIA.DEFAULT_BANKROLL_USD} bankroll`);
   return true;

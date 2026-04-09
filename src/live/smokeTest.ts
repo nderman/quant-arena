@@ -8,6 +8,17 @@ import { computeStats, passesCriteria, GRADUATION_CRITERIA } from "./graduation"
 import { dryRunPlaceOrder, dryRunStats } from "./dryRunAdapter";
 import { createLiveState } from "./liveState";
 import type { EngineAction } from "../types";
+import type { RoundHistoryEntry } from "../historyStore";
+
+// Test helper: build a synthetic round entry
+const round = (roundId: string, engineId: string, totalPnl: number): RoundHistoryEntry => ({
+  roundId,
+  allResults: [{
+    engineId, totalPnl, tradeCount: 5,
+    finalCash: 50 + totalPnl, positionValue: 0,
+    feePaid: 0, slippageCost: 0, winRate: 0, sharpeRatio: 0,
+  }],
+});
 
 let pass = 0, fail = 0;
 function check(name: string, ok: boolean, detail?: string) {
@@ -61,17 +72,12 @@ console.log("\n[smoke] Risk Manager");
 console.log("\n[smoke] Graduation");
 {
   // Build a synthetic round history
-  const history = [
-    { roundId: "R1", allResults: [{ engineId: "winner", totalPnl: 100, tradeCount: 5 }] },
-    { roundId: "R2", allResults: [{ engineId: "winner", totalPnl: 80, tradeCount: 5 }] },
-    { roundId: "R3", allResults: [{ engineId: "winner", totalPnl: -20, tradeCount: 5 }] },
-    { roundId: "R4", allResults: [{ engineId: "winner", totalPnl: 120, tradeCount: 5 }] },
-    { roundId: "R5", allResults: [{ engineId: "winner", totalPnl: 60, tradeCount: 5 }] },
-    { roundId: "R6", allResults: [{ engineId: "winner", totalPnl: 100, tradeCount: 5 }] },
-    { roundId: "R7", allResults: [{ engineId: "winner", totalPnl: 90, tradeCount: 5 }] },
-    { roundId: "R8", allResults: [{ engineId: "winner", totalPnl: -25, tradeCount: 5 }] },
-    { roundId: "R9", allResults: [{ engineId: "winner", totalPnl: 110, tradeCount: 5 }] },
-    { roundId: "R10", allResults: [{ engineId: "winner", totalPnl: 85, tradeCount: 5 }] },
+  const history: RoundHistoryEntry[] = [
+    round("R1", "winner", 100), round("R2", "winner", 80),
+    round("R3", "winner", -20), round("R4", "winner", 120),
+    round("R5", "winner", 60), round("R6", "winner", 100),
+    round("R7", "winner", 90), round("R8", "winner", -25),
+    round("R9", "winner", 110), round("R10", "winner", 85),
   ];
   const stats = computeStats("winner", history);
   check("computes 10 rounds", stats.rounds === 10);
@@ -84,9 +90,9 @@ console.log("\n[smoke] Graduation");
   check("passes graduation", result.ok, result.reasons.join(", "));
 
   // Failing case: high variance
-  const lossy = [
+  const lossy: RoundHistoryEntry[] = [
     ...history.slice(0, 9),
-    { roundId: "R10", allResults: [{ engineId: "winner", totalPnl: -49, tradeCount: 5 }] },
+    round("R10", "winner", -49),
   ];
   const lossyStats = computeStats("winner", lossy);
   const lossyResult = passesCriteria(lossyStats);

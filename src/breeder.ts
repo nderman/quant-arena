@@ -132,27 +132,17 @@ function readTypes(): string {
 
 // ── Round History ──────────────────────────────────────────────────────────
 
-function loadRoundHistory(): any[] {
-  const historyPath = path.join(DATA_DIR, `round_history_${COIN}.json`);
-  try {
-    const history = JSON.parse(fs.readFileSync(historyPath, "utf-8")) as any[];
-    return history;
-  } catch {
-    return [];
-  }
+import { loadRoundHistory as loadHistory, buildCumulativePnl as buildPnl, type RoundHistoryEntry } from "./historyStore";
+
+function loadRoundHistory(): RoundHistoryEntry[] {
+  return loadHistory(COIN);
 }
 
-function buildCumulativePnl(history: any[]): Map<string, number> {
-  const pnl = new Map<string, number>();
-  for (const round of history) {
-    for (const r of round.allResults || []) {
-      pnl.set(r.engineId, (pnl.get(r.engineId) || 0) + r.totalPnl);
-    }
-  }
-  return pnl;
+function buildCumulativePnl(history: RoundHistoryEntry[]): Map<string, number> {
+  return buildPnl(history);
 }
 
-function formatRoundHistory(history: any[]): string {
+function formatRoundHistory(history: RoundHistoryEntry[]): string {
   if (history.length === 0) return "No round history yet.";
 
   const engineStats = new Map<string, { rounds: number; wins: number; totalPnl: number; bestPnl: number; worstPnl: number }>();

@@ -38,11 +38,14 @@ let orderCounter = 0;
 const orders = new Map<string, MockOrder>();
 
 export function dryRunPlaceOrder(action: EngineAction): MockOrder {
+  if (action.side !== "BUY" && action.side !== "SELL") {
+    throw new Error(`dryRunPlaceOrder: only BUY/SELL supported, got ${action.side}`);
+  }
   const clientOrderId = `dry-${++orderCounter}-${Date.now()}`;
   const order: MockOrder = {
     clientOrderId,
     tokenId: action.tokenId,
-    side: action.side as "BUY" | "SELL",
+    side: action.side,
     price: action.price,
     size: action.size,
     filledSize: action.size, // instant fill

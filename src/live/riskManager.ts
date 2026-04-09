@@ -11,16 +11,18 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { DATA_DIR } from "../historyStore";
 import type { EngineAction } from "../types";
 import type { LiveEngineState } from "./liveState";
 
 export const RISK_CONFIG = {
-  MAX_POSITION_PCT: 0.05,        // 5% of bankroll per order (was 2%, raised to clear $1 PM min)
+  MAX_POSITION_PCT: 0.05,        // 5% of bankroll per order
   MAX_DAILY_LOSS_USD: 50,        // pause for the day if hit
   MAX_OPEN_POSITIONS: 5,         // limit concurrent exposure
   MAX_PENDING_ORDERS: 10,        // unfilled orders cap
   MIN_ORDER_USD: 1,              // PM minimum
-  HALT_FLAG_PATH: "data/live_halt.flag",
+  HALT_FLAG_PATH: path.join(DATA_DIR, "live_halt.flag"),
+  HALT_RECHECK_MS: 5_000,        // re-stat the halt flag at most this often
 };
 
 export interface RiskCheckResult {
@@ -28,8 +30,18 @@ export interface RiskCheckResult {
   reason?: string;
 }
 
+let haltCache = { value: false, checkedAt: 0 };
+
 export function isHalted(): boolean {
-  return fs.existsSync(path.resolve(RISK_CONFIG.HALT_FLAG_PATH));
+  const now = Date.now();
+  if (now - haltCache.checkedAt < RISK_CONFIG.HALT_RECHECK_MS) return haltCache.value;
+  haltCache = { value: fs.existsSync(RISK_CONFIG.HALT_FLAG_PATH), checkedAt: now };
+  return haltCache.value;
+}
+
+/** Force re-check (test/debug only) */
+export function _resetHaltCache(): void {
+  haltCache = { value: false, checkedAt: 0 };
 }
 
 export function canTrade(action: EngineAction, state: LiveEngineState): RiskCheckResult {
