@@ -45,10 +45,17 @@ console.log("\n[smoke] Risk Manager");
   const r3 = canTrade(tooSmall, state);
   check("undersized BUY rejected", !r3.ok && r3.reason!.includes("below min"));
 
-  // MERGE not allowed in v1
-  const merge: EngineAction = { side: "MERGE", tokenId: "tok1", price: 0.10, size: 20 };
-  const r4 = canTrade(merge, state);
-  check("MERGE rejected in v1", !r4.ok && r4.reason!.includes("MERGE"));
+  // MERGE without position rejected
+  const mergeNoPos: EngineAction = { side: "MERGE", tokenId: "tok1", price: 0.10, size: 20 };
+  const r4 = canTrade(mergeNoPos, state);
+  check("MERGE without position rejected", !r4.ok && r4.reason!.includes("MERGE without"));
+
+  // MERGE with position accepted (planMerge handles sizing)
+  state.positions.set("tok1", { tokenId: "tok1", side: "YES", shares: 50, avgEntry: 0.10, costBasis: 5 } as any);
+  const mergeOk: EngineAction = { side: "MERGE", tokenId: "tok1", price: 0.10, size: 20 };
+  const r4b = canTrade(mergeOk, state);
+  check("MERGE with position accepted", r4b.ok);
+  state.positions.delete("tok1");
 
   // Daily loss hit
   state.dailyLossUsd = 51;

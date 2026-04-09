@@ -105,13 +105,22 @@ Hook at end of every sim round in `arena.ts`. Reads `round_history_${coin}.json`
 
 Phases 0–2 can merge to main safely. Phases 3+ stay on branch until canary passes.
 
-## Showstoppers / unknowns
+## Decisions made
 
-1. **CLOB min order size**: PM enforces ~$1 min + 5-share min. With 2% of $50 = $1 cap, we're on the floor. May need 5% per order or $100 bankroll.
-2. **5M rotation vs order lifecycle**: 5M markets rotate every 2min. Live order placement may not complete before rotation. **Likely need to target 1H/4H markets for live, even though sim uses 5M.**
-3. **MERGE gas cost**: $0.10–$1 gas eats 2–20% of $5 positions. **v1: never MERGE live, always SELL.**
-4. **Signature type drift**: funder vs signer confusion bit polymarket-ai-bot. Verify `SIGNATURE_TYPE` + `FUNDER` env before shadow phase.
-5. **Drift calibration baseline**: sim has synthetic latency/toxic flow/fees. Live fills will differ systematically. Need calibration round to set $5 kill threshold.
+1. **Target market**: 5M markets (sim parity, fast feedback). Order lifecycle must complete in <2min — use IOC or maker orders that auto-cancel on next rotation.
+2. **MERGE supported, two flavors**:
+   - Flavor A (cheap): if we already hold both UP and NO from prior fills, just call `mergePositions(conditionId, min(upShares, downShares))` on-chain. Single tx, gas only.
+   - Flavor B (arb): if we hold only one side, buy enough opposite via CLOB to reach `action.size`, wait for fill, then `mergePositions`. Two operations.
+   - Live executor inspects on-chain balances first, picks the cheaper flavor.
+   - Reuse `mergePositions` ABI + multicall pattern from polymarket-ai-bot/redeemer.ts.
+3. **Wallet**: NEW wallet for arena, separate from polymarket-ai-bot. Accounting clean. Fund with $200 initially ($50 × 4 engines max).
+4. **Bankroll cap**: $50 per engine, 5% per order = $2.50 max order size. Above PM $1 minimum.
+
+## Outstanding unknowns
+
+1. **Signature type drift**: funder vs signer confusion bit polymarket-ai-bot. Verify `SIGNATURE_TYPE` + `FUNDER` env before shadow phase.
+2. **Drift calibration baseline**: sim has synthetic latency/toxic flow/fees. Live fills will differ systematically. Need calibration round to set $5 kill threshold.
+3. **5M order timing**: maker orders may not fill before candle ends. Need to test in shadow mode whether fill rates are acceptable.
 
 ## Reuse from polymarket-ai-bot
 

@@ -18,6 +18,13 @@ export interface PendingOrder {
   filledSize: number;
 }
 
+/** Maps tokenId → conditionId so MERGE actions can call the on-chain contract */
+export interface TokenConditionMap {
+  upTokenId: string;
+  downTokenId: string;
+  conditionId: string;
+}
+
 export interface LiveEngineState {
   engineId: string;
   walletAddress: string;

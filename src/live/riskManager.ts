@@ -47,8 +47,14 @@ export function _resetHaltCache(): void {
 export function canTrade(action: EngineAction, state: LiveEngineState): RiskCheckResult {
   if (isHalted()) return { ok: false, reason: "kill switch active (data/live_halt.flag)" };
   if (state.paused) return { ok: false, reason: `engine paused: ${state.pauseReason ?? "unknown"}` };
-  if (action.side === "MERGE") return { ok: false, reason: "MERGE disabled in v1 — use SELL" };
   if (action.side === "HOLD") return { ok: true };
+
+  // MERGE: just verify position exists. Sizing checked in liveExecutor via planMerge.
+  if (action.side === "MERGE") {
+    const pos = state.positions.get(action.tokenId);
+    if (!pos || pos.shares <= 0) return { ok: false, reason: "MERGE without position" };
+    return { ok: true };
+  }
 
   // Daily loss check
   if (state.dailyLossUsd >= RISK_CONFIG.MAX_DAILY_LOSS_USD) {
