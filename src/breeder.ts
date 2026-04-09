@@ -314,7 +314,8 @@ function validateEngine(_filePath: string): { valid: boolean; error?: string } {
 
 function pruneEngines(intel: any): void {
   const engines = listEngines();
-  const prunableEngines = engines.filter(e => e !== "BaseEngine");
+  // Only prune bred engines — never touch hand-built built-ins
+  const prunableEngines = engines.filter(e => e.startsWith("BredEngine_"));
 
   if (prunableEngines.length <= MAX_ENGINES) return;
 
