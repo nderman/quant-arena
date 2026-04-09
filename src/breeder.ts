@@ -25,7 +25,7 @@ const CODER_MODEL = process.env.CODER_MODEL || "anthropic/claude-sonnet-4-5";
 const MAX_RETRIES = 3;
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const ENGINES_DIR = path.resolve(PROJECT_ROOT, "src", "engines"); // always read/write TypeScript source
-const MAX_ENGINES = 8; // don't let the arena get too crowded
+const MAX_ENGINES = 25; // hand-builts + space for bred experiments
 const DATA_DIR = path.resolve(PROJECT_ROOT, "data");
 const COIN = (process.env.ARENA_COIN || "btc").toLowerCase();
 const ARCHIVE_DIR = path.resolve(DATA_DIR, "engines_archive");
@@ -314,8 +314,7 @@ function validateEngine(_filePath: string): { valid: boolean; error?: string } {
 
 function pruneEngines(intel: any): void {
   const engines = listEngines();
-  // Only prune bred engines — never touch hand-built built-ins
-  const prunableEngines = engines.filter(e => e.startsWith("BredEngine_"));
+  const prunableEngines = engines.filter(e => e !== "BaseEngine");
 
   if (prunableEngines.length <= MAX_ENGINES) return;
 
