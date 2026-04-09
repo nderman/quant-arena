@@ -19,7 +19,7 @@ import { processActions, processMergeActions, markToMarket, clearFeePool, clearF
 import { recordFill, recordRoundStart, recordRoundEnd, getRoundSummary, closeDb, flushLedger } from "./ledger";
 import { fetchSignalSnapshot } from "./signals";
 import { discoverCryptoMarkets, discoverUpDownMarkets, discover5mMarkets } from "./discovery";
-import { settleExpiredMarkets, trackMarketForSettlement, clearTrackedMarkets, fetchStrikePrice } from "./settlement";
+import { pollAndSettle } from "./settlement";
 import type {
   BaseEngine,
   EngineAction,
@@ -105,22 +105,6 @@ function slugToBinanceSymbol(slug: string): string {
   return (slug.split("-updown-")[0]?.toUpperCase() || "BTC") + "USDT";
 }
 
-async function registerMarketsForSettlement(markets: any[]): Promise<void> {
-  const strikes = await Promise.allSettled(
-    markets.map(m => fetchStrikePrice(slugToBinanceSymbol(m.slug), new Date(m.endDate).getTime() - 300_000))
-  );
-  for (let i = 0; i < markets.length; i++) {
-    const m = markets[i];
-    const symbol = slugToBinanceSymbol(m.slug);
-    const windowEnd = new Date(m.endDate).getTime();
-    const windowStart = windowEnd - 300_000;
-    const sr = strikes[i];
-    const openPrice = sr.status === "fulfilled" ? sr.value : 0;
-    trackMarketForSettlement({ tokenId: m.yesTokenId, side: "UP", windowStart, windowEnd, openPrice, symbol });
-    trackMarketForSettlement({ tokenId: m.noTokenId, side: "DOWN", windowStart, windowEnd, openPrice, symbol });
-  }
-}
-
 // ── Engine State Factory ─────────────────────────────────────────────────────
 
 function createEngineState(engineId: string): EngineState {
@@ -167,7 +151,6 @@ async function runRound(
     statesForSettlement.set(engine.id, { engineId: engine.id, state });
     engine.init(state);
   }
-  clearTrackedMarkets();
   clearFeePool();
   activeStates = states;
 
@@ -188,10 +171,13 @@ async function runRound(
     .then(s => { latestSignals = s; })
     .catch(() => {});
 
-  // ── Settlement timer: runs every 5s regardless of tick flow ──
+  // ── Settlement: poll Gamma API every 30s for closed markets ──
+  // Self-contained — discovers closed markets directly, no dependence on tracking
   const settlementInterval = setInterval(() => {
-    settleExpiredMarkets(statesForSettlement);
-  }, 5_000);
+    pollAndSettle(statesForSettlement).catch(err =>
+      console.error("[arena] settlement error:", err.message)
+    );
+  }, 30_000);
 
   // ── Tick handler: feed every tick to every engine ──
   const onTick = async (tick: MarketTick) => {
@@ -415,10 +401,6 @@ async function main(): Promise<void> {
         console.log(`\n[arena] Auto-selected: "${pick.title}"`);
         console.log(`  UP token:   ${pick.yesTokenId.slice(0, 20)}...`);
         console.log(`  DOWN token: ${pick.noTokenId.slice(0, 20)}...\n`);
-
-        // Register initial 5M markets for settlement
-        const fiveMinMarkets = all.filter(m => m.slug?.includes("-5m-"));
-        await registerMarketsForSettlement(fiveMinMarkets);
       } else {
         console.log("[arena] No live crypto markets found — falling back to simulated pulse");
       }
@@ -440,13 +422,9 @@ async function main(): Promise<void> {
     startBinanceChannel();
 
     // For 5M markets: rotate subscription every 2 min as markets expire
-    // Also register each market for settlement tracking
     startMarketRotation(async () => {
       const markets = await discover5mMarkets({ tokens: ["btc"] });
       if (markets.length === 0) return null;
-
-      // Register for settlement
-      await registerMarketsForSettlement(markets);
 
       // Pick market with most time remaining
       markets.sort((a, b) =>

@@ -115,7 +115,14 @@ function readBaseEngine(): string {
 }
 
 function readExampleEngine(): string {
-  return fs.readFileSync(path.join(ENGINES_DIR, "EdgeSniperEngine.ts"), "utf-8");
+  // Try multiple examples in order — any might be pruned
+  const candidates = ["FadeV3Engine.ts", "FadeV2Engine.ts", "MeanRevertV2Engine.ts", "EdgeSniperEngine.ts"];
+  for (const name of candidates) {
+    try {
+      return fs.readFileSync(path.join(ENGINES_DIR, name), "utf-8");
+    } catch { continue; }
+  }
+  return "// No example engine available — see BaseEngine.ts for interface";
 }
 
 function readTypes(): string {
@@ -339,9 +346,11 @@ function pruneEngines(intel: any): void {
     if (worstFile) {
       console.log(`[breeder] Pruning #${pruned + 1}: ${worstFile} (cumulative P&L: $${result.cumulativePnl.toFixed(2)})`);
       const srcPath = path.join(ENGINES_DIR, worstFile + ".ts");
+      const distPath = path.join(PROJECT_ROOT, "dist", "engines", worstFile + ".js");
       const archivePath = path.join(ARCHIVE_DIR, `${worstFile}_pruned_${Date.now()}.ts`);
       fs.copyFileSync(srcPath, archivePath);
       fs.unlinkSync(srcPath);
+      try { fs.unlinkSync(distPath); } catch {} // also remove compiled JS
       pruned++;
     }
   }
