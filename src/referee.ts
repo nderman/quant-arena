@@ -341,8 +341,9 @@ async function processActionNoLatency(
   const actualLatency = config.latencyMs;
 
   // ── MERGE action (on-chain — gas applies here) ──
-  // To merge, you buy the opposite token and redeem both for $1.
-  // Cost: walk the opposite token's REAL book (not 1-price), pay fees + gas.
+  // Two flavors:
+  //   A) "Just merge what we hold" — already hold both sides → only gas cost
+  //   B) "Buy + merge" — hold one side, buy opposite, then merge
   // Merge arb exists because UP_ask + DOWN_ask > $1 (the market gap).
   if (action.side === "MERGE") {
     // Must hold a position to merge — reject if no position or insufficient shares
@@ -365,11 +366,62 @@ async function processActionNoLatency(
       };
     }
 
-    // Walk the OPPOSITE token's real book to buy the other side
-    // For expiring tokens, use the stored paired opposite (not the current active market)
+    // Determine the opposite token
     const storedOpposite = state.expiringTokenIds?.get(action.tokenId);
     const isHoldingDown = pos.side === "NO";
     const oppositeTokenId = storedOpposite || (isHoldingDown ? state.activeTokenId : state.activeDownTokenId);
+
+    // ── Flavor A: do we already hold the opposite? ──
+    const oppositePos = state.positions.get(oppositeTokenId);
+    const haveBothSides = oppositePos && oppositePos.shares > 0;
+    if (haveBothSides) {
+      const mergeShares = Math.min(shares, oppositePos.shares);
+      if (mergeShares >= CONFIG.MIN_MERGE_SIZE) {
+        // Gas only — no opposite buy needed
+        const absDelta = Math.abs(getBinanceDelta());
+        const volMultiplier = 1 + (CONFIG.GAS_VOL_MULTIPLIER - 1) * Math.min(absDelta / 0.005, 1);
+        const gasCost = CONFIG.GAS_COST_USD * volMultiplier;
+        const mergeValue = mergeShares * 1.0;
+        const mergeFlatFee = calculateMergeFee(mergeValue);
+        const totalCost = mergeFlatFee + gasCost;
+        const totalFee = mergeFlatFee + gasCost;
+
+        if (state.cashBalance < totalCost) {
+          return {
+            action, filled: false, fillPrice: 0, fillSize: 0,
+            fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
+            toxicFlowHit: false, orderType: "taker",
+          };
+        }
+
+        // P&L: $1/share - cost basis of BOTH sides - gas
+        const myCostBasis = pos.avgEntry * mergeShares;
+        const oppositeCostBasis = oppositePos.avgEntry * mergeShares;
+        const pnl = mergeValue - myCostBasis - oppositeCostBasis - totalCost;
+
+        state.cashBalance -= totalCost;
+        state.cashBalance += mergeValue;
+        state.feePaid += totalFee;
+        state.roundPnl += pnl;
+
+        pos.shares -= mergeShares;
+        pos.costBasis -= myCostBasis;
+        if (pos.shares <= 0.001) state.positions.delete(action.tokenId);
+
+        oppositePos.shares -= mergeShares;
+        oppositePos.costBasis -= oppositeCostBasis;
+        if (oppositePos.shares <= 0.001) state.positions.delete(oppositeTokenId);
+
+        return {
+          action, filled: true, fillPrice: 1.0, fillSize: mergeShares,
+          fee: totalFee, rebate: 0, slippage: 0, pnl, latencyMs: actualLatency,
+          toxicFlowHit: false, orderType: "taker",
+        };
+      }
+    }
+
+    // ── Flavor B: buy the opposite, then merge ──
+    // Walk the OPPOSITE token's real book to buy the other side
     const oppositeBook = getBookForToken(oppositeTokenId);
     const oppositeWalk = walkBook(shares, "BUY", oppositeBook, CONFIG.MIN_MERGE_SIZE);
 
