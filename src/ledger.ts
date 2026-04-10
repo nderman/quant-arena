@@ -120,6 +120,48 @@ export function recordFill(
   }
 }
 
+/**
+ * Record a settlement payout as a SETTLE row so SUM(pnl) reflects the true
+ * outcome. Without this, settlement wins silently bump cashBalance and the
+ * leaderboard column undercounts gains / overcounts losses.
+ */
+export function recordSettlement(
+  roundId: string,
+  engineId: string,
+  tokenId: string,
+  shares: number,
+  won: boolean,
+  costBasis: number,
+  cashAfter: number,
+  slug: string,
+): void {
+  const payout = won ? shares : 0;
+  const pnl = payout - costBasis;
+  logBuffer.push([
+    roundId,
+    engineId,
+    new Date().toISOString(),
+    "SETTLE",
+    tokenId,
+    won ? 1.0 : 0.0,
+    shares,
+    0,            // fee
+    0,            // rebate
+    0,            // slippage
+    pnl,
+    cashAfter,
+    "settlement", // signal_source
+    `${won ? "WIN" : "LOSS"} ${slug}`,
+    0,            // toxic_flow
+    0,            // latency_ms
+    "settle",     // order_type
+  ]);
+
+  if (logBuffer.length >= BUFFER_FLUSH_THRESHOLD) {
+    flushLedger();
+  }
+}
+
 /** Commit buffered trades in a single transaction. Call at end of tick cycle. */
 export function flushLedger(): void {
   if (logBuffer.length === 0) return;
@@ -205,8 +247,8 @@ export function getEngineStats(engineId: string): {
       COUNT(*) as totalTrades,
       SUM(fee) as totalFees,
       SUM(pnl) as totalPnl,
-      SUM(CASE WHEN action = 'SELL' AND pnl > 0 THEN 1 ELSE 0 END) as wins,
-      SUM(CASE WHEN action = 'SELL' THEN 1 ELSE 0 END) as sells
+      SUM(CASE WHEN action IN ('SELL','SETTLE') AND pnl > 0 THEN 1 ELSE 0 END) as wins,
+      SUM(CASE WHEN action IN ('SELL','SETTLE') THEN 1 ELSE 0 END) as sells
     FROM trades
     WHERE engine_id = ?
   `).get(engineId) as any;

@@ -10,6 +10,7 @@
  */
 
 import { fetchJson } from "./http";
+import { recordSettlement } from "./ledger";
 import type { EngineState } from "./types";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -44,7 +45,7 @@ const settledTokens = new Set<string>();
  */
 export async function pollAndSettle(
   states: Map<string, { engineId: string; state: EngineState }>,
-  options: { lookbackMinutes?: number; tokenSlugPrefix?: string } = {},
+  options: { lookbackMinutes?: number; tokenSlugPrefix?: string; roundId?: string } = {},
 ): Promise<SettlementResult[]> {
   const lookback = options.lookbackMinutes ?? 60;
   const slugPrefix = options.tokenSlugPrefix ?? "btc-updown-5m";
@@ -92,6 +93,10 @@ export async function pollAndSettle(
         state.cashBalance += payout;
         state.roundPnl += pnl;
         state.positions.delete(tokenId);
+
+        if (options.roundId) {
+          recordSettlement(options.roundId, engineId, tokenId, pos.shares, won, pos.costBasis, state.cashBalance, m.slug);
+        }
 
         results.push({ tokenId, won, payout, shares: pos.shares, pnl, costBasis: pos.costBasis });
 

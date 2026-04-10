@@ -17,7 +17,7 @@ import * as dotenv from "dotenv";
 dotenv.config({ path: path.resolve(__dirname, "..", ".env") });
 import { CONFIG } from "./config";
 import { pulseEvents, startSimulatedPulse, startPmChannel, startBinanceChannel, startMarketRotation, setPmSubscriptionTokens, shutdown as shutdownPulse } from "./pulse";
-import { processActions, processMergeActions, markToMarket, clearFeePool, clearFeePoolForMarket } from "./referee";
+import { processActions, processMergeActions, markToMarket, clearFeePool, clearFeePoolForMarket, snapshotTickBooks } from "./referee";
 import { recordFill, recordRoundStart, recordRoundEnd, getRoundSummary, closeDb, flushLedger } from "./ledger";
 import { fetchSignalSnapshot } from "./signals";
 import { discoverCryptoMarkets, discoverUpDownMarkets, discover5mMarkets } from "./discovery";
@@ -176,7 +176,7 @@ async function runRound(
 
   // ── Settlement: poll Gamma API every 30s for closed markets ──
   const settlementInterval = setInterval(() => {
-    pollAndSettle(statesForSettlement, { tokenSlugPrefix: CONFIG.ARENA_SLUG_PREFIX }).catch(err =>
+    pollAndSettle(statesForSettlement, { tokenSlugPrefix: CONFIG.ARENA_SLUG_PREFIX, roundId }).catch(err =>
       console.error("[arena] settlement error:", err.message)
     );
   }, 30_000);
@@ -185,6 +185,11 @@ async function runRound(
   const onTick = async (tick: MarketTick) => {
     if (tick.source === "polymarket") lastPmTick = tick;
     tickCount++;
+
+    // Snapshot books once per tick — engines share depletion (no ghost liquidity)
+    const tickBooks = currentActiveTokenId
+      ? snapshotTickBooks(currentActiveTokenId, currentActiveDownTokenId)
+      : undefined;
 
     for (const engine of engines) {
       const state = states.get(engine.id)!;
@@ -200,8 +205,8 @@ async function runRound(
         }
         if (actions.length === 0) continue;
 
-        // Process CLOB actions (BUY/SELL) — merges deferred for global on-chain delay
-        const { results: fills, pendingMerges } = await processActions(actions, state);
+        // Process CLOB actions — share tickBooks across engines so liquidity depletes
+        const { results: fills, pendingMerges } = await processActions(actions, state, tickBooks);
 
         // Record CLOB fills to ledger
         for (const fill of fills) {
@@ -225,8 +230,12 @@ async function runRound(
     // ── Process all pending MERGEs with single on-chain delay ──
     if (allPendingMerges.length > 0) {
       await new Promise(resolve => setTimeout(resolve, CONFIG.ON_CHAIN_LATENCY_MS));
+      // Re-snapshot books after the delay (the live PM book may have moved during 3s)
+      const mergeTickBooks = currentActiveTokenId
+        ? snapshotTickBooks(currentActiveTokenId, currentActiveDownTokenId)
+        : undefined;
       for (const { engineId, state, merges } of allPendingMerges) {
-        const mergeFills = await processMergeActions(merges, state);
+        const mergeFills = await processMergeActions(merges, state, mergeTickBooks);
         for (const fill of mergeFills) {
           if (fill.filled) recordFill(roundId, engineId, fill, state, fill.pnl);
         }
@@ -379,14 +388,25 @@ async function main(): Promise<void> {
   // ── Auto-discover markets if no condition ID set ──
   if (!CONFIG.PM_CONDITION_ID && !CONFIG.DRY_RUN) {
     console.log("[arena] No PM_CONDITION_ID set — auto-discovering markets...\n");
-    try {
-      // Try 5M markets first (highest frequency, best for arena testing)
-      const fiveMin = await discover5mMarkets({ tokens: [CONFIG.ARENA_COIN] });
-      const updown = await discoverUpDownMarkets({ intervals: ["1H", "4H"], limit: 5 });
-      const crypto = await discoverCryptoMarkets({ limit: 5 });
-      const all = [...fiveMin, ...updown, ...crypto];
 
-      // Prefer 5M markets, then sort by liquidity
+    // Retry with backoff. We REQUIRE at least one 5M market for the configured coin —
+    // never fall back to simulated pulse when running live (the whole point is real data).
+    const maxAttempts = 10;
+    let pick: { title?: string; slug?: string; yesTokenId: string; noTokenId: string; liquidity: number } | null = null;
+    for (let attempt = 1; attempt <= maxAttempts && !pick; attempt++) {
+      // Each call is independent — one timeout shouldn't kill the others.
+      const [fiveMinR, updownR, cryptoR] = await Promise.allSettled([
+        discover5mMarkets({ tokens: [CONFIG.ARENA_COIN] }),
+        discoverUpDownMarkets({ intervals: ["1H", "4H"], limit: 5 }),
+        discoverCryptoMarkets({ limit: 5 }),
+      ]);
+      const fiveMin = fiveMinR.status === "fulfilled" ? fiveMinR.value : [];
+      const updown = updownR.status === "fulfilled" ? updownR.value : [];
+      const crypto = cryptoR.status === "fulfilled" ? cryptoR.value : [];
+      const failed = [fiveMinR, updownR, cryptoR].filter(r => r.status === "rejected") as PromiseRejectedResult[];
+      for (const f of failed) console.warn(`[arena] discovery sub-call failed: ${f.reason?.message ?? f.reason}`);
+
+      const all = [...fiveMin, ...updown, ...crypto];
       all.sort((a, b) => {
         const a5m = a.slug?.includes("-5m-") ? 1 : 0;
         const b5m = b.slug?.includes("-5m-") ? 1 : 0;
@@ -395,25 +415,31 @@ async function main(): Promise<void> {
       });
 
       if (all.length > 0) {
-        const pick = all[0];
-        CONFIG.PM_CONDITION_ID = pick.yesTokenId;
-        currentActiveTokenId = pick.yesTokenId;
-        currentActiveDownTokenId = pick.noTokenId;
-        setPmSubscriptionTokens([pick.yesTokenId, pick.noTokenId]);
-        console.log(`\n[arena] Auto-selected: "${pick.title}"`);
-        console.log(`  UP token:   ${pick.yesTokenId.slice(0, 20)}...`);
-        console.log(`  DOWN token: ${pick.noTokenId.slice(0, 20)}...\n`);
-      } else {
-        console.log("[arena] No live crypto markets found — falling back to simulated pulse");
+        pick = all[0];
+        break;
       }
-    } catch (err: any) {
-      console.error("[arena] Discovery failed:", err.message, "— falling back to simulated pulse");
+      const backoffMs = Math.min(30_000, 2_000 * attempt);
+      console.warn(`[arena] Discovery attempt ${attempt}/${maxAttempts} returned no markets — retrying in ${backoffMs}ms`);
+      await new Promise(r => setTimeout(r, backoffMs));
     }
+
+    if (!pick) {
+      console.error("[arena] Discovery failed after all retries — refusing to start with simulated data. Exiting.");
+      process.exit(1);
+    }
+
+    CONFIG.PM_CONDITION_ID = pick.yesTokenId;
+    currentActiveTokenId = pick.yesTokenId;
+    currentActiveDownTokenId = pick.noTokenId;
+    setPmSubscriptionTokens([pick.yesTokenId, pick.noTokenId]);
+    console.log(`\n[arena] Auto-selected: "${pick.title}"`);
+    console.log(`  UP token:   ${pick.yesTokenId.slice(0, 20)}...`);
+    console.log(`  DOWN token: ${pick.noTokenId.slice(0, 20)}...\n`);
   }
 
   // Start data pulse
-  if (CONFIG.DRY_RUN || !CONFIG.PM_CONDITION_ID) {
-    console.log("[arena] DRY_RUN or no PM_CONDITION_ID — using simulated pulse");
+  if (CONFIG.DRY_RUN) {
+    console.log("[arena] DRY_RUN — using simulated pulse");
     startSimulatedPulse({
       startPrice: 0.50 + (Math.random() - 0.5) * 0.4,
       volatility: 0.008,

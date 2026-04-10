@@ -183,6 +183,7 @@ function walkBook(
   side: "BUY" | "SELL",
   book: OrderBook,
   minFillSize: number = CONFIG.MIN_ORDER_SIZE,
+  mutate: boolean = false,
 ): { effectivePrice: number; totalCost: number; filledSize: number } | null {
   const levels = side === "BUY" ? book.asks : book.bids;
   if (!levels.length) return null;
@@ -194,9 +195,13 @@ function walkBook(
   let totalCost = 0;
   let levelsConsumed = 0;
   let filledSize = 0;
+  // Track depletion offsets per level if mutating
+  const depletions: number[] = mutate ? new Array(levels.length).fill(0) : [];
 
-  for (const level of levels) {
+  for (let i = 0; i < levels.length; i++) {
+    const level = levels[i];
     const take = Math.min(remaining, level.size);
+    if (take <= 0) continue;
 
     // Fill decay: each level consumed makes remaining levels worse
     let levelPrice = level.price;
@@ -212,12 +217,23 @@ function walkBook(
     totalCost += take * levelPrice;
     remaining -= take;
     filledSize += take;
+    if (mutate) depletions[i] = take;
     if (take >= level.size * 0.5) levelsConsumed++;   // only decay if we ate >50% of a level
 
     if (remaining <= 0) break;
   }
 
   if (filledSize < minFillSize) return null;
+
+  // Apply depletions to the book (mutate mode only, after we've confirmed fill)
+  if (mutate) {
+    for (let i = depletions.length - 1; i >= 0; i--) {
+      if (depletions[i] > 0) {
+        levels[i].size -= depletions[i];
+        if (levels[i].size <= 0.001) levels.splice(i, 1);
+      }
+    }
+  }
 
   return {
     effectivePrice: totalCost / filledSize,
@@ -239,6 +255,7 @@ function walkBook(
  */
 function simulateToxicFlow(
   action: EngineAction,
+  tickBooks?: TickBooks,
 ): { adjustedPrice: number; toxicHit: boolean; slippage: number } {
   if (!config.enableToxicFlow) {
     return { adjustedPrice: action.price, toxicHit: false, slippage: 0 };
@@ -264,8 +281,7 @@ function simulateToxicFlow(
 
   if (action.side === "BUY") {
     const adversePrice = action.price * (1 + bpsMagnitude);
-    // Use the correct token's book (not always UP)
-    const currentBook = getBookForToken(action.tokenId);
+    const currentBook = bookFromTick(action.tokenId, tickBooks);
     const currentAsk = currentBook.asks[0]?.price ?? action.price;
     const fillPrice = Math.max(currentAsk, adversePrice);
     return {
@@ -275,7 +291,7 @@ function simulateToxicFlow(
     };
   } else if (action.side === "SELL") {
     const adversePrice = action.price * (1 - bpsMagnitude);
-    const currentBook = getBookForToken(action.tokenId);
+    const currentBook = bookFromTick(action.tokenId, tickBooks);
     const currentBid = currentBook.bids[0]?.price ?? action.price;
     const fillPrice = Math.min(currentBid, adversePrice);
     return {
@@ -300,9 +316,45 @@ function simulateToxicFlow(
  * 4. Calculate parabolic fee (or flat merge fee)
  * 5. Return fill result
  */
+/** Per-tick book snapshot — mutated as engines deplete liquidity within one tick */
+export interface TickBooks {
+  upTokenId: string;
+  downTokenId: string;
+  /** Lazy cache of cloned books keyed by tokenId. Books are cloned on first access so walkBook(mutate=true) never touches live pulse.ts state. */
+  bookCache: Map<string, OrderBook>;
+}
+
+function cloneBook(book: OrderBook): OrderBook {
+  return {
+    bids: book.bids.map(l => ({ price: l.price, size: l.size })),
+    asks: book.asks.map(l => ({ price: l.price, size: l.size })),
+    timestamp: book.timestamp,
+  };
+}
+
+/** Create an empty per-tick snapshot. Books are cloned lazily on first access via bookFromTick. */
+export function snapshotTickBooks(upTokenId: string, downTokenId: string): TickBooks {
+  return {
+    upTokenId,
+    downTokenId,
+    bookCache: new Map(),
+  };
+}
+
+function bookFromTick(tokenId: string, tick?: TickBooks): OrderBook {
+  if (!tick) return getBookForToken(tokenId);
+  let cached = tick.bookCache.get(tokenId);
+  if (!cached) {
+    cached = cloneBook(getBookForToken(tokenId));
+    tick.bookCache.set(tokenId, cached);
+  }
+  return cached;
+}
+
 async function processActionNoLatency(
   action: EngineAction,
   state: EngineState,
+  tickBooks?: TickBooks,
 ): Promise<FillResult> {
 
   // ── TokenId validation: reject trades for unknown tokens ──
@@ -346,6 +398,18 @@ async function processActionNoLatency(
   //   B) "Buy + merge" — hold one side, buy opposite, then merge
   // Merge arb exists because UP_ask + DOWN_ask > $1 (the market gap).
   if (action.side === "MERGE") {
+    // Merge finality guard: the tx takes ON_CHAIN_LATENCY_MS to land on Polygon.
+    // If the candle settles before the merge mines, the conditional-token contract
+    // rejects the merge (tokens are already resolved). Engines can't game the
+    // 3-second oracle window.
+    if (state.marketWindowEnd && Date.now() + CONFIG.ON_CHAIN_LATENCY_MS > state.marketWindowEnd) {
+      return {
+        action, filled: false, fillPrice: 0, fillSize: 0,
+        fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
+        toxicFlowHit: false, orderType: "taker",
+      };
+    }
+
     // Must hold a position to merge — reject if no position or insufficient shares
     const pos = state.positions.get(action.tokenId);
     if (!pos || pos.shares < CONFIG.MIN_MERGE_SIZE) {
@@ -422,8 +486,8 @@ async function processActionNoLatency(
 
     // ── Flavor B: buy the opposite, then merge ──
     // Walk the OPPOSITE token's real book to buy the other side
-    const oppositeBook = getBookForToken(oppositeTokenId);
-    const oppositeWalk = walkBook(shares, "BUY", oppositeBook, CONFIG.MIN_MERGE_SIZE);
+    const oppositeBook = bookFromTick(oppositeTokenId, tickBooks);
+    const oppositeWalk = walkBook(shares, "BUY", oppositeBook, CONFIG.MIN_MERGE_SIZE, !!tickBooks);
 
     if (!oppositeWalk) {
       return {
@@ -514,7 +578,7 @@ async function processActionNoLatency(
   // Makers don't suffer toxic flow — they set the price, takers cross it
   const { adjustedPrice, toxicHit, slippage } = isMakerOrder
     ? { adjustedPrice: action.price, toxicHit: false, slippage: 0 }
-    : simulateToxicFlow(action);
+    : simulateToxicFlow(action, tickBooks);
 
   // Detect DOWN token for position side tracking
   const isDownToken = !!(state.activeDownTokenId && action.tokenId === state.activeDownTokenId);
@@ -523,8 +587,8 @@ async function processActionNoLatency(
   // Each token has its own real book — no price inversion needed
   if (action.side === "BUY") {
     const isMaker = action.orderType === "maker";
-    const tokenBook = getBookForToken(action.tokenId);
-    const walked = walkBook(action.size, "BUY", tokenBook);
+    const tokenBook = bookFromTick(action.tokenId, tickBooks);
+    const walked = walkBook(action.size, "BUY", tokenBook, CONFIG.MIN_ORDER_SIZE, !!tickBooks);
 
     // Reject if no book or insufficient liquidity
     if (!walked) {
@@ -644,8 +708,8 @@ async function processActionNoLatency(
     }
 
     // Each token has its own real book — no price inversion needed
-    const tokenBook = getBookForToken(action.tokenId);
-    const walked = walkBook(sellSize, "SELL", tokenBook);
+    const tokenBook = bookFromTick(action.tokenId, tickBooks);
+    const walked = walkBook(sellSize, "SELL", tokenBook, CONFIG.MIN_ORDER_SIZE, !!tickBooks);
     if (!walked) {
       return {
         action, filled: false, fillPrice: 0, fillSize: 0,
@@ -742,6 +806,7 @@ async function processActionNoLatency(
 export async function processActions(
   actions: EngineAction[],
   state: EngineState,
+  tickBooks?: TickBooks,
 ): Promise<{ results: FillResult[]; pendingMerges: EngineAction[] }> {
   const nonMerge = actions.filter(a => a.side !== "MERGE");
   const merges = actions.filter(a => a.side === "MERGE");
@@ -752,7 +817,7 @@ export async function processActions(
     await new Promise(resolve => setTimeout(resolve, config.latencyMs));
   }
   for (const action of nonMerge) {
-    results.push(await processActionNoLatency(action, state));
+    results.push(await processActionNoLatency(action, state, tickBooks));
   }
 
   return { results, pendingMerges: merges };
@@ -762,10 +827,11 @@ export async function processActions(
 export async function processMergeActions(
   actions: EngineAction[],
   state: EngineState,
+  tickBooks?: TickBooks,
 ): Promise<FillResult[]> {
   const results: FillResult[] = [];
   for (const action of actions) {
-    results.push(await processActionNoLatency(action, state));
+    results.push(await processActionNoLatency(action, state, tickBooks));
   }
   return results;
 }
