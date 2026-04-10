@@ -176,7 +176,7 @@ async function runRound(
 
   // ── Settlement: poll Gamma API every 30s for closed markets ──
   const settlementInterval = setInterval(() => {
-    pollAndSettle(statesForSettlement, { tokenSlugPrefix: CONFIG.ARENA_SLUG_PREFIX }).catch(err =>
+    pollAndSettle(statesForSettlement, { tokenSlugPrefix: CONFIG.ARENA_SLUG_PREFIX, roundId }).catch(err =>
       console.error("[arena] settlement error:", err.message)
     );
   }, 30_000);
