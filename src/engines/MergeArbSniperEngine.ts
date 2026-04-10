@@ -58,6 +58,11 @@ export class MergeArbSniperEngine extends AbstractEngine {
 
   private ticksSinceLastFire = 999;
   private lastMarketTokens = "";
+  // Diagnostic: track the running min ask-sum per market so we can see whether
+  // arbs ever exist at any threshold (vs just below our trade threshold).
+  private minSumThisMarket = Infinity;
+  private minSumLogged = Infinity;
+  private currentMarketCoin = "";
 
   onTick(tick: MarketTick, state: EngineState): EngineAction[] {
     if (tick.source !== "polymarket") return [];
@@ -66,11 +71,18 @@ export class MergeArbSniperEngine extends AbstractEngine {
     const downTokenId = this.getDownTokenId();
     if (!upTokenId || !downTokenId) return [];
 
-    // Reset cooldown when market rotates
+    // Reset cooldown + diagnostic counters when market rotates
     const currentTokens = `${upTokenId}:${downTokenId}`;
     if (currentTokens !== this.lastMarketTokens) {
+      // Log final stats for the prior market (if we observed one)
+      if (this.lastMarketTokens && this.minSumThisMarket < Infinity) {
+        console.log(`[merge-arb-sniper] ${this.currentMarketCoin} market closed — final min(UP_ask+DOWN_ask)=${this.minSumThisMarket.toFixed(4)}`);
+      }
       this.ticksSinceLastFire = 999;
       this.lastMarketTokens = currentTokens;
+      this.minSumThisMarket = Infinity;
+      this.minSumLogged = Infinity;
+      this.currentMarketCoin = this.getMarketSymbol() || "?";
     }
     this.ticksSinceLastFire++;
 
@@ -103,6 +115,17 @@ export class MergeArbSniperEngine extends AbstractEngine {
     if (!upAsk || !downAsk || upAsk <= 0 || downAsk <= 0) return [];
 
     const sum = upAsk + downAsk;
+
+    // Diagnostic: track the running min and log every meaningful improvement.
+    // Logs only on > 0.005 improvement to avoid tick-by-tick spam.
+    if (sum < this.minSumThisMarket) {
+      this.minSumThisMarket = sum;
+      if (sum < this.minSumLogged - 0.005) {
+        console.log(`[merge-arb-sniper] ${this.currentMarketCoin} new min(UP_ask+DOWN_ask)=${sum.toFixed(4)} (UP=${upAsk.toFixed(3)}, DOWN=${downAsk.toFixed(3)})`);
+        this.minSumLogged = sum;
+      }
+    }
+
     if (sum >= this.maxAskSum) return [];
 
     // Need enough size on both books to fill our target trade
@@ -133,7 +156,13 @@ export class MergeArbSniperEngine extends AbstractEngine {
   }
 
   onRoundEnd(_state: EngineState): void {
+    if (this.lastMarketTokens && this.minSumThisMarket < Infinity) {
+      console.log(`[merge-arb-sniper] ${this.currentMarketCoin} round ended — final min(UP_ask+DOWN_ask)=${this.minSumThisMarket.toFixed(4)}`);
+    }
     this.ticksSinceLastFire = 999;
     this.lastMarketTokens = "";
+    this.minSumThisMarket = Infinity;
+    this.minSumLogged = Infinity;
+    this.currentMarketCoin = "";
   }
 }
