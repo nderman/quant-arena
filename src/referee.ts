@@ -398,6 +398,18 @@ async function processActionNoLatency(
   //   B) "Buy + merge" — hold one side, buy opposite, then merge
   // Merge arb exists because UP_ask + DOWN_ask > $1 (the market gap).
   if (action.side === "MERGE") {
+    // Merge finality guard: the tx takes ON_CHAIN_LATENCY_MS to land on Polygon.
+    // If the candle settles before the merge mines, the conditional-token contract
+    // rejects the merge (tokens are already resolved). Engines can't game the
+    // 3-second oracle window.
+    if (state.marketWindowEnd && Date.now() + CONFIG.ON_CHAIN_LATENCY_MS > state.marketWindowEnd) {
+      return {
+        action, filled: false, fillPrice: 0, fillSize: 0,
+        fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
+        toxicFlowHit: false, orderType: "taker",
+      };
+    }
+
     // Must hold a position to merge — reject if no position or insufficient shares
     const pos = state.positions.get(action.tokenId);
     if (!pos || pos.shares < CONFIG.MIN_MERGE_SIZE) {
