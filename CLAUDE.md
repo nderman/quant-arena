@@ -9,7 +9,7 @@ Evolutionary arena for Polymarket 5M crypto binary markets. AI-bred engines comp
 - `npm run arena:dry` — simulated data, no APIs
 - `npm run arena:live` — live PM + Binance data (auto-discovers markets)
 - `npm run arena:1round:dry` — quick test (1 min round)
-- `npm run test:unit` — 15 tests, must all pass
+- `npm run test:unit` — 21 tests, must all pass
 - `npm run build` — TypeScript compile
 - `npm run discover` — list active crypto markets
 - `npm run signals` — test all signal sources
@@ -43,10 +43,11 @@ fee = amount × 0.25 × (P × (1 − P))²
 - At P=0.80: 0.64% (manageable)
 - At P=0.90: 0.20% (edge trading sweet spot)
 - At P=0.99: 0.003% (near zero)
-- MERGE: buy opposite side at real book price + dynamic gas (contract itself is free). Flavor A (already hold both sides) merges with gas only.
+- **MERGE: Flavor A only.** Engine must already hold BOTH sides of the same conditional pair before calling MERGE — referee burns both legs and credits $1/pair. Flavor B (buy opposite + merge atomically) was removed because it kept producing exploit paths. To emulate B, emit BUY for the opposite then MERGE on a subsequent tick.
 - Makers: 0% fee + 20% rebate of taker fees, **12% fill probability** (was 60% — unrealistic vs HFT queue priority), 5bps adverse selection
 - Tick size: $0.001, Latency: 50ms (realistic API lag, no artificial delay)
 - **Per-tick book snapshots:** referee clones the active books once per tick and depletes them as engines fill — engines share liquidity within a tick (no ghost liquidity)
+- **walkBook sanity:** rejects walks where best level price is < $0.005 or > $0.995 (catches stale/empty book data)
 - **Settlement** writes a `SETTLE` row to the trades table with the true payout pnl, so `SUM(pnl)` is honest
 
 ## Rules

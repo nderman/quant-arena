@@ -410,21 +410,11 @@ async function processActionNoLatency(
 
   const actualLatency = config.latencyMs;
 
-  // ── MERGE action (on-chain — gas applies here) ──
-  // ONLY Flavor A is supported: engine must already hold BOTH sides of the
-  // same conditional pair before calling MERGE. The contract burns both legs
-  // and credits $1 per pair.
-  //
-  // Flavor B ("buy opposite + merge atomically") was REMOVED because:
-  //   1. It's not how real PM works — buy and merge are separate transactions
-  //   2. Multiple exploit paths emerged when we tried to make it atomic in sim
-  //      (cross-market merges, stale book reads, walkBook fills at impossible
-  //      prices, cost/cash accounting drift)
-  //   3. The "right way" to do multi-leg arb is FOK + atomic batches (task #11)
-  //
-  // To do a Flavor B-style merge, an engine must now: (1) BUY the opposite
-  // side via a normal BUY action in one tick, then (2) call MERGE on a
-  // subsequent tick when both positions are held.
+  // ── MERGE action (Flavor A only) ──
+  // Engine must already hold both sides of the same conditional pair.
+  // Flavor B (buy opposite + merge atomically) was removed — see git history
+  // for the bred-5h5h exploit chain. To emulate B: emit BUY then MERGE on
+  // separate ticks. Future-correct version is task #11 (FOK + atomic batches).
   if (action.side === "MERGE") {
     // Merge finality guard: the tx takes ON_CHAIN_LATENCY_MS to land on Polygon.
     // If the candle settles before the merge mines, the conditional-token contract
@@ -458,16 +448,9 @@ async function processActionNoLatency(
       };
     }
 
-    // Stale position guard: if the position's token is not from the current
-    // active market AND we don't have a stored opposite mapping for it, the
-    // merge is fundamentally broken. We'd otherwise resolve "opposite" to the
-    // CURRENT market's down token, which is a different conditional pair and
-    // can't legally merge with the old position. This was the bred-5h5h
-    // exploit: hold UP from candle A, merge it against the DOWN of candle B
-    // (which happens to be cheap), pocket fake $1/share.
-    //
-    // Real Polymarket enforces this via the conditional-token contract, which
-    // requires both sides to share the same conditionId.
+    // Stale position guard: reject merges on positions whose token isn't part
+    // of the current active market. Real PM enforces this via conditionId
+    // matching; without it, "opposite" resolves to a different pair entirely.
     const isCurrentMarket =
       action.tokenId === state.activeTokenId ||
       action.tokenId === state.activeDownTokenId;
@@ -841,25 +824,14 @@ export async function processMergeActions(
 /**
  * Decide whether merging is cheaper than selling for a given exit.
  *
- * IMPORTANT: only recommends MERGE when `holdsOpposite` is true (engine
- * already holds enough of the opposite side to do a Flavor A merge — gas
- * only). Without the opposite, MERGE is no longer supported by the referee
- * (Flavor B was removed because it was unsound), so MERGE is forced to be
- * "infinitely expensive" and the comparison always favors SELL.
- *
- * Engines that want a Flavor B-style merge must explicitly emit a BUY for
- * the opposite side first, then call MERGE on a subsequent tick.
- *
- * @param price - current token's mid price (what you'd sell at)
- * @param shares - number of shares to exit
- * @param oppositeAsk - best ask on the OPPOSITE token's book (kept for
- *                      backward compat; currently unused since Flavor B is gone)
- * @param holdsOpposite - whether the engine already holds ≥ shares of the opposite
+ * Only recommends MERGE when `holdsOpposite` is true (engine already holds
+ * enough of the opposite side for Flavor A — gas only). Without the
+ * opposite, MERGE is forbidden (Flavor B was removed) and we return SELL
+ * with mergeFee=Infinity.
  */
 export function cheaperExit(
   price: number,
   shares: number,
-  _oppositeAsk?: number,
   holdsOpposite: boolean = false,
 ): { method: "SELL" | "MERGE"; sellFee: number; mergeFee: number; savings: number } {
   const sellProceeds = price * shares;

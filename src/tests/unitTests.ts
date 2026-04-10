@@ -100,17 +100,29 @@ console.log(`  96% model vs 95% market: raw=${edge3.rawEdge.toFixed(3)}, fee=${e
 
 console.log("\n=== Cheaper Exit (SELL vs MERGE) ===");
 
-// At P=0.50: sell fee = 1.5625%, merge needs to buy opposite at real book price
-const exit50 = cheaperExit(0.50, 100);
-console.log(`  P=0.50: ${exit50.method} wins (sell=$${exit50.sellFee.toFixed(4)}, merge=$${exit50.mergeFee.toFixed(4)}, saves=$${exit50.savings.toFixed(4)})`);
+// Without holdsOpposite, MERGE is forbidden (Flavor B was removed) — every
+// price level must recommend SELL with mergeFee=Infinity.
+const exit50_noOpp = cheaperExit(0.50, 100);
+assert(exit50_noOpp.method === "SELL", `P=0.50 no-opposite must be SELL (got ${exit50_noOpp.method})`);
+assert(exit50_noOpp.mergeFee === Number.POSITIVE_INFINITY, `P=0.50 no-opposite mergeFee must be Infinity`);
+console.log(`  P=0.50 no-opp: ${exit50_noOpp.method} (mergeFee=${exit50_noOpp.mergeFee}) ✓`);
 
-// At P=0.95: sell fee is very low with quartic
-const exit95 = cheaperExit(0.95, 100);
-console.log(`  P=0.95: ${exit95.method} wins (sell=$${exit95.sellFee.toFixed(4)}, merge=$${exit95.mergeFee.toFixed(4)}, saves=$${exit95.savings.toFixed(4)})`);
+const exit95_noOpp = cheaperExit(0.95, 100);
+assert(exit95_noOpp.method === "SELL", `P=0.95 no-opposite must be SELL`);
+console.log(`  P=0.95 no-opp: ${exit95_noOpp.method} ✓`);
 
-// At P=0.99: sell fee is near zero
-const exit99 = cheaperExit(0.99, 100);
-console.log(`  P=0.99: ${exit99.method} wins (sell=$${exit99.sellFee.toFixed(4)}, merge=$${exit99.mergeFee.toFixed(4)}, saves=$${exit99.savings.toFixed(4)})`);
+// With holdsOpposite=true, MERGE is Flavor A — gas + flat fee only. At P=0.50
+// with quartic fees ~1.56%, merging should beat selling because the merge
+// "fee" is just gas (~$0.04) vs sell fee on $50 proceeds.
+const exit50_hasOpp = cheaperExit(0.50, 100, true);
+assert(exit50_hasOpp.method === "MERGE", `P=0.50 with-opposite should prefer MERGE (Flavor A is gas-only)`);
+assert(exit50_hasOpp.mergeFee < exit50_hasOpp.sellFee, `P=0.50 mergeFee must be < sellFee when held`);
+console.log(`  P=0.50 with-opp: ${exit50_hasOpp.method} (sell=$${exit50_hasOpp.sellFee.toFixed(4)}, merge=$${exit50_hasOpp.mergeFee.toFixed(4)}) ✓`);
+
+// At P=0.99 the sell fee is so tiny that even Flavor A merge isn't worth it.
+const exit99_hasOpp = cheaperExit(0.99, 100, true);
+assert(exit99_hasOpp.method === "SELL", `P=0.99 with-opposite should still prefer SELL (sell fee is near-zero, beats gas)`);
+console.log(`  P=0.99 with-opp: ${exit99_hasOpp.method} (sell=$${exit99_hasOpp.sellFee.toFixed(4)}, merge=$${exit99_hasOpp.mergeFee.toFixed(4)}) ✓`);
 
 // ── Fee Gradient (the quartic curve) ─────────────────────────────────────────
 

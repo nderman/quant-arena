@@ -1,4 +1,5 @@
 import { AbstractEngine } from "./BaseEngine";
+import { getBookForToken } from "../pulse";
 import type { EngineAction, EngineState, MarketTick } from "../types";
 
 /**
@@ -59,9 +60,18 @@ export class PureMakerEngine extends AbstractEngine {
     const secsLeft = this.getSecondsRemaining();
     if (secsLeft >= 0 && secsLeft < this.minSecondsRemaining) return [];
 
-    // Pick the underdog side: whichever token's mid is below the threshold
-    const upMid = tick.tokenSide === "UP" ? tick.midPrice : (1 - tick.midPrice);
-    const downMid = 1 - upMid;
+    // Read BOTH books directly. Never derive one side from the other via 1-x:
+    // UP and DOWN have INDEPENDENT dual orderbooks, that inversion is wrong.
+    // (See feedback_dual_books.md.)
+    const upBook = getBookForToken(upTokenId);
+    const downBook = getBookForToken(downTokenId);
+    const upMid = upBook.bids[0]?.price && upBook.asks[0]?.price
+      ? (upBook.bids[0].price + upBook.asks[0].price) / 2
+      : 0;
+    const downMid = downBook.bids[0]?.price && downBook.asks[0]?.price
+      ? (downBook.bids[0].price + downBook.asks[0].price) / 2
+      : 0;
+    if (upMid <= 0 || downMid <= 0) return [];
 
     let targetTokenId: string;
     let targetMid: number;
@@ -70,11 +80,11 @@ export class PureMakerEngine extends AbstractEngine {
     if (upMid <= this.maxEntryPrice) {
       targetTokenId = upTokenId;
       targetMid = upMid;
-      targetBestBid = tick.tokenSide === "UP" ? tick.bestBid : (1 - tick.bestAsk);
+      targetBestBid = upBook.bids[0]?.price ?? 0;
     } else if (downMid <= this.maxEntryPrice) {
       targetTokenId = downTokenId;
       targetMid = downMid;
-      targetBestBid = tick.tokenSide === "DOWN" ? tick.bestBid : (1 - tick.bestAsk);
+      targetBestBid = downBook.bids[0]?.price ?? 0;
     } else {
       return [];
     }

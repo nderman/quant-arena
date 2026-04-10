@@ -30,8 +30,10 @@ export class DisciplinedReverterEngine extends AbstractEngine {
   private readonly maxEntryTrades = 5;
   private readonly inner = new MeanRevertEngine();
 
+  // Per-round counter. Reset by onRoundEnd() — EngineState doesn't carry
+  // a roundId, so the counter relies on the arena calling onRoundEnd
+  // between rounds (which it does).
   private entryTradesThisRound = 0;
-  private lastRoundId = "";
 
   init(state: EngineState): void {
     super.init(state);
@@ -39,13 +41,6 @@ export class DisciplinedReverterEngine extends AbstractEngine {
   }
 
   onTick(tick: MarketTick, state: EngineState, signals?: SignalSnapshot): EngineAction[] {
-    // Reset per-round counter when round changes (state.roundId is set by arena)
-    const roundId = (state as any).roundId ?? "";
-    if (roundId !== this.lastRoundId) {
-      this.entryTradesThisRound = 0;
-      this.lastRoundId = roundId;
-    }
-
     const actions = this.inner.onTick(tick, state, signals);
     if (actions.length === 0) return actions;
 
@@ -69,6 +64,5 @@ export class DisciplinedReverterEngine extends AbstractEngine {
   onRoundEnd(state: EngineState): void {
     this.inner.onRoundEnd(state);
     this.entryTradesThisRound = 0;
-    this.lastRoundId = "";
   }
 }

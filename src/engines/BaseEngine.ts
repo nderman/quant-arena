@@ -66,11 +66,9 @@ export abstract class AbstractEngine implements IBaseEngine {
     const pos = tokenId ? this.state.positions.get(tokenId) : undefined;
     const isDown = pos ? pos.side === "NO" : false;
     const oppositeTokenId = isDown ? this.getUpTokenId() : this.getDownTokenId();
-    const oppositeBook = oppositeTokenId ? getBookForToken(oppositeTokenId) : null;
-    const oppositeAsk = oppositeBook?.asks[0]?.price;
     const oppositePos = oppositeTokenId ? this.state.positions.get(oppositeTokenId) : undefined;
     const holdsOpposite = !!(oppositePos && oppositePos.shares >= shares);
-    return cheaperExit(price, shares, oppositeAsk, holdsOpposite);
+    return cheaperExit(price, shares, holdsOpposite);
   }
 
   // ── Position Helpers ─────────────────────────────────────────────────────
@@ -115,14 +113,16 @@ export abstract class AbstractEngine implements IBaseEngine {
   }
 
   /**
-   * Get the latest Chainlink BTC/USD price (from Polygon RPC).
-   * This is the same data Polymarket uses to resolve 5M markets — engine
+   * Get the latest Chainlink price for the current arena's coin (from Polygon
+   * RPC). This is the same data Polymarket uses to resolve 5M markets — engine
    * decisions based on this align with eventual settlement.
    * Returns null if Chainlink is unavailable or stale (>2min old).
    */
   protected getChainlinkPrice(symbol?: string): number | null {
-    const sym = symbol || this.getMarketSymbol() || "BTCUSDT";
-    // Lazy import to avoid circular deps; in practice resolved at module load
+    // Fallback to the arena's configured Binance symbol — NOT a hardcoded
+    // BTCUSDT, which would be wrong on ETH/SOL arena processes.
+    const { CONFIG } = require("../config");
+    const sym = symbol || this.getMarketSymbol() || CONFIG.ARENA_BINANCE_SYMBOL;
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { getLatestChainlinkPrice } = require("../chainlink");
     return getLatestChainlinkPrice(sym);
