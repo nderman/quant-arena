@@ -54,7 +54,7 @@ export const CONFIG = {
   MEV_SLIPPAGE_BPS:       num("MEV_SLIPPAGE_BPS", 5),                   // 5bps hidden slippage
 
   // ── Maker / Taker ──────────────────────────────────────────────────────────
-  MAKER_FILL_PROBABILITY: num("MAKER_FILL_PROBABILITY", 0.60),          // 60% chance maker order fills per tick (queue position)
+  MAKER_FILL_PROBABILITY: num("MAKER_FILL_PROBABILITY", 0.12),          // 12% — realistic queue priority vs HFT (was 60%, way too generous)
   MAKER_REBATE_RATE:      num("MAKER_REBATE_RATE", 0.20),               // makers get 20% of taker fees collected
   MAKER_ADVERSE_BPS:      num("MAKER_ADVERSE_BPS", 5),                  // 5bps adverse selection on maker fills
   MIN_ORDER_SIZE:          num("MIN_ORDER_SIZE", 5),                     // CLOB rejects < 5 shares

@@ -17,7 +17,7 @@ import * as dotenv from "dotenv";
 dotenv.config({ path: path.resolve(__dirname, "..", ".env") });
 import { CONFIG } from "./config";
 import { pulseEvents, startSimulatedPulse, startPmChannel, startBinanceChannel, startMarketRotation, setPmSubscriptionTokens, shutdown as shutdownPulse } from "./pulse";
-import { processActions, processMergeActions, markToMarket, clearFeePool, clearFeePoolForMarket } from "./referee";
+import { processActions, processMergeActions, markToMarket, clearFeePool, clearFeePoolForMarket, snapshotTickBooks } from "./referee";
 import { recordFill, recordRoundStart, recordRoundEnd, getRoundSummary, closeDb, flushLedger } from "./ledger";
 import { fetchSignalSnapshot } from "./signals";
 import { discoverCryptoMarkets, discoverUpDownMarkets, discover5mMarkets } from "./discovery";
@@ -186,6 +186,11 @@ async function runRound(
     if (tick.source === "polymarket") lastPmTick = tick;
     tickCount++;
 
+    // Snapshot books once per tick — engines share depletion (no ghost liquidity)
+    const tickBooks = currentActiveTokenId
+      ? snapshotTickBooks(currentActiveTokenId, currentActiveDownTokenId)
+      : undefined;
+
     for (const engine of engines) {
       const state = states.get(engine.id)!;
 
@@ -200,8 +205,8 @@ async function runRound(
         }
         if (actions.length === 0) continue;
 
-        // Process CLOB actions (BUY/SELL) — merges deferred for global on-chain delay
-        const { results: fills, pendingMerges } = await processActions(actions, state);
+        // Process CLOB actions — share tickBooks across engines so liquidity depletes
+        const { results: fills, pendingMerges } = await processActions(actions, state, tickBooks);
 
         // Record CLOB fills to ledger
         for (const fill of fills) {
@@ -225,8 +230,12 @@ async function runRound(
     // ── Process all pending MERGEs with single on-chain delay ──
     if (allPendingMerges.length > 0) {
       await new Promise(resolve => setTimeout(resolve, CONFIG.ON_CHAIN_LATENCY_MS));
+      // Re-snapshot books after the delay (the live PM book may have moved during 3s)
+      const mergeTickBooks = currentActiveTokenId
+        ? snapshotTickBooks(currentActiveTokenId, currentActiveDownTokenId)
+        : undefined;
       for (const { engineId, state, merges } of allPendingMerges) {
-        const mergeFills = await processMergeActions(merges, state);
+        const mergeFills = await processMergeActions(merges, state, mergeTickBooks);
         for (const fill of mergeFills) {
           if (fill.filled) recordFill(roundId, engineId, fill, state, fill.pnl);
         }
