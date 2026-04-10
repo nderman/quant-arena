@@ -303,6 +303,11 @@ function validateEngine(_filePath: string): { valid: boolean; error?: string } {
 
 // ── Cleanup: remove worst performers ────────────────────────────────────────
 
+// All coins the multi-coin arena runs. Used for cross-coin pruning safety —
+// an engine that's catastrophic on btc but profitable on eth must not be deleted
+// by the btc breeder. Keep in sync with ecosystem.config.js COINS list.
+const ALL_COINS = ["btc", "eth", "sol"];
+
 function pruneEngines(intel: any): void {
   const engines = listEngines();
   const prunableEngines = engines.filter(e => e !== "BaseEngine");
@@ -314,13 +319,24 @@ function pruneEngines(intel: any): void {
 
   if (!intel?.allResults) return;
 
-  // Use multi-round cumulative P&L for pruning (not just latest round)
-  const cumulativePnl = buildCumulativePnl(loadRoundHistory());
+  // Cross-coin protection: build per-engine BEST cumulative pnl across ALL coins.
+  // An engine that loses on this coin but wins big on another must not be pruned —
+  // engine files are shared via src/engines/, deleting them affects every arena.
+  const bestCoinPnl = new Map<string, number>();
+  for (const coin of ALL_COINS) {
+    const coinHistory = loadHistory(coin);
+    const coinCumulative = buildPnl(coinHistory);
+    for (const [engineId, pnl] of coinCumulative) {
+      const prev = bestCoinPnl.get(engineId) ?? -Infinity;
+      if (pnl > prev) bestCoinPnl.set(engineId, pnl);
+    }
+  }
 
-  // Rank by cumulative P&L if available, otherwise latest round
+  // Rank by best-coin cumulative P&L (worst-best-coin first). An engine with
+  // strong performance on any single coin sinks to the bottom of the prune list.
   const ranked = intel.allResults
-    .map((r: any) => ({ ...r, cumulativePnl: cumulativePnl.get(r.engineId) ?? r.totalPnl }))
-    .sort((a: any, b: any) => a.cumulativePnl - b.cumulativePnl);
+    .map((r: any) => ({ ...r, bestCoinPnl: bestCoinPnl.get(r.engineId) ?? r.totalPnl }))
+    .sort((a: any, b: any) => a.bestCoinPnl - b.bestCoinPnl);
 
   if (!fs.existsSync(ARCHIVE_DIR)) fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
 
@@ -336,7 +352,7 @@ function pruneEngines(intel: any): void {
     });
 
     if (worstFile) {
-      console.log(`[breeder] Pruning #${pruned + 1}: ${worstFile} (cumulative P&L: $${result.cumulativePnl.toFixed(2)})`);
+      console.log(`[breeder] Pruning #${pruned + 1}: ${worstFile} (best-coin P&L: $${result.bestCoinPnl.toFixed(2)})`);
       const srcPath = path.join(ENGINES_DIR, worstFile + ".ts");
       const distPath = path.join(PROJECT_ROOT, "dist", "engines", worstFile + ".js");
       const archivePath = path.join(ARCHIVE_DIR, `${worstFile}_pruned_${Date.now()}.ts`);
