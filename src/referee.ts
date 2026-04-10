@@ -370,19 +370,6 @@ async function processActionNoLatency(
     }
   }
 
-  // ── Late-candle entry guard: no BUYs in the last 30s (liquidity vanishes IRL) ──
-  // SELLs/MERGEs allowed for exits.
-  if (action.side === "BUY" && state.marketWindowEnd) {
-    const secsLeft = (state.marketWindowEnd - Date.now()) / 1000;
-    if (secsLeft >= 0 && secsLeft < 30) {
-      return {
-        action, filled: false, fillPrice: 0, fillSize: 0,
-        fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: 0,
-        toxicFlowHit: false, orderType: action.orderType ?? "taker",
-      };
-    }
-  }
-
   // ── Price sanity: PM prices must be 0-1, reject Binance price contamination ──
   if (action.side !== "HOLD" && action.side !== "MERGE") {
     if (action.price < 0.001 || action.price > 1.0) {
