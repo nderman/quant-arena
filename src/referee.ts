@@ -184,9 +184,17 @@ function walkBook(
   book: OrderBook,
   minFillSize: number = CONFIG.MIN_ORDER_SIZE,
   mutate: boolean = false,
+  limitPrice?: number,
 ): { effectivePrice: number; totalCost: number; filledSize: number } | null {
   const levels = side === "BUY" ? book.asks : book.bids;
   if (!levels.length) return null;
+
+  // Sanity: real PM 5M markets always have asks/bids in (0.001, 0.999). If the
+  // book's best level is impossibly cheap (< $0.005), the data is stale or
+  // corrupted (likely a freshly-rotated market that hasn't received PM updates
+  // yet). Reject the fill rather than letting an engine exploit phantom liquidity.
+  const bestLevel = levels[0];
+  if (!bestLevel || bestLevel.price < 0.005 || bestLevel.price > 0.995) return null;
 
   const decayEnabled = CONFIG.FILL_DECAY_ENABLED;
   const decayMult = CONFIG.FILL_DECAY_MULTIPLIER;
@@ -224,6 +232,16 @@ function walkBook(
   }
 
   if (filledSize < minFillSize) return null;
+
+  // Limit price enforcement: if a limit was specified, the effective fill must
+  // be at or better than it. Real CLOB rejects fills outside the limit.
+  // Without this check, "limit BUY at $0.01" can fill at $0.99 (whatever the
+  // book has), turning every order into a market order.
+  const effectivePrice = totalCost / filledSize;
+  if (limitPrice !== undefined && limitPrice > 0) {
+    if (side === "BUY" && effectivePrice > limitPrice) return null;
+    if (side === "SELL" && effectivePrice < limitPrice) return null;
+  }
 
   // Apply depletions to the book (mutate mode only, after we've confirmed fill)
   if (mutate) {
@@ -506,8 +524,25 @@ async function processActionNoLatency(
     }
 
     // ── Flavor B: buy the opposite, then merge ──
-    // Walk the OPPOSITE token's real book to buy the other side
+    // Walk the OPPOSITE token's real book to buy the other side.
+    //
+    // Sanity guard: in real PM, market makers never let UP_ask + DOWN_ask
+    // drop below ~$0.95. The lowest "real" arb ever observed (Croissant) is
+    // ~$0.91 average. Anything below $0.85 sum is sim-only behavior — stale
+    // book data, freshly-rotated empty markets, or some other corruption.
+    // Reject the merge if the implied total cost is impossibly low; the
+    // engine can settle the position naturally instead.
     const oppositeBook = bookFromTick(oppositeTokenId, tickBooks);
+    const oppositeBestAsk = oppositeBook.asks[0]?.price ?? 0;
+    const impliedSum = pos.avgEntry + oppositeBestAsk;
+    if (oppositeBestAsk <= 0 || impliedSum < 0.85) {
+      return {
+        action, filled: false, fillPrice: 0, fillSize: 0,
+        fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
+        toxicFlowHit: false, orderType: "taker",
+      };
+    }
+
     const oppositeWalk = walkBook(shares, "BUY", oppositeBook, CONFIG.MIN_MERGE_SIZE, !!tickBooks);
 
     if (!oppositeWalk) {
