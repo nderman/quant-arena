@@ -1,5 +1,6 @@
 import { AbstractEngine } from "./BaseEngine";
 import { getBookForToken } from "../pulse";
+import { CONFIG } from "../config";
 import type { EngineAction, EngineState, MarketTick, SignalSnapshot } from "../types";
 
 /**
@@ -53,11 +54,14 @@ export class ChainlinkSniperEngine extends AbstractEngine {
   private candleEntries = 0;
   private strikePrice: number | null = null;
   private currentMarketSymbol = "";
+  // First-call diagnostic — tells us if onTick is even being entered
+  private firstCallLogged = false;
 
   // Skip-reason logging — emit at most every N seconds per coin so we can see
   // why the engine isn't firing without flooding logs
   private lastSkipLogAt = 0;
   private readonly skipLogIntervalMs = 60_000;
+  private lastStateLogAt = 0;
 
   private logSkip(reason: string): void {
     const now = Date.now();
@@ -66,20 +70,53 @@ export class ChainlinkSniperEngine extends AbstractEngine {
     console.log(`[chainlink-sniper] ${this.currentMarketSymbol || "?"} skip: ${reason}`);
   }
 
+  /** Unconditional state dump every 60s — runs even when guards block us early. */
+  private logState(secsLeft: number): void {
+    const now = Date.now();
+    if (now - this.lastStateLogAt < 60_000) return;
+    this.lastStateLogAt = now;
+    const cl = this.getChainlinkPrice(this.currentMarketSymbol);
+    console.log(
+      `[chainlink-sniper] ${this.currentMarketSymbol || "?"} state: ` +
+      `secsLeft=${secsLeft}, strike=${this.strikePrice ?? "null"}, ` +
+      `currentCl=${cl ?? "null"}, candleEntries=${this.candleEntries}, ` +
+      `tokens=${this.lastMarketTokens.slice(0, 12)}...`
+    );
+  }
+
   onTick(tick: MarketTick, state: EngineState, _signals?: SignalSnapshot): EngineAction[] {
+    if (!this.firstCallLogged) {
+      this.firstCallLogged = true;
+      console.log(
+        `[chainlink-sniper] FIRST_CALL src=${tick.source} ` +
+        `upToken=${this.getUpTokenId().slice(0, 12)}... ` +
+        `downToken=${this.getDownTokenId().slice(0, 12)}... ` +
+        `marketSymbol=${this.getMarketSymbol()} ` +
+        `cash=${state.cashBalance}`
+      );
+    }
+
     if (tick.source !== "polymarket") return [];
 
     const upTokenId = this.getUpTokenId();
     const downTokenId = this.getDownTokenId();
     if (!upTokenId || !downTokenId) return [];
 
-    // Detect candle rotation — reset per-candle state
+    // Detect candle rotation — reset per-candle state.
+    // currentMarketSymbol uses CONFIG.ARENA_BINANCE_SYMBOL as a stable fallback.
+    // state.marketSymbol can be empty on early ticks before the rotation
+    // callback has populated it; without the fallback, getChainlinkPrice("")
+    // returns null and the engine never captures a strike.
     const currentTokens = `${upTokenId}:${downTokenId}`;
     if (currentTokens !== this.lastMarketTokens) {
       this.lastMarketTokens = currentTokens;
       this.candleEntries = 0;
-      this.strikePrice = null; // re-capture lazily once Chainlink is available
-      this.currentMarketSymbol = this.getMarketSymbol();
+      this.strikePrice = null;
+      this.currentMarketSymbol = this.getMarketSymbol() || CONFIG.ARENA_BINANCE_SYMBOL;
+    }
+    // Also keep symbol fresh in case it was empty on rotation but populated later
+    if (!this.currentMarketSymbol) {
+      this.currentMarketSymbol = this.getMarketSymbol() || CONFIG.ARENA_BINANCE_SYMBOL;
     }
 
     // Lazy strike capture — try every tick until we successfully read Chainlink.
@@ -93,6 +130,9 @@ export class ChainlinkSniperEngine extends AbstractEngine {
     if (this.candleEntries >= this.maxEntriesPerCandle) return [];
 
     const secsLeft = this.getSecondsRemaining();
+    // Periodic state dump regardless of where we are — answers "are we ever
+    // even reaching this code path? what's secsLeft? does Chainlink work?"
+    this.logState(secsLeft);
     if (secsLeft < 0 || secsLeft > this.maxSecondsRemaining) return [];
 
     if (this.strikePrice === null) {

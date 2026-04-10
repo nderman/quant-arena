@@ -430,8 +430,29 @@ async function processActionNoLatency(
       };
     }
 
-    // Determine the opposite token
+    // Stale position guard: if the position's token is not from the current
+    // active market AND we don't have a stored opposite mapping for it, the
+    // merge is fundamentally broken. We'd otherwise resolve "opposite" to the
+    // CURRENT market's down token, which is a different conditional pair and
+    // can't legally merge with the old position. This was the bred-5h5h
+    // exploit: hold UP from candle A, merge it against the DOWN of candle B
+    // (which happens to be cheap), pocket fake $1/share.
+    //
+    // Real Polymarket enforces this via the conditional-token contract, which
+    // requires both sides to share the same conditionId.
+    const isCurrentMarket =
+      action.tokenId === state.activeTokenId ||
+      action.tokenId === state.activeDownTokenId;
     const storedOpposite = state.expiringTokenIds?.get(action.tokenId);
+    if (!isCurrentMarket && !storedOpposite) {
+      return {
+        action, filled: false, fillPrice: 0, fillSize: 0,
+        fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
+        toxicFlowHit: false, orderType: "taker",
+      };
+    }
+
+    // Determine the opposite token
     const isHoldingDown = pos.side === "NO";
     const oppositeTokenId = storedOpposite || (isHoldingDown ? state.activeTokenId : state.activeDownTokenId);
 
