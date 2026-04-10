@@ -21,8 +21,9 @@ dotenv.config({ path: path.resolve(__dirname, "..", ".env") });
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
 const ANALYST_MODEL = process.env.ANALYST_MODEL || "google/gemini-2.0-flash-001";
-const CODER_MODEL = process.env.CODER_MODEL || "anthropic/claude-sonnet-4-5";
-const MAX_RETRIES = 3;
+const CODER_MODEL = process.env.CODER_MODEL || "anthropic/claude-haiku-4-5";
+const MAX_RETRIES = 2;
+const MIN_NEW_ROUNDS_TO_BREED = Number(process.env.MIN_NEW_ROUNDS_TO_BREED ?? 3);
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const ENGINES_DIR = path.resolve(PROJECT_ROOT, "src", "engines"); // always read/write TypeScript source
 const MAX_ENGINES = 25; // hand-builts + space for bred experiments
@@ -356,6 +357,24 @@ async function breed(): Promise<void> {
   console.log("[breeder] Starting evolution cycle");
   console.log("=".repeat(60) + "\n");
 
+  // Data gate: skip if not enough new rounds since last successful breed.
+  // Avoids burning API spend on cycles that would see identical data.
+  const markerPath = path.join(DATA_DIR, `last_breed_${COIN}.json`);
+  const currentRounds = loadRoundHistory().length;
+  let lastBreedRounds = 0;
+  try {
+    if (fs.existsSync(markerPath)) {
+      lastBreedRounds = JSON.parse(fs.readFileSync(markerPath, "utf-8")).rounds ?? 0;
+    }
+  } catch { /* treat missing/corrupt marker as fresh */ }
+
+  const newRounds = currentRounds - lastBreedRounds;
+  if (newRounds < MIN_NEW_ROUNDS_TO_BREED) {
+    console.log(`[breeder] Only ${newRounds} new rounds since last breed (need ${MIN_NEW_ROUNDS_TO_BREED}). Skipping cycle.`);
+    return;
+  }
+  console.log(`[breeder] ${newRounds} new rounds since last breed — proceeding.`);
+
   // 1. Analyze
   const analysis = await analyzeArena();
   console.log("\n[breeder] Analysis:\n" + analysis + "\n");
@@ -387,7 +406,7 @@ async function breed(): Promise<void> {
       if (result.valid) {
         console.log(`[breeder] ${className} compiles successfully`);
 
-        // Rebuild dist/ so arena picks up the new engine
+        // Rebuild dist/ so arena picks up the new engine on its next natural restart.
         try {
           execSync("npm run build", { encoding: "utf-8", timeout: 30000, cwd: PROJECT_ROOT });
           console.log("[breeder] TypeScript rebuilt");
@@ -395,15 +414,14 @@ async function breed(): Promise<void> {
           console.error("[breeder] Build failed:", buildErr.message);
         }
 
-        // Restart arena to pick up new engine
+        // Mark this breed as done so the data gate skips until new rounds accumulate.
         try {
-          execSync("pm2 restart quant-arena", { encoding: "utf-8", timeout: 10000 });
-          console.log("[breeder] Arena restarted with new engine");
-        } catch {
-          console.log("[breeder] PM2 restart failed (not running under PM2?) — restart manually");
+          fs.writeFileSync(markerPath, JSON.stringify({ rounds: currentRounds, at: new Date().toISOString() }));
+        } catch (err: any) {
+          console.warn(`[breeder] Failed to write breed marker: ${err.message}`);
         }
 
-        console.log(`\n[breeder] Evolution cycle complete. New engine: ${className}\n`);
+        console.log(`\n[breeder] Evolution cycle complete. New engine: ${className} (loads on next arena restart)\n`);
         return;
       }
 
@@ -429,8 +447,9 @@ if (args.includes("--analyze")) {
     console.log(a);
   }).catch(console.error);
 } else if (args.includes("--loop")) {
-  // Continuous breeding loop — run after each round
-  const intervalMs = 1 * 3600_000; // every 1 hour (accelerated evolution)
+  // Continuous breeding loop. 6h cadence + a per-cycle data gate keeps API spend bounded;
+  // override with BREED_INTERVAL_HOURS if you want faster evolution.
+  const intervalMs = Number(process.env.BREED_INTERVAL_HOURS ?? 6) * 3600_000;
   console.log(`[breeder] Starting continuous loop (every ${intervalMs / 3600_000}h)`);
   breed().catch(console.error);
   setInterval(() => breed().catch(console.error), intervalMs);
