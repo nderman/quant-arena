@@ -56,8 +56,11 @@ export abstract class AbstractEngine implements IBaseEngine {
   }
 
   /**
-   * Determine the cheapest way to exit a position.
-   * Uses real opposite-side book price (UP + DOWN ≠ $1.00 in real markets).
+   * Determine the cheapest way to exit a position. Only recommends MERGE if
+   * the engine actually holds enough opposite-side shares for a Flavor A
+   * merge — Flavor B (buy opposite + merge) is no longer supported by the
+   * referee. Engines that want a Flavor B-style merge must explicitly emit
+   * a BUY for the opposite side first, then call MERGE on a subsequent tick.
    */
   protected cheapestExit(price: number, shares: number, tokenId?: string) {
     const pos = tokenId ? this.state.positions.get(tokenId) : undefined;
@@ -65,7 +68,9 @@ export abstract class AbstractEngine implements IBaseEngine {
     const oppositeTokenId = isDown ? this.getUpTokenId() : this.getDownTokenId();
     const oppositeBook = oppositeTokenId ? getBookForToken(oppositeTokenId) : null;
     const oppositeAsk = oppositeBook?.asks[0]?.price;
-    return cheaperExit(price, shares, oppositeAsk);
+    const oppositePos = oppositeTokenId ? this.state.positions.get(oppositeTokenId) : undefined;
+    const holdsOpposite = !!(oppositePos && oppositePos.shares >= shares);
+    return cheaperExit(price, shares, oppositeAsk, holdsOpposite);
   }
 
   // ── Position Helpers ─────────────────────────────────────────────────────

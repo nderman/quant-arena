@@ -411,10 +411,20 @@ async function processActionNoLatency(
   const actualLatency = config.latencyMs;
 
   // ── MERGE action (on-chain — gas applies here) ──
-  // Two flavors:
-  //   A) "Just merge what we hold" — already hold both sides → only gas cost
-  //   B) "Buy + merge" — hold one side, buy opposite, then merge
-  // Merge arb exists because UP_ask + DOWN_ask > $1 (the market gap).
+  // ONLY Flavor A is supported: engine must already hold BOTH sides of the
+  // same conditional pair before calling MERGE. The contract burns both legs
+  // and credits $1 per pair.
+  //
+  // Flavor B ("buy opposite + merge atomically") was REMOVED because:
+  //   1. It's not how real PM works — buy and merge are separate transactions
+  //   2. Multiple exploit paths emerged when we tried to make it atomic in sim
+  //      (cross-market merges, stale book reads, walkBook fills at impossible
+  //      prices, cost/cash accounting drift)
+  //   3. The "right way" to do multi-leg arb is FOK + atomic batches (task #11)
+  //
+  // To do a Flavor B-style merge, an engine must now: (1) BUY the opposite
+  // side via a normal BUY action in one tick, then (2) call MERGE on a
+  // subsequent tick when both positions are held.
   if (action.side === "MERGE") {
     // Merge finality guard: the tx takes ON_CHAIN_LATENCY_MS to land on Polygon.
     // If the candle settles before the merge mines, the conditional-token contract
@@ -523,78 +533,12 @@ async function processActionNoLatency(
       }
     }
 
-    // ── Flavor B: buy the opposite, then merge ──
-    // Walk the OPPOSITE token's real book to buy the other side.
-    //
-    // Sanity guard: in real PM, market makers never let UP_ask + DOWN_ask
-    // drop below ~$0.95. The lowest "real" arb ever observed (Croissant) is
-    // ~$0.91 average. Anything below $0.85 sum is sim-only behavior — stale
-    // book data, freshly-rotated empty markets, or some other corruption.
-    // Reject the merge if the implied total cost is impossibly low; the
-    // engine can settle the position naturally instead.
-    const oppositeBook = bookFromTick(oppositeTokenId, tickBooks);
-    const oppositeBestAsk = oppositeBook.asks[0]?.price ?? 0;
-    const impliedSum = pos.avgEntry + oppositeBestAsk;
-    if (oppositeBestAsk <= 0 || impliedSum < 0.85) {
-      return {
-        action, filled: false, fillPrice: 0, fillSize: 0,
-        fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
-        toxicFlowHit: false, orderType: "taker",
-      };
-    }
-
-    const oppositeWalk = walkBook(shares, "BUY", oppositeBook, CONFIG.MIN_MERGE_SIZE, !!tickBooks);
-
-    if (!oppositeWalk) {
-      return {
-        action, filled: false, fillPrice: 0, fillSize: 0,
-        fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
-        toxicFlowHit: false, orderType: "taker",
-      };
-    }
-
-    const oppositePrice = oppositeWalk.effectivePrice;
-    const oppositeCost = oppositeWalk.totalCost;
-    const oppositeFee = calculateFee(oppositePrice, oppositeCost);
-
-    // Flat merge fee on the merged value ($1 per pair)
-    const mergeValue = shares * 1.0;
-    const mergeFlatFee = calculateMergeFee(mergeValue);
-
-    // Gas cost for the merge transaction (on-chain contract action)
-    // Scales with Binance volatility — gas spikes during high-vol events
-    const absDelta = Math.abs(getBinanceDelta());
-    const volMultiplier = 1 + (CONFIG.GAS_VOL_MULTIPLIER - 1) * Math.min(absDelta / 0.005, 1);
-    const gasCost = CONFIG.GAS_COST_USD * volMultiplier;
-
-    const totalCost = oppositeCost + oppositeFee + mergeFlatFee + gasCost;
-    const totalFee = oppositeFee + mergeFlatFee + gasCost;
-
-    if (state.cashBalance < totalCost) {
-      return {
-        action, filled: false, fillPrice: 0, fillSize: 0,
-        fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
-        toxicFlowHit: false, orderType: "taker",
-      };
-    }
-
-    // P&L: merge payout ($1/share) minus our cost basis minus opposite buy cost
-    const costBasis = pos.avgEntry * shares;
-    const pnl = mergeValue - costBasis - totalCost;
-
-    state.cashBalance -= totalCost;
-    state.cashBalance += mergeValue;
-    state.feePaid += totalFee;
-    state.roundPnl += pnl;
-
-    // Remove merged shares from position
-    pos.shares -= shares;
-    pos.costBasis -= costBasis;
-    if (pos.shares <= 0.001) state.positions.delete(action.tokenId);
-
+    // No Flavor B: engine doesn't hold the opposite side. Reject the merge.
+    // The engine must explicitly BUY the opposite side via a separate action,
+    // then re-call MERGE on a subsequent tick when both positions are held.
     return {
-      action, filled: true, fillPrice: 1.0, fillSize: shares,
-      fee: totalFee, rebate: 0, slippage: 0, pnl, latencyMs: actualLatency,
+      action, filled: false, fillPrice: 0, fillSize: 0,
+      fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
       toxicFlowHit: false, orderType: "taker",
     };
   }
@@ -895,37 +839,50 @@ export async function processMergeActions(
 // ── Utility: Should I Merge? ─────────────────────────────────────────────────
 
 /**
- * Calculates whether merging is cheaper than selling at the current price.
+ * Decide whether merging is cheaper than selling for a given exit.
  *
- * Uses REAL opposite-side book price (UP + DOWN ≠ $1.00 in real markets).
- * The gap between them is where merge arb profit lives.
+ * IMPORTANT: only recommends MERGE when `holdsOpposite` is true (engine
+ * already holds enough of the opposite side to do a Flavor A merge — gas
+ * only). Without the opposite, MERGE is no longer supported by the referee
+ * (Flavor B was removed because it was unsound), so MERGE is forced to be
+ * "infinitely expensive" and the comparison always favors SELL.
+ *
+ * Engines that want a Flavor B-style merge must explicitly emit a BUY for
+ * the opposite side first, then call MERGE on a subsequent tick.
  *
  * @param price - current token's mid price (what you'd sell at)
  * @param shares - number of shares to exit
- * @param oppositeAsk - best ask on the OPPOSITE token's book (real cost to buy other side)
- *                      If not provided, falls back to 1-price (theoretical)
+ * @param oppositeAsk - best ask on the OPPOSITE token's book (kept for
+ *                      backward compat; currently unused since Flavor B is gone)
+ * @param holdsOpposite - whether the engine already holds ≥ shares of the opposite
  */
 export function cheaperExit(
   price: number,
   shares: number,
-  oppositeAsk?: number,
+  _oppositeAsk?: number,
+  holdsOpposite: boolean = false,
 ): { method: "SELL" | "MERGE"; sellFee: number; mergeFee: number; savings: number } {
   const sellProceeds = price * shares;
   const sellFee = calculateFee(price, sellProceeds);
 
-  // Merge requires buying the opposite side from its real book
-  const oppPrice = oppositeAsk ?? (1 - price);
-  const oppositeCost = oppPrice * shares;
-  const oppositeBuyFee = calculateFee(oppPrice, oppositeCost);
-  const mergeValue = shares * 1.0; // $1 per pair
+  const mergeValue = shares * 1.0;
   const mergeFlatFee = calculateMergeFee(mergeValue);
-  const gasCost = CONFIG.GAS_COST_USD; // base gas (excludes vol spike — conservative estimate)
-  const totalMergeCost = oppositeBuyFee + mergeFlatFee + gasCost;
+  const gasCost = CONFIG.GAS_COST_USD;
 
-  if (totalMergeCost < sellFee) {
-    return { method: "MERGE", sellFee, mergeFee: totalMergeCost, savings: sellFee - totalMergeCost };
+  let mergeFee: number;
+  if (holdsOpposite) {
+    // Flavor A: gas + flat fee. The opposite shares were already paid for
+    // separately, so they don't enter this comparison.
+    mergeFee = mergeFlatFee + gasCost;
+  } else {
+    // Flavor B no longer supported — refuse to recommend MERGE.
+    mergeFee = Number.POSITIVE_INFINITY;
   }
-  return { method: "SELL", sellFee, mergeFee: totalMergeCost, savings: totalMergeCost - sellFee };
+
+  if (mergeFee < sellFee) {
+    return { method: "MERGE", sellFee, mergeFee, savings: sellFee - mergeFee };
+  }
+  return { method: "SELL", sellFee, mergeFee, savings: mergeFee - sellFee };
 }
 
 // ── Mark-to-Market ───────────────────────────────────────────────────────────
