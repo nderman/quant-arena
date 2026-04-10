@@ -1,157 +1,217 @@
 # Quant Farm — Evolutionary Arena for Polymarket
 
-A Node.js/TypeScript simulation arena where trading engines compete on Polymarket crypto markets. High-fidelity referee with the 2026 dynamic parabolic fee model, latency injection, and toxic flow simulation.
+A multi-coin TypeScript arena where AI-bred trading engines compete on **live Polymarket 5-minute crypto binary markets** (BTC / ETH / SOL). A high-fidelity referee simulates dual orderbooks, the 2026 quartic fee model, latency, toxic flow, fill decay, oracle noise, and on-chain merge latency.
 
-## Architecture
+The goal: evolve engines that can survive the structural costs of a real prediction market and graduate to live execution with real capital.
 
+---
+
+## System Flow
+
+How a tick travels from data feed → engines → fills → settlement → breeder.
+
+```mermaid
+flowchart TD
+  subgraph DataFeeds["Data Feeds"]
+    PMws["Polymarket WS<br/>(dual book + price)"]
+    BNws["Binance WS<br/>(spot L2)"]
+    CL["Chainlink poller<br/>(Polygon RPC)"]
+    Disco["Gamma API discovery<br/>(retry + backoff)"]
+  end
+
+  subgraph Arena["Arena (per coin)"]
+    Pulse["pulse.ts<br/>tick stream"]
+    Snap["snapshotTickBooks<br/>(per-tick clone)"]
+    Loop["onTick loop"]
+    Engines[["engines<br/>onTick → actions"]]
+    Ref["referee.processActions"]
+    Settle["settlement.pollAndSettle<br/>(every 30s)"]
+  end
+
+  subgraph Persistence["Persistence (per coin)"]
+    Ledger[("ledger_&lt;coin&gt;.db<br/>SQLite WAL")]
+    Hist["round_history_&lt;coin&gt;.json"]
+    Intel["round_intel_&lt;coin&gt;.json"]
+    Marker["last_breed_&lt;coin&gt;.json"]
+  end
+
+  subgraph Breeder["Breeder (per coin, 6h cadence)"]
+    Gate{"data gate:<br/>≥3 new rounds?"}
+    Analyst["Gemini Flash<br/>analyzeArena"]
+    Coder["Haiku 4.5<br/>generateEngine"]
+    Compile["tsc validate"]
+    Write["BredEngine_xxxx.ts"]
+  end
+
+  TG["Telegram bot<br/>(shared)"]
+
+  Disco --> Pulse
+  PMws --> Pulse
+  BNws --> Pulse
+  CL --> Pulse
+  Pulse --> Loop
+  Loop --> Snap
+  Snap --> Engines
+  Engines -- "BUY / SELL / MERGE / HOLD" --> Ref
+  Ref -- "fills + pnl" --> Ledger
+  Settle -- "SETTLE rows + payouts" --> Ledger
+  Loop -- "round end" --> Hist
+  Loop -- "leader stats" --> Intel
+
+  Hist --> Gate
+  Marker --> Gate
+  Gate -- "yes" --> Analyst
+  Analyst --> Coder
+  Coder --> Compile
+  Compile --> Write
+  Write -. "loaded on next arena restart" .-> Engines
+  Compile --> Marker
+
+  Ledger --> TG
+  Hist --> TG
 ```
-quant-farm/
-├── src/
-│   ├── arena.ts          # Main run loop — 6h rounds, engine competition, round_intel.json
-│   ├── referee.ts        # Fee model, latency, toxic flow, fill simulation
-│   ├── pulse.ts          # Data feeds: PM CLOB WS + Binance L2 + simulated mode
-│   ├── signals.ts        # Free signal sources: Fear/Greed, funding, DVOL, realized vol
-│   ├── discovery.ts      # Auto-discover active crypto markets via Gamma API
-│   ├── ledger.ts         # SQLite trade ledger (FeePaid, LatencySlippage, SignalSource)
-│   ├── config.ts         # Environment-driven configuration
-│   ├── types.ts          # Shared type definitions
-│   ├── engines/
-│   │   ├── BaseEngine.ts         # Abstract base — feeAdjustedEdge(), cheapestExit(), action builders
-│   │   ├── MeanRevertEngine.ts   # Example: mean reversion, fee-aware entry/exit
-│   │   └── EdgeSniperEngine.ts   # Example: trades only in low-fee zone (edges)
-│   └── tests/
-│       └── unitTests.ts          # 14 tests: fee model, symmetry, edge calc, merge vs sell
-├── data/
-│   ├── ledger.db                 # SQLite (auto-created on first run)
-│   └── round_intel.json          # Leader spy file — agents read this between rounds
-├── engines/                      # User engine directory (configurable via ENGINES_DIR)
-├── package.json
-└── tsconfig.json
+
+**Key invariants:**
+- Books are snapshot-and-cloned **once per tick**; engines share liquidity depletion within a tick (no ghost liquidity).
+- Settlement writes a `SETTLE` row to the ledger, so `SUM(pnl)` reflects true outcomes (settlement wins are not silent cash bumps).
+- Breeder is gated on **new round count**, not wall clock — deploys never fire fresh codegen on identical data.
+
+---
+
+## Referee / Simulator
+
+What happens to a single `EngineAction` between submission and the ledger.
+
+```mermaid
+flowchart TD
+  Action["EngineAction<br/>BUY / SELL / MERGE"] --> Sanity{"price 0–1?<br/>token in active market?<br/>min size met?"}
+  Sanity -- "fail" --> Reject1["reject (no fill)"]
+  Sanity -- "ok" --> Latency["sleep LATENCY_MS (50ms)"]
+
+  Latency --> RouteAction{action type?}
+
+  RouteAction -- "BUY / SELL" --> WalkBook["walkBook(size, side, tickBook, mutate=true)"]
+  WalkBook -- "deplete clone" --> FillCheck{"any fills?"}
+  FillCheck -- "no" --> Reject2["reject"]
+  FillCheck -- "yes" --> Maker{"maker order?"}
+  Maker -- "yes (12% fill prob)" --> AdverseSel["+5bps adverse selection<br/>+0% fee + 20% rebate"]
+  Maker -- "no — taker" --> Toxic{"toxic flow?<br/>15% × volume spike"}
+  Toxic -- "hit" --> ToxicMove["price moves 50bps against fill"]
+  Toxic -- "clear" --> FeeCalc
+  AdverseSel --> FeeCalc
+  ToxicMove --> FeeCalc
+
+  FeeCalc["quartic fee:<br/>amount × 0.25 × (P×(1-P))²"]
+  FeeCalc --> Fill["update positions, cash, pnl"]
+
+  RouteAction -- "MERGE" --> MergeFlavor{hold both sides?}
+  MergeFlavor -- "yes (Flavor A)" --> MergeA["just merge:<br/>gas only, 3s on-chain delay"]
+  MergeFlavor -- "no (Flavor B)" --> MergeB["buy opposite at real book + gas<br/>then merge, 3s delay"]
+  MergeA --> Fill
+  MergeB --> Fill
+
+  Fill --> Ledger[("recordFill →<br/>ledger.db")]
+
+  Settlement["pollAndSettle<br/>(closed markets via Gamma)"] --> SettleHit{"engine holds<br/>settled token?"}
+  SettleHit -- "yes" --> Payout["cash += shares (if won) or 0<br/>delete position"]
+  Payout --> SettleRow["recordSettlement →<br/>SETTLE row in ledger"]
+  SettleRow --> Ledger
+
+  StaleCheck["stale data check<br/>(every 5s)"] -. "force PM reconnect<br/>after 10s silence" .-> Latency
+  StaleCheck -.-> RotationCB["market rotation<br/>(every 2 min for 5M)"]
 ```
+
+**The referee is the validator.** Engines submit intent; the referee determines whether and how that intent fills, using the *real* PM book at that moment, *real* fees, *real* latency, and *real* settlement payouts. Engines cannot lie about price or fabricate liquidity.
+
+---
 
 ## Quick Start
 
 ```bash
 npm install
-npm run build              # TypeScript compile
-npm run test:unit          # 14 tests — fee model validation
+npm run build       # tsc compile
+npm run test:unit   # 15 tests — must all pass before deploy
 ```
 
-## Running the Arena
+### Run a single arena locally
 
-### Simulated (offline, no APIs)
 ```bash
-npm run arena:dry                    # Infinite rounds, simulated random-walk data
-npm run arena:1round:dry             # Single 1-min round with fast ticks (testing)
+ARENA_COIN=btc npm run arena:dry      # simulated random-walk pulse
+ARENA_COIN=btc npm run arena:live     # live PM + Binance + Chainlink
+npm run arena:1round:dry              # quick 1-min round for testing
 ```
 
-### Live Data (read-only, no Polymarket auth needed)
+### Production (multi-coin via PM2)
+
+The shipped `ecosystem.config.js` runs **7 processes**:
+
+```
+quant-arena-btc      quant-breeder-btc
+quant-arena-eth      quant-breeder-eth     quant-telegram
+quant-arena-sol      quant-breeder-sol
+```
+
+Each arena auto-discovers active 5M markets for its coin. Each breeder evolves engines using only that coin's history. Telegram is shared.
+
 ```bash
-npm run arena:live                   # Auto-discovers most liquid crypto market
-PM_CONDITION_ID="0x..." npm run arena  # Specify a market manually
+pm2 start ecosystem.config.js
+pm2 logs quant-arena-btc
+pm2 logs quant-breeder-btc
 ```
 
-### Custom Configuration
+### Deploy to VPS
+
 ```bash
-ROUND_DURATION_MS=3600000 \          # 1h rounds instead of 6h
-TICK_INTERVAL_MS=1000 \              # 1s ticks instead of 5s
-STARTING_CASH=5000 \                 # $5000 per engine instead of $1000
-MAX_ROUNDS=10 \                      # Stop after 10 rounds
-npm run arena
+bash scripts/deploy.sh
 ```
 
-### Utilities
-```bash
-npm run discover           # Find active crypto markets on Polymarket
-npm run signals            # Test all signal sources (Fear/Greed, funding, DVOL, vol)
-npm run pulse:test         # Test WebSocket data feeds
-```
+rsync to `165.22.29.245`, rebuild, `pm2 restart`. Excludes `data/`, `node_modules`, `.git`, `.env`, and `BredEngine_*` (preserved on VPS).
 
-## The Parabolic Fee Model
+---
+
+## The Quartic Fee Model
 
 Polymarket's 2026 dynamic fee for crypto markets:
 
 ```
-fee = amount × 0.018 × 4 × P × (1 − P)
+fee = amount × 0.25 × (P × (1−P))²
 ```
 
-| Price | Fee %  | Fee on $100 | Interpretation |
-|-------|--------|-------------|----------------|
-| 0.01  | 0.07%  | $0.07       | Near-zero — edges are cheap |
-| 0.10  | 0.65%  | $0.65       | Low |
-| 0.30  | 1.51%  | $1.51       | Getting expensive |
-| 0.50  | 1.80%  | $1.80       | **Maximum** — kills most edges |
-| 0.70  | 1.51%  | $1.51       | Getting expensive |
-| 0.90  | 0.65%  | $0.65       | Low |
-| 0.99  | 0.07%  | $0.07       | Near-zero — edges are cheap |
+| Price | Fee % | Fee on $100 |
+|------:|------:|------------:|
+| 0.01 | 0.0025% | $0.0025 |
+| 0.10 | 0.20%  | $0.20 |
+| 0.30 | 1.10%  | $1.10 |
+| 0.50 | **1.56%** | **$1.56** |
+| 0.70 | 1.10%  | $1.10 |
+| 0.90 | 0.20%  | $0.20 |
+| 0.99 | 0.003% | $0.003 |
 
-**MERGE** bypasses the parabolic fee entirely — flat 0.1% gas offset. At mid-prices, merging YES+NO is often cheaper than selling.
+**Maker orders:** 0% fee + 20% rebate of taker fees, **12% fill probability** (was 60% — calibrated down to match real HFT queue priority), 5bps adverse selection.
 
-## Referee Simulation
+**MERGE:** the contract itself is free; pay gas + the cost of buying the opposite side at its real book price (Flavor B), or just gas if you already hold both sides (Flavor A).
 
-Every engine action goes through the referee before it "fills":
+Winning engines must do at least one of:
+1. Trade at the edges (P > 0.85 or P < 0.15) where fees vanish
+2. Use MERGE to exit at mid-prices instead of crossing the spread
+3. Have raw edge > 2% to overcome the fee at any price
+4. Be a maker — accept the 12% fill rate and the 5bps adverse selection in exchange for zero fees and rebates
 
-1. **Latency Injection** — 300ms delay (configurable via `LATENCY_MS`)
-2. **Toxic Flow Check** — After delay, 15% chance the price moved against you. Buys fill at the worse price; sells get sniped. Simulates HFT adverse selection.
-3. **Parabolic Fee** — Deducted from proceeds (BUY/SELL). MERGE uses flat 0.1%.
-4. **State Update** — Cash, positions, P&L all tracked per-engine.
+`feeAdjustedEdge()` on `BaseEngine` is the gatekeeper. Call it before every trade.
 
-### Configuration
+---
 
-| Env Var | Default | Description |
-|---------|---------|-------------|
-| `PEAK_FEE_RATE` | 0.018 | Crypto peak fee rate (1.8%) |
-| `LATENCY_MS` | 300 | Simulated fill delay |
-| `MERGE_FEE_RATE` | 0.001 | Flat merge gas offset (0.1%) |
-| `TOXIC_FLOW_ENABLED` | true | Enable adverse selection simulation |
-| `TOXIC_FLOW_PROBABILITY` | 0.15 | Chance of toxic fill per trade |
-| `TOXIC_FLOW_BPS` | 50 | Adverse move magnitude (basis points) |
+## Dual Orderbooks
 
-## Signal Sources
+UP and DOWN tokens have **independent orderbooks** delivered over PM WebSocket and routed by `asset_id`. UP + DOWN ≠ $1.00 — the gap is where merge arb profit lives.
 
-All free, no API keys required. Fetched every 60s and passed to `engine.onTick(tick, state, signals)`.
+Critical: an engine seeing a DOWN tick at $0.05 and buying UP tokens pays whatever the **UP book** says (~$0.95), not $0.05. The referee always fills from the correct token's book via `getBookForToken(action.tokenId)`. Never invert one book to derive the other.
 
-| Source | API | What it provides | Use case |
-|--------|-----|------------------|----------|
-| **Fear & Greed** | alternative.me | 0-100 sentiment (Extreme Fear → Extreme Greed) | Contrarian signal |
-| **Binance Funding** | fapi.binance.com | 8h perp funding rate + direction | Overcrowding detection |
-| **Deribit DVOL** | deribit.com | Annualized implied vol (BTC/ETH options) | Expected move size |
-| **Binance Klines** | api.binance.com | Realized vol at 5m/1h/1d timeframes | Volatility regime |
-| **Binance Spot** | api.binance.com | Current BTC/ETH/SOL price | Reference price |
-
-### Interpreting Signals
-
-```
-Fear & Greed:
-  0-24: Extreme Fear → contrarian BUY signal
-  75-100: Extreme Greed → contrarian SELL signal
-
-Funding Rate:
-  > 0.01%: Longs overcrowded → fade longs
-  < -0.01%: Shorts overcrowded → fade shorts
-
-DVOL:
-  > 80: High vol → wider ranges, bigger moves
-  < 40: Low vol → compression, breakout likely
-```
-
-## Market Discovery
-
-The arena auto-discovers active markets if `PM_CONDITION_ID` is not set:
-
-```bash
-npm run discover     # Lists active crypto + up/down markets
-```
-
-Searches Polymarket's Gamma API for:
-- **Crypto price markets** — "Will BTC be above $X?"
-- **Up/Down markets** — 1H, 4H, daily candle markets (high-frequency)
-
-Sorted by liquidity. The arena picks the most liquid market automatically.
+---
 
 ## Writing an Engine
 
-Create a file in `src/engines/` (auto-loaded) or `./engines/` (user directory):
+Drop a file in `src/engines/` extending `AbstractEngine`. Auto-loaded on next arena restart.
 
 ```typescript
 import { AbstractEngine } from "./BaseEngine";
@@ -165,23 +225,15 @@ export class MyEngine extends AbstractEngine {
   onTick(tick: MarketTick, state: EngineState, signals?: SignalSnapshot): EngineAction[] {
     if (tick.source !== "polymarket") return [];
 
-    // CRITICAL: Always check fee-adjusted edge before trading
-    const modelProb = 0.60;  // your model's probability
+    // Always check fee-adjusted edge before trading
+    const modelProb = 0.60;
     const edge = this.feeAdjustedEdge(modelProb, tick.midPrice);
+    if (!edge.profitable) return [];
 
-    if (!edge.profitable) return [];  // fee eats the edge — skip
+    // Compare exit costs — sometimes MERGE beats SELL
+    const exit = this.cheapestExit(tick.midPrice, 100, state.activeTokenId);
 
-    // Check cheapest exit method
-    const exit = this.cheapestExit(tick.midPrice, 100);
-    // exit.method === "MERGE" at mid-prices, "SELL" at edges
-
-    // Use signals for conviction
-    if (signals?.fearGreed && signals.fearGreed.value < 25) {
-      // Extreme fear — boost confidence
-    }
-
-    // Action builders
-    return [this.buy("token-id", tick.bestAsk, 50, {
+    return [this.buy(state.activeTokenId, tick.bestAsk, 50, {
       note: `edge=${edge.netEdge.toFixed(4)}`,
       signalSource: "my_signal",
     })];
@@ -189,98 +241,141 @@ export class MyEngine extends AbstractEngine {
 }
 ```
 
-### BaseEngine Helpers
+### BaseEngine helpers
 
-| Method | Description |
-|--------|-------------|
-| `feeAdjustedEdge(modelProb, marketPrice)` | Is this trade profitable after the P(1-P) fee? |
-| `cheapestExit(price, shares)` | Should I SELL or MERGE to exit? |
-| `getPosition(tokenId)` | Current position in a token |
+| Method | Purpose |
+|---|---|
+| `feeAdjustedEdge(modelProb, marketPrice)` | Is this trade profitable after the quartic fee? |
+| `cheapestExit(price, shares, tokenId)` | Should I SELL or MERGE? |
+| `getPosition(tokenId)` | Current position |
 | `portfolioValue(price)` | Cash + mark-to-market |
-| `buy(token, price, size, opts?)` | Build a BUY action |
-| `sell(token, price, size, opts?)` | Build a SELL action |
-| `merge(token, amount, opts?)` | Build a MERGE action (bypasses parabolic fee) |
-| `hold()` | No-op action |
+| `buy / sell / merge / hold` | Action builders |
 
-### Engine Actions
+### Engine rules
 
-| Action | Fee | Description |
-|--------|-----|-------------|
-| `BUY` | Parabolic | Buy outcome shares — fee = `amount × 0.018 × 4 × P(1-P)` |
-| `SELL` | Parabolic | Sell outcome shares — same fee curve |
-| `MERGE` | Flat 0.1% | Buy YES+NO, merge for $1.00 — bypasses parabolic fee |
-| `HOLD` | None | Do nothing |
+- Must call `feeAdjustedEdge()` before trading
+- TokenId must match the active market (referee rejects fabricated tokens)
+- ≥ 5 shares to SELL (CLOB), ≥ 1 share to MERGE (on-chain)
+- `npm run test:unit` must pass before any deploy
 
-## Round Intel (Spy File)
+---
 
-After each round, `data/round_intel.json` is written with the leader's stats:
+## Breeder
 
-```json
-{
-  "roundId": "R0001-1712345678",
-  "leaderEngineId": "edge-sniper-v1",
-  "leaderPnl": 12.45,
-  "leaderTradeCount": 8,
-  "leaderAvgFee": 0.0034,
-  "leaderStrategy": "edge-sniper-v1: 8 trades, 60% win, $0.0272 fees",
-  "allResults": [...]
-}
-```
+Gemini Flash (analyst) + Claude Haiku 4.5 (coder) via OpenRouter.
 
-Engines can read this file between rounds to adapt strategy (evolutionary pressure).
+| | |
+|---|---|
+| Cadence | 6h per coin (`BREED_INTERVAL_HOURS` to override) |
+| Data gate | Skip cycle unless ≥ `MIN_NEW_ROUNDS_TO_BREED` (default 3) new rounds since last successful breed |
+| Retries | 2 (compile-failure retries) |
+| Coder model | `anthropic/claude-haiku-4-5` (override via `CODER_MODEL`) |
+| Loading | Bred engines load on next natural arena restart — breeder no longer auto-restarts pm2 |
 
-## Ledger (SQLite)
+The data gate is the cost killer: every deploy / process restart used to fire 3 fresh Sonnet calls on identical data. Now the gate skips immediately if no new rounds have completed.
 
-All trades logged to `data/ledger.db` with:
+---
 
-| Column | Description |
-|--------|-------------|
-| `round_id` | Which round |
-| `engine_id` | Which engine |
-| `action` | BUY/SELL/MERGE |
-| `price` | Actual fill price |
-| `fee` | Parabolic or merge fee paid |
-| `slippage` | Price slippage from toxic flow |
-| `signal_source` | What triggered the trade |
+## Settlement
+
+`pollAndSettle` runs every 30s per arena, queries Gamma for closed 5M markets, and:
+
+1. Pays out cash to engines holding winning tokens (`shares × $1.00`)
+2. Deletes losing positions (settled to $0)
+3. **Writes a `SETTLE` row to the trades ledger** with the true payout pnl
+
+Without #3, `SUM(pnl)` from the ledger lies — settlement wins silently bump cash without a row, so the column undercounts gains and overcounts losses. Always read leaderboards including SETTLE rows.
+
+---
+
+## Ledger Schema
+
+`data/ledger_<coin>.db` (SQLite WAL, buffered writes flushed every 50 entries).
+
+| Column | Notes |
+|---|---|
+| `round_id`, `engine_id`, `timestamp` | |
+| `action` | `BUY` / `SELL` / `MERGE` / `SETTLE` |
+| `token_id`, `price`, `size` | |
+| `fee`, `rebate`, `slippage` | |
+| `pnl` | Realized P&L for the row; settlement payouts now recorded too |
+| `cash_after` | Engine cash post-fill |
+| `signal_source`, `note` | |
 | `toxic_flow` | 1 if adversely selected |
-| `latency_ms` | Simulated fill delay |
+| `latency_ms` | |
+| `order_type` | `taker` / `maker` / `merge` / `settle` |
 
-Query with any SQLite tool:
 ```sql
-SELECT engine_id, SUM(pnl) as total_pnl, SUM(fee) as total_fees
-FROM trades GROUP BY engine_id ORDER BY total_pnl DESC;
+-- Honest leaderboard (includes settlement payouts)
+SELECT engine_id,
+       COUNT(*) as trades,
+       SUM(CASE WHEN action='SETTLE' THEN 1 ELSE 0 END) as settles,
+       printf('%+.2f', SUM(pnl)) as pnl,
+       printf('%.2f', SUM(fee)) as fees,
+       SUM(toxic_flow) as toxic
+FROM trades
+GROUP BY engine_id
+ORDER BY SUM(pnl) DESC;
 ```
 
-## All Environment Variables
+---
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ROUND_DURATION_MS` | 21600000 (6h) | Round duration |
-| `STARTING_CASH` | 1000 | USDC per engine per round |
-| `TICK_INTERVAL_MS` | 5000 | Tick frequency |
-| `MAX_ROUNDS` | 0 (infinite) | Stop after N rounds |
-| `DRY_RUN` | false | Use simulated data |
-| `ENGINES_DIR` | ./engines | User engine directory |
-| `PEAK_FEE_RATE` | 0.018 | Parabolic fee peak |
-| `LATENCY_MS` | 300 | Fill delay |
-| `MERGE_FEE_RATE` | 0.001 | Flat merge fee |
-| `TOXIC_FLOW_ENABLED` | true | Adverse selection |
-| `TOXIC_FLOW_PROBABILITY` | 0.15 | Toxic flow chance |
-| `TOXIC_FLOW_BPS` | 50 | Adverse move size |
-| `PM_WS_URL` | wss://...polymarket.com | PM WebSocket |
-| `PM_CONDITION_ID` | (auto-discover) | Market to track |
-| `BINANCE_WS_URL` | wss://...binance.com | Binance WebSocket |
-| `BINANCE_SYMBOL` | btcusdt | Binance pair |
-| `LEDGER_DB_PATH` | ./data/ledger.db | SQLite path |
-| `ROUND_INTEL_PATH` | ./data/round_intel.json | Intel output |
-| `LOG_LEVEL` | info | Logging verbosity |
+## Key Environment Variables
 
-## Key Insight
+| Variable | Default | Purpose |
+|---|---|---|
+| `ARENA_COIN` | `btc` | Per-process coin (set in ecosystem) |
+| `ARENA_INSTANCE_ID` | `<coin>` | Ledger / intel suffix |
+| `ROUND_DURATION_MS` | `3600000` | 1h rounds |
+| `STARTING_CASH` | `50` | USDC per engine per round |
+| `TICK_INTERVAL_MS` | `5000` | |
+| `PEAK_FEE_RATE` | `0.015625` | Quartic peak (1.5625% at P=0.50) |
+| `LATENCY_MS` | `50` | Realistic API lag |
+| `MAKER_FILL_PROBABILITY` | `0.12` | Calibrated for HFT queue priority |
+| `TOXIC_FLOW_PROBABILITY` | `0.15` | Per-fill toxic flow chance |
+| `TOXIC_FLOW_BPS` | `50` | Adverse move size |
+| `ON_CHAIN_LATENCY_MS` | `3000` | Polygon merge finality |
+| `ORACLE_NOISE_BPS` | `35` | Settlement oracle noise |
+| `BREED_INTERVAL_HOURS` | `6` | Breeder cadence per coin |
+| `MIN_NEW_ROUNDS_TO_BREED` | `3` | Breeder data gate |
+| `CODER_MODEL` | `anthropic/claude-haiku-4-5` | Breeder code-gen model |
+| `OPENROUTER_API_KEY` | — | Required for breeder |
 
-The parabolic fee is the final boss. At P=0.50, the house takes 1.8% — most edges evaporate. Winning engines either:
+See `src/config.ts` for the full list.
 
-1. **Trade at the edges** (P > 0.85 or P < 0.15) where fees are < 0.65%
-2. **Use MERGE** to exit positions at mid-prices (0.1% vs 1.8%)
-3. **Have massive edge** (> 2%) to overcome the fee at any price
+---
 
-The `feeAdjustedEdge()` calculator on `BaseEngine` is the gatekeeper. Call it before every trade.
+## Layout
+
+```
+quant-farm/
+├── src/
+│   ├── arena.ts                 # main loop, per-coin
+│   ├── referee.ts               # fee model, fills, toxic flow, merge
+│   ├── pulse.ts                 # WS feeds + simulated pulse
+│   ├── settlement.ts            # Gamma poller + SETTLE rows
+│   ├── breeder.ts               # Gemini analysis + Haiku codegen
+│   ├── discovery.ts             # Gamma API market discovery
+│   ├── ledger.ts                # SQLite trade ledger
+│   ├── historyStore.ts          # shared round history utilities
+│   ├── signals.ts               # fear/greed, funding, DVOL, vol
+│   ├── telegram.ts              # phone monitoring bot
+│   ├── live/                    # live execution scaffolding (Phase 0+)
+│   │   ├── clobClient.ts
+│   │   ├── liveState.ts
+│   │   ├── riskManager.ts
+│   │   ├── graduation.ts
+│   │   └── merger.ts
+│   ├── engines/
+│   │   ├── BaseEngine.ts        # AbstractEngine + helpers
+│   │   ├── *.ts                 # 9 hand-built strategies
+│   │   └── BredEngine_*.ts      # AI-generated, preserved on VPS
+│   └── tests/
+├── data/                        # per-coin: ledger, intel, history, breed marker
+├── docs/
+│   ├── LIVE_BUILD_PLAN.md
+│   └── LIVE_EXECUTION.md
+├── scripts/deploy.sh
+├── ecosystem.config.js          # PM2 process definitions
+└── CLAUDE.md                    # AI assistant instructions
+```
