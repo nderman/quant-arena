@@ -1,4 +1,5 @@
 import { AbstractEngine } from "./BaseEngine";
+import { getBookForToken } from "../pulse";
 import type { EngineAction, EngineState, MarketTick, SignalSnapshot } from "../types";
 
 /**
@@ -53,6 +54,18 @@ export class ChainlinkSniperEngine extends AbstractEngine {
   private strikePrice: number | null = null;
   private currentMarketSymbol = "";
 
+  // Skip-reason logging — emit at most every N seconds per coin so we can see
+  // why the engine isn't firing without flooding logs
+  private lastSkipLogAt = 0;
+  private readonly skipLogIntervalMs = 60_000;
+
+  private logSkip(reason: string): void {
+    const now = Date.now();
+    if (now - this.lastSkipLogAt < this.skipLogIntervalMs) return;
+    this.lastSkipLogAt = now;
+    console.log(`[chainlink-sniper] ${this.currentMarketSymbol || "?"} skip: ${reason}`);
+  }
+
   onTick(tick: MarketTick, state: EngineState, _signals?: SignalSnapshot): EngineAction[] {
     if (tick.source !== "polymarket") return [];
 
@@ -60,17 +73,21 @@ export class ChainlinkSniperEngine extends AbstractEngine {
     const downTokenId = this.getDownTokenId();
     if (!upTokenId || !downTokenId) return [];
 
-    // Detect candle rotation — capture the strike price at the new window's start
+    // Detect candle rotation — reset per-candle state
     const currentTokens = `${upTokenId}:${downTokenId}`;
     if (currentTokens !== this.lastMarketTokens) {
       this.lastMarketTokens = currentTokens;
       this.candleEntries = 0;
+      this.strikePrice = null; // re-capture lazily once Chainlink is available
       this.currentMarketSymbol = this.getMarketSymbol();
-      // Capture strike at window start (current Chainlink price = the level
-      // the market is asking about). This locks in the reference for the
-      // entire candle — for "BTC up in next 5min" markets, this is the
-      // price BTC must beat to resolve UP.
-      this.strikePrice = this.getChainlinkPrice(this.currentMarketSymbol);
+    }
+
+    // Lazy strike capture — try every tick until we successfully read Chainlink.
+    // Previous one-shot capture failed when the Chainlink poller hadn't run yet
+    // at the moment of market rotation, leaving strikePrice null forever.
+    if (this.strikePrice === null) {
+      const cl = this.getChainlinkPrice(this.currentMarketSymbol);
+      if (cl !== null) this.strikePrice = cl;
     }
 
     if (this.candleEntries >= this.maxEntriesPerCandle) return [];
@@ -79,37 +96,47 @@ export class ChainlinkSniperEngine extends AbstractEngine {
     if (secsLeft < 0 || secsLeft > this.maxSecondsRemaining) return [];
 
     if (this.strikePrice === null) {
-      // No strike captured (Chainlink unavailable at window start) — can't trade
+      this.logSkip("strike not yet captured (Chainlink unavailable)");
       return [];
     }
 
-    // Get fresh Chainlink price for the comparison
     const currentChainlink = this.getChainlinkPrice(this.currentMarketSymbol);
-    if (currentChainlink === null) return [];
+    if (currentChainlink === null) {
+      this.logSkip("current Chainlink unavailable");
+      return [];
+    }
 
     // Determine which side Chainlink confirms
     const chainlinkSaysUp = currentChainlink > this.strikePrice;
     const chainlinkConfidenceBps = Math.abs((currentChainlink - this.strikePrice) / this.strikePrice) * 10000;
-    // Need at least 5bps of separation to be confident — Chainlink reports in
-    // small increments and a 0bps "match" is a coin flip
-    if (chainlinkConfidenceBps < 5) return [];
+    if (chainlinkConfidenceBps < 5) {
+      this.logSkip(`Chainlink too close to strike (${chainlinkConfidenceBps.toFixed(1)}bps)`);
+      return [];
+    }
 
-    // PM mid for the UP side
-    const upMid = tick.tokenSide === "UP" ? tick.midPrice : (1 - tick.midPrice);
-    const downMid = 1 - upMid;
-    const leadingPrice = chainlinkSaysUp ? upMid : downMid;
-    if (leadingPrice < this.minLeadingPrice || leadingPrice >= this.maxLeadingPrice) return [];
-
-    // Spread check on the side we're buying — read the live book
+    // Read BOTH books directly. Never derive one side's price from the other
+    // via 1-x — UP and DOWN have independent dual orderbooks, that inversion
+    // is wrong. (See feedback_dual_books.md for the canonical version of this
+    // mistake.)
     const targetTokenId = chainlinkSaysUp ? upTokenId : downTokenId;
-    const targetBestAsk = chainlinkSaysUp
-      ? (tick.tokenSide === "UP" ? tick.bestAsk : (1 - tick.bestBid))
-      : (tick.tokenSide === "DOWN" ? tick.bestAsk : (1 - tick.bestBid));
-    const targetBestBid = chainlinkSaysUp
-      ? (tick.tokenSide === "UP" ? tick.bestBid : (1 - tick.bestAsk))
-      : (tick.tokenSide === "DOWN" ? tick.bestBid : (1 - tick.bestAsk));
+    const targetBook = getBookForToken(targetTokenId);
+    const targetBestAsk = targetBook.asks[0]?.price;
+    const targetBestBid = targetBook.bids[0]?.price;
+    if (!targetBestAsk || !targetBestBid || targetBestAsk <= 0) {
+      this.logSkip(`target book empty (token=${targetTokenId.slice(0, 8)}...)`);
+      return [];
+    }
+
+    if (targetBestAsk < this.minLeadingPrice || targetBestAsk >= this.maxLeadingPrice) {
+      this.logSkip(`target ask ${targetBestAsk.toFixed(3)} out of [${this.minLeadingPrice}, ${this.maxLeadingPrice})`);
+      return [];
+    }
+
     const spread = targetBestAsk - targetBestBid;
-    if (spread <= 0 || spread > this.maxSpreadCents) return [];
+    if (spread <= 0 || spread > this.maxSpreadCents) {
+      this.logSkip(`spread ${spread.toFixed(3)} > ${this.maxSpreadCents}`);
+      return [];
+    }
 
     // Size — small, bounded
     const shares = Math.floor(this.orderSizeUsd / targetBestAsk);
