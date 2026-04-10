@@ -310,7 +310,12 @@ const ALL_COINS = ["btc", "eth", "sol"];
 
 function pruneEngines(intel: any): void {
   const engines = listEngines();
-  const prunableEngines = engines.filter(e => e !== "BaseEngine");
+  // Pruner is only allowed to delete BREDENGINE files. Hand-built engines are
+  // never auto-pruned — they're irreplaceable design references and the breeder
+  // doesn't have a way to recreate them. Without this filter the breeder will
+  // happily delete LateSniperEngine, FadeV2Engine, MeanRevertEngine etc. and
+  // break dependent engines (e.g. DisciplinedReverter imports MeanRevertEngine).
+  const prunableEngines = engines.filter(e => e.startsWith("BredEngine_"));
 
   if (prunableEngines.length <= MAX_ENGINES) return;
 

@@ -7,8 +7,10 @@ REMOTE_DIR="~/quant-arena"
 
 echo "Deploying to $REMOTE_HOST..."
 
-# 1. Build locally first
-echo "[1/3] Building TypeScript..."
+# 1. Build locally first — clean dist/ to drop stale artifacts from retired
+#    or renamed engines (tsc does not auto-clean stale outputs).
+echo "[1/3] Cleaning + building TypeScript..."
+rm -rf dist
 npm run build
 
 # 2. Sync files (exclude dev stuff, local data, node_modules)
