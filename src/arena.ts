@@ -388,14 +388,25 @@ async function main(): Promise<void> {
   // ── Auto-discover markets if no condition ID set ──
   if (!CONFIG.PM_CONDITION_ID && !CONFIG.DRY_RUN) {
     console.log("[arena] No PM_CONDITION_ID set — auto-discovering markets...\n");
-    try {
-      // Try 5M markets first (highest frequency, best for arena testing)
-      const fiveMin = await discover5mMarkets({ tokens: [CONFIG.ARENA_COIN] });
-      const updown = await discoverUpDownMarkets({ intervals: ["1H", "4H"], limit: 5 });
-      const crypto = await discoverCryptoMarkets({ limit: 5 });
-      const all = [...fiveMin, ...updown, ...crypto];
 
-      // Prefer 5M markets, then sort by liquidity
+    // Retry with backoff. We REQUIRE at least one 5M market for the configured coin —
+    // never fall back to simulated pulse when running live (the whole point is real data).
+    const maxAttempts = 10;
+    let pick: { title?: string; slug?: string; yesTokenId: string; noTokenId: string; liquidity: number } | null = null;
+    for (let attempt = 1; attempt <= maxAttempts && !pick; attempt++) {
+      // Each call is independent — one timeout shouldn't kill the others.
+      const [fiveMinR, updownR, cryptoR] = await Promise.allSettled([
+        discover5mMarkets({ tokens: [CONFIG.ARENA_COIN] }),
+        discoverUpDownMarkets({ intervals: ["1H", "4H"], limit: 5 }),
+        discoverCryptoMarkets({ limit: 5 }),
+      ]);
+      const fiveMin = fiveMinR.status === "fulfilled" ? fiveMinR.value : [];
+      const updown = updownR.status === "fulfilled" ? updownR.value : [];
+      const crypto = cryptoR.status === "fulfilled" ? cryptoR.value : [];
+      const failed = [fiveMinR, updownR, cryptoR].filter(r => r.status === "rejected") as PromiseRejectedResult[];
+      for (const f of failed) console.warn(`[arena] discovery sub-call failed: ${f.reason?.message ?? f.reason}`);
+
+      const all = [...fiveMin, ...updown, ...crypto];
       all.sort((a, b) => {
         const a5m = a.slug?.includes("-5m-") ? 1 : 0;
         const b5m = b.slug?.includes("-5m-") ? 1 : 0;
@@ -404,25 +415,31 @@ async function main(): Promise<void> {
       });
 
       if (all.length > 0) {
-        const pick = all[0];
-        CONFIG.PM_CONDITION_ID = pick.yesTokenId;
-        currentActiveTokenId = pick.yesTokenId;
-        currentActiveDownTokenId = pick.noTokenId;
-        setPmSubscriptionTokens([pick.yesTokenId, pick.noTokenId]);
-        console.log(`\n[arena] Auto-selected: "${pick.title}"`);
-        console.log(`  UP token:   ${pick.yesTokenId.slice(0, 20)}...`);
-        console.log(`  DOWN token: ${pick.noTokenId.slice(0, 20)}...\n`);
-      } else {
-        console.log("[arena] No live crypto markets found — falling back to simulated pulse");
+        pick = all[0];
+        break;
       }
-    } catch (err: any) {
-      console.error("[arena] Discovery failed:", err.message, "— falling back to simulated pulse");
+      const backoffMs = Math.min(30_000, 2_000 * attempt);
+      console.warn(`[arena] Discovery attempt ${attempt}/${maxAttempts} returned no markets — retrying in ${backoffMs}ms`);
+      await new Promise(r => setTimeout(r, backoffMs));
     }
+
+    if (!pick) {
+      console.error("[arena] Discovery failed after all retries — refusing to start with simulated data. Exiting.");
+      process.exit(1);
+    }
+
+    CONFIG.PM_CONDITION_ID = pick.yesTokenId;
+    currentActiveTokenId = pick.yesTokenId;
+    currentActiveDownTokenId = pick.noTokenId;
+    setPmSubscriptionTokens([pick.yesTokenId, pick.noTokenId]);
+    console.log(`\n[arena] Auto-selected: "${pick.title}"`);
+    console.log(`  UP token:   ${pick.yesTokenId.slice(0, 20)}...`);
+    console.log(`  DOWN token: ${pick.noTokenId.slice(0, 20)}...\n`);
   }
 
   // Start data pulse
-  if (CONFIG.DRY_RUN || !CONFIG.PM_CONDITION_ID) {
-    console.log("[arena] DRY_RUN or no PM_CONDITION_ID — using simulated pulse");
+  if (CONFIG.DRY_RUN) {
+    console.log("[arena] DRY_RUN — using simulated pulse");
     startSimulatedPulse({
       startPrice: 0.50 + (Math.random() - 0.5) * 0.4,
       volatility: 0.008,
