@@ -112,6 +112,48 @@ function listEngines(): string[] {
     .map(f => f.replace(".ts", ""));
 }
 
+/**
+ * Rich engine list for the coder prompt: each entry has the class name, id,
+ * human-readable name, and (when present) the first block comment above the
+ * class. This lets the coder SEE what strategies already exist rather than
+ * trying to infer from filenames alone — the key fix for the mode-collapse
+ * problem where the breeder produced three merge-arb engines despite
+ * merge-arb-sniper-v1 and bred-gkci already existing in the population.
+ */
+function listEnginesWithSummary(): string {
+  const files = fs.readdirSync(ENGINES_DIR)
+    .filter(f => f.endsWith(".ts") && !f.startsWith("Base"))
+    .sort();
+
+  const lines: string[] = [];
+  for (const f of files) {
+    try {
+      const src = fs.readFileSync(path.join(ENGINES_DIR, f), "utf-8");
+      const classMatch = src.match(/export class (\w+)/);
+      const idMatch = src.match(/id\s*=\s*"([^"]+)"/);
+      const nameMatch = src.match(/name\s*=\s*"([^"]+)"/);
+      // Grab the first block comment (/** ... */) in the file — usually the
+      // strategy docstring above the class. Strip JSDoc stars + whitespace.
+      const docMatch = src.match(/\/\*\*\s*([\s\S]*?)\s*\*\//);
+      const doc = docMatch
+        ? docMatch[1]
+            .split("\n")
+            .map(l => l.replace(/^\s*\*\s?/, "").trim())
+            .filter(l => l.length > 0)
+            .slice(0, 3)  // first 3 lines is enough to convey the idea
+            .join(" ")
+        : "";
+      const className = classMatch?.[1] ?? f.replace(".ts", "");
+      const id = idMatch?.[1] ?? "?";
+      const name = nameMatch?.[1] ?? "?";
+      lines.push(`- ${className} (id: ${id}, "${name}"): ${doc || "[no docstring]"}`);
+    } catch {
+      lines.push(`- ${f.replace(".ts", "")} [failed to read]`);
+    }
+  }
+  return lines.join("\n");
+}
+
 function readBaseEngine(): string {
   return fs.readFileSync(path.join(ENGINES_DIR, "BaseEngine.ts"), "utf-8");
 }
@@ -204,13 +246,25 @@ ${engines.join(", ")}
 - **total_pnl** across multi-round history: the ground truth. A strategy that made $500 across 10 rounds beats one that made $50 with zero variance.
 
 ## Your Task
-Report what the data actually shows — do not prescribe a winning pattern. Specifically:
-1. Which engines are profitable, and what does their trade history show about HOW they make money (entry prices, time-to-close, maker/taker mix, token side, trade frequency)?
-2. Which engines are losing, and what specific behavior in their trade rows correlates with the losses?
-3. What is underrepresented or untried in the current population? Don't assume the answer is "more maker-only extreme-price holders" — that may already be saturated. Look at what NO engine is doing.
-4. Where does variance hide real edge? An engine that wins $500 one round and loses $50 three rounds has a +$350 expectation — don't dismiss it as inconsistent.
+Report the observable facts in the data. You are a DATA REPORTER, not a strategist.
+Do NOT recommend strategies. Do NOT say things like "no engine is doing X" or
+"underexplored corner" or "this is where edge lives". Those phrases cause the
+downstream coder to over-fit on whatever gap you name, producing mode-collapsed
+engines that all target the same "untried" niche. (This has already happened
+twice — first the maker-extreme-price corner, then the merge-arb corner.)
 
-Be descriptive, not prescriptive. Quote actual numbers from the trade data. Output 300 words or less.`;
+Instead, describe:
+1. For each engine with ≥5 trades this round: entry price distribution,
+   time-to-close, maker/taker mix, token side bias (UP vs DOWN), and round-
+   over-round PnL variance. Quote actual numbers.
+2. Cross-engine patterns in the raw data: are losing engines concentrated at
+   certain prices, certain times-of-candle, certain tick volumes? Is toxic
+   flow clustered in specific regimes?
+3. The multi-round PnL distribution: is any engine reliably positive across
+   ≥3 rounds, or is the arena mostly coin flips with occasional outliers?
+
+Facts only. Leave the strategy inference to the coder stage. Output 300 words
+or less.`;
 
   console.log(`[breeder] Analyzing arena with ${ANALYST_MODEL}...`);
   return callAnalyst(prompt);
@@ -338,41 +392,37 @@ POSITIONS, ROTATIONS, SETTLEMENT
   candle close, the SETTLE row will appear with $1/share if you won.
 
 ═══════════════════════════════════════════════════════════════════
-STRATEGY — YOU DECIDE, LET THE DATA GUIDE
+STRATEGY — YOU DECIDE
 ═══════════════════════════════════════════════════════════════════
-The analysis in the user message contains actual trade data and
-multi-round PnL across all active engines. Let that evidence shape
-your approach.
+The user message contains a DATA REPORT (not recommendations) from
+the analyst plus a list of every existing engine with its strategy
+docstring. Your job is to design a strategy the existing population
+does not already cover.
 
-Do NOT assume any single pattern is the one true answer. Do NOT
-default to "maker-only, extreme prices, hold to settlement" — the
-population has already over-explored that corner, and the market
-may not currently be quoting at those prices. If every existing
-engine does X, consider Y.
-
-Viable directions include (non-exhaustive): mean reversion,
-momentum, taker on wide spreads, maker at intermediate prices,
-merge arb via sequential fills, mid-price conviction, volatility
-timing, cross-asset signals from Binance/Chainlink, late-candle
-resolution bets, DOWN-side contrarian, UP-side momentum. The
-"right" answer is whichever the data says no engine is capturing.
-
-Variance is allowed and often where edge hides. An engine that
-wins big on some rounds and loses small on others can have higher
-expectancy than a flat-line. Size position to survive drawdowns,
-but do not optimize for zero variance — flat engines earn nothing.
+Rules for avoiding mode collapse:
+- READ the existing engines list carefully. If an engine with a
+  strategy like yours already exists, pick a different strategy.
+  The population already contains: mean-revert, momentum-follow,
+  maker-extreme-price-hold, merge-arb (multiple variants), fade,
+  chainlink-sniper, rotation-fade, vol-regime, and late-candle.
+  Any of those corners is ALREADY saturated.
+- Do NOT treat the analyst's phrasing as a recommendation. If the
+  analyst says "engine X has losses concentrated at price Y", that
+  is a data observation — decide yourself whether that implies
+  trade-with-it, fade-it, or ignore-it.
+- Variance is allowed. An engine that wins $500 some rounds and
+  loses $50 others can have positive expectation; don't optimize
+  for flatness. Size to survive drawdowns but accept variance.
 
 Your only hard constraints are the correctness rules above — fee
 model, dual books, merge Flavor A, post-only, validity guards,
-rotation handling. Within those, invent freely and base sizing
-and entry logic on what you observe in the data, not on any
-blessed pattern list.`;
+rotation handling. Within those, invent freely.`;
 
-  const userPrompt = `## Analysis of Current Arena
+  const userPrompt = `## Data Report From Analyst (facts, not recommendations)
 ${analysis}
 
-## Existing Engines (don't duplicate these)
-${engines.join(", ")}
+## Existing Engines — DO NOT duplicate any of these strategies
+${listEnginesWithSummary()}
 
 ## Base Class
 ${baseEngine}
@@ -383,7 +433,7 @@ ${types}
 ## Example Engine (for reference)
 ${exampleEngine}
 
-Write a NEW engine class named ${className}. Base your strategy on what the analysis above actually shows — not on any prescribed pattern. If the data points to an underexplored corner, exploit it. If it points to a known corner still working, refine it. Be creative but grounded in the numbers. The referee faithfully simulates toxic flow, book walking, quartic fees, latency, and settlement — your engine must survive all of them.`;
+Write a NEW engine class named ${className}. Read the existing engines list above CAREFULLY. If your first strategy idea is covered by any existing engine (even a bred one), pick a different idea. The goal is to EXPAND the population's strategy coverage — not to build a variant of something already present. Ground your design in the data report above, but treat it as facts to interpret, not a recommendation to follow.`;
 
   console.log(`[breeder] Generating engine with ${CODER_MODEL}...`);
   const code = await callCoder(systemPrompt, userPrompt);
