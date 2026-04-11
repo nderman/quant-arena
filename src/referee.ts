@@ -189,12 +189,19 @@ function walkBook(
   const levels = side === "BUY" ? book.asks : book.bids;
   if (!levels.length) return null;
 
-  // Sanity: real PM 5M markets always have asks/bids in (0.001, 0.999). If the
-  // book's best level is impossibly cheap (< $0.005), the data is stale or
-  // corrupted (likely a freshly-rotated market that hasn't received PM updates
-  // yet). Reject the fill rather than letting an engine exploit phantom liquidity.
+  // ── Book validity guards ──
+  // 1. Best price must be in (0.01, 0.99) — outside this range is almost
+  //    certainly stale/corrupt data, not a real PM market state.
+  // 2. The book must have BOTH bids and asks (one-sided book = stale).
+  // 3. Spread must be < $0.50 (anything wider means the book is half-empty).
+  // 4. Book must be reasonably fresh (< 30s old).
   const bestLevel = levels[0];
-  if (!bestLevel || bestLevel.price < 0.005 || bestLevel.price > 0.995) return null;
+  if (!bestLevel || bestLevel.price < 0.01 || bestLevel.price > 0.99) return null;
+  if (!book.bids.length || !book.asks.length) return null;
+  const bestBid = book.bids[0]?.price ?? 0;
+  const bestAsk = book.asks[0]?.price ?? 0;
+  if (bestAsk - bestBid > 0.50) return null;
+  if (book.timestamp && Date.now() - book.timestamp > 30_000) return null;
 
   const decayEnabled = CONFIG.FILL_DECAY_ENABLED;
   const decayMult = CONFIG.FILL_DECAY_MULTIPLIER;
@@ -334,11 +341,14 @@ function simulateToxicFlow(
  * 4. Calculate parabolic fee (or flat merge fee)
  * 5. Return fill result
  */
-/** Per-tick book snapshot — mutated as engines deplete liquidity within one tick */
+/** Per-tick book snapshot — eagerly cloned at snapshot time, mutated as engines deplete liquidity. */
 export interface TickBooks {
   upTokenId: string;
   downTokenId: string;
-  /** Lazy cache of cloned books keyed by tokenId. Books are cloned on first access so walkBook(mutate=true) never touches live pulse.ts state. */
+  /** Cache of cloned books keyed by tokenId. UP and DOWN are cloned eagerly at
+   * snapshot creation; any other token (rare, e.g. expired) is lazy-cloned on
+   * first access. Eager cloning ensures the engine sees a consistent moment-
+   * in-time view, not whatever the live book happened to be at first access. */
   bookCache: Map<string, OrderBook>;
 }
 
@@ -350,12 +360,16 @@ function cloneBook(book: OrderBook): OrderBook {
   };
 }
 
-/** Create an empty per-tick snapshot. Books are cloned lazily on first access via bookFromTick. */
+/** Create a per-tick snapshot. UP and DOWN books are cloned eagerly so all
+ * engines processed in this tick see the same moment-in-time state. */
 export function snapshotTickBooks(upTokenId: string, downTokenId: string): TickBooks {
+  const bookCache = new Map<string, OrderBook>();
+  if (upTokenId) bookCache.set(upTokenId, cloneBook(getBookForToken(upTokenId)));
+  if (downTokenId) bookCache.set(downTokenId, cloneBook(getBookForToken(downTokenId)));
   return {
     upTokenId,
     downTokenId,
-    bookCache: new Map(),
+    bookCache,
   };
 }
 
@@ -454,8 +468,7 @@ async function processActionNoLatency(
     const isCurrentMarket =
       action.tokenId === state.activeTokenId ||
       action.tokenId === state.activeDownTokenId;
-    const storedOpposite = state.expiringTokenIds?.get(action.tokenId);
-    if (!isCurrentMarket && !storedOpposite) {
+    if (!isCurrentMarket) {
       return {
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
@@ -465,7 +478,7 @@ async function processActionNoLatency(
 
     // Determine the opposite token
     const isHoldingDown = pos.side === "NO";
-    const oppositeTokenId = storedOpposite || (isHoldingDown ? state.activeTokenId : state.activeDownTokenId);
+    const oppositeTokenId = isHoldingDown ? state.activeTokenId : state.activeDownTokenId;
 
     // ── Flavor A: do we already hold the opposite? ──
     const oppositePos = state.positions.get(oppositeTokenId);
@@ -571,9 +584,27 @@ async function processActionNoLatency(
   if (action.side === "BUY") {
     const isMaker = action.orderType === "maker";
     const tokenBook = bookFromTick(action.tokenId, tickBooks);
-    const walked = walkBook(action.size, "BUY", tokenBook, CONFIG.MIN_ORDER_SIZE, !!tickBooks);
 
-    // Reject if no book or insufficient liquidity
+    // Post-Only enforcement: maker BUY must NOT cross the spread. If the
+    // engine's limit price is at or above bestAsk, the order would execute
+    // immediately as a taker. Reject (matches real PM Post-Only behavior).
+    if (isMaker && action.price > 0) {
+      const bestAsk = tokenBook.asks[0]?.price;
+      if (bestAsk !== undefined && action.price >= bestAsk) {
+        return {
+          action, filled: false, fillPrice: 0, fillSize: 0,
+          fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
+          toxicFlowHit: toxicHit, orderType: "maker",
+        };
+      }
+    }
+
+    // Limit price enforcement: action.price (when > 0) is the engine's max
+    // acceptable fill. walkBook will reject if it would walk to a worse price.
+    const limit = action.price > 0 ? action.price : undefined;
+    const walked = walkBook(action.size, "BUY", tokenBook, CONFIG.MIN_ORDER_SIZE, !!tickBooks, limit);
+
+    // Reject if no book or insufficient liquidity or limit price violated
     if (!walked) {
       return {
         action, filled: false, fillPrice: 0, fillSize: 0,
@@ -692,7 +723,24 @@ async function processActionNoLatency(
 
     // Each token has its own real book — no price inversion needed
     const tokenBook = bookFromTick(action.tokenId, tickBooks);
-    const walked = walkBook(sellSize, "SELL", tokenBook, CONFIG.MIN_ORDER_SIZE, !!tickBooks);
+
+    // Post-Only enforcement for maker SELL: limit price must be ABOVE bestBid
+    // (otherwise the order would execute immediately as a taker).
+    if (isMaker && action.price > 0) {
+      const bestBid = tokenBook.bids[0]?.price;
+      if (bestBid !== undefined && action.price <= bestBid) {
+        return {
+          action, filled: false, fillPrice: 0, fillSize: 0,
+          fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
+          toxicFlowHit: toxicHit, orderType: "maker",
+        };
+      }
+    }
+
+    // Limit price enforcement: action.price is the engine's MIN acceptable
+    // fill price. walkBook rejects if walked effectivePrice falls below.
+    const limit = action.price > 0 ? action.price : undefined;
+    const walked = walkBook(sellSize, "SELL", tokenBook, CONFIG.MIN_ORDER_SIZE, !!tickBooks, limit);
     if (!walked) {
       return {
         action, filled: false, fillPrice: 0, fillSize: 0,

@@ -232,28 +232,135 @@ async function generateEngine(analysis: string): Promise<{ code: string; classNa
   const className = `BredEngine_${version}`;
   const fileName = `BredEngine_${version}`;
 
-  const systemPrompt = `You are an expert TypeScript developer building trading engines for a Polymarket 5-minute binary market arena.
+  const systemPrompt = `You are an expert TypeScript developer building trading engines for a Polymarket 5-minute binary market arena. Your engines compete with other engines and the simulator faithfully models real PM constraints.
 
-You MUST output ONLY valid TypeScript code — no markdown, no explanation, no code fences. Just the raw .ts file content.
+OUTPUT FORMAT
+You MUST output ONLY valid TypeScript code — no markdown, no explanation, no code fences. Just the raw .ts file content. The file will be compiled with strict TypeScript and rejected if it doesn't compile.
 
-The engine must:
+CLASS REQUIREMENTS
 - Import AbstractEngine from "./BaseEngine"
-- Import types from "../types"
+- Import types from "../types": EngineAction, EngineState, MarketTick, SignalSnapshot
 - Export a class named ${className} that extends AbstractEngine
-- Set unique id, name, version properties
-- Implement onTick(tick, state, signals) returning EngineAction[]
-- Call this.feeAdjustedEdge() before ANY trade to check profitability after fees
-- Use this.getUpTokenId() for UP bets, this.getDownTokenId() for DOWN bets
-- Use this.buy(), this.sell(), this.merge() action builders
-- Optionally use { orderType: "maker" } for 0% fee maker orders
-- Clean up state in onRoundEnd()
+- Set unique id, name, version properties (id starts with "bred-")
+- Implement onTick(tick, state, signals?) returning EngineAction[]
+- Implement onRoundEnd(state) to reset per-round state
 
-Quartic fee: fee = amount × 0.25 × (P×(1-P))²
-At P=0.50: 1.56% (kills most edges). At P=0.90: 0.20% (sweet spot). At P=0.99: 0.003%.
-Maker orders: 0% fee but only 60% fill probability and 5bps adverse selection.
-UP and DOWN tokens have independent books (UP + DOWN ≠ $1) — merge arb exists in the gap.
-The arena tracks Sharpe ratio (profit/costs) and toxic flow (adverse selection hits).
-Engines that avoid toxic flow and maximize Sharpe survive evolution; high-frequency P&L chasers get pruned.`;
+═══════════════════════════════════════════════════════════════════
+THE FEE MODEL — QUARTIC (this is the great filter)
+═══════════════════════════════════════════════════════════════════
+fee = amount × 0.25 × (P × (1-P))²
+
+  P=0.01: 0.0025%   P=0.10: 0.20%   P=0.30: 1.10%
+  P=0.50: 1.56% ←MAX  P=0.70: 1.10%   P=0.90: 0.20%   P=0.99: 0.003%
+
+The fee CRUSHES edges at mid-prices. Engines that trade at P=0.40-0.60
+without massive raw edge will bleed. Profitable strategies live at the
+EXTREMES (P<0.20 or P>0.80) where fees are negligible.
+
+ALWAYS call this.feeAdjustedEdge(modelProb, marketPrice) before trading.
+If !edge.profitable, return [].
+
+═══════════════════════════════════════════════════════════════════
+DUAL ORDERBOOKS — CRITICAL CORRECTNESS RULE
+═══════════════════════════════════════════════════════════════════
+UP and DOWN tokens have INDEPENDENT orderbooks. UP_ask + DOWN_ask is
+NOT necessarily $1.00 — the gap is where merge arb lives.
+
+NEVER do this (it's WRONG and will cause your engine to bleed):
+  const downPrice = 1 - upPrice;        // ❌ WRONG
+  const downAsk = 1 - tick.bestBid;     // ❌ WRONG
+
+ALWAYS read both books directly:
+  import { getBookForToken } from "../pulse";
+  const upBook = getBookForToken(this.getUpTokenId());
+  const downBook = getBookForToken(this.getDownTokenId());
+  const upAsk = upBook.asks[0]?.price;
+  const downAsk = downBook.asks[0]?.price;
+
+The MarketTick passed to onTick has tokenSide ("UP" or "DOWN"). The
+tick.midPrice/bestAsk/bestBid are for THAT side only — not the opposite.
+Don't assume a tick is for UP unless you check tokenSide.
+
+═══════════════════════════════════════════════════════════════════
+MERGE — FLAVOR A ONLY (must hold both sides)
+═══════════════════════════════════════════════════════════════════
+The referee only supports MERGE when the engine ALREADY HOLDS both UP
+and DOWN of the SAME conditional pair. The merge burns both legs and
+credits $1 per pair (minus gas).
+
+To do a "buy opposite + merge" arb, you must:
+  1. Emit BUY for the opposite side as a normal action (one tick)
+  2. Wait for the fill (next tick: check this.getPosition(tokenId))
+  3. THEN emit MERGE on the next tick when both positions exist
+
+You CANNOT call merge() while holding only one side — it will reject.
+The cheaperExit() helper recommends MERGE only when holdsOpposite is
+true; trust its result.
+
+═══════════════════════════════════════════════════════════════════
+MAKER ORDERS — POST-ONLY ENFORCED, 12% FILL PROB
+═══════════════════════════════════════════════════════════════════
+Pass { orderType: "maker" } for 0% fee + 20% rebate of taker fees.
+
+CONSTRAINTS:
+- Maker BUY: action.price MUST be < bestAsk (otherwise crosses spread, rejected)
+- Maker SELL: action.price MUST be > bestBid
+- Fill probability is only 12% (real HFT queue priority is brutal)
+- Even when filled, expect 5bps adverse selection
+
+action.price IS A LIMIT. The fill MUST be at or better than action.price.
+If you submit BUY at $0.15 and the book has only asks at $0.20, your
+order is REJECTED — it does NOT fill at $0.20.
+
+═══════════════════════════════════════════════════════════════════
+BOOK VALIDITY GUARDS (your action may silently reject)
+═══════════════════════════════════════════════════════════════════
+The referee rejects fills against books where:
+- Best price < $0.01 or > $0.99 (extreme/stale data)
+- Spread (bestAsk - bestBid) > $0.50 (half-empty book)
+- Book timestamp > 30s old (stale)
+- One side empty (one-sided book)
+
+Don't try to trade on freshly-rotated markets where the new book
+hasn't received PM updates yet.
+
+═══════════════════════════════════════════════════════════════════
+POSITIONS, ROTATIONS, SETTLEMENT
+═══════════════════════════════════════════════════════════════════
+- 5M markets ROTATE every 2 minutes. Old positions don't disappear —
+  they sit until the candle resolves and settle to $1 or $0.
+- this.getUpTokenId() returns the CURRENT market's UP token. After a
+  rotation, it points to a NEW token. Don't store entry timestamps
+  keyed by upTokenId across rotations — they become stale and cause
+  bugs (a recent bred engine had "1775829203 second hold time" — that's
+  an epoch timestamp masquerading as a duration).
+- Detect rotation by tracking lastTokens = upTokenId+":"+downTokenId.
+- Reset per-candle counters in onRoundEnd AND on rotation.
+- Settlement is automatic — you don't call settle(). Holding to
+  settlement is a real strategy: maker buy underdog cheap, hold for
+  candle close, the SETTLE row will appear with $1/share if you won.
+
+═══════════════════════════════════════════════════════════════════
+WINNING STRATEGY PATTERNS (observed in the lab)
+═══════════════════════════════════════════════════════════════════
+1. **Hold to settlement**: maker BUY at extreme prices (P<0.15 or P>0.85),
+   hold the position for the entire candle, let SETTLE pay you out.
+   Zero fees, zero toxic flow. Highest Sharpe in the lab.
+2. **Confidence drift**: BUY mid-uncertainty (mid 0.42-0.58), exit
+   when one side gains conviction (price moves toward 0.70+ or 0.30-).
+   Bet that the candle resolves over time.
+3. **Discipline**: cap entry trades per round. Top losers all overtrade
+   (80-150 trades/round) — the cap engine that does 5 trades/round
+   bleeds way less in fees and toxic flow.
+4. **Fee-disciplined**: only trade when feeAdjustedEdge.netEdge > 1.5%.
+
+LOSING PATTERNS TO AVOID:
+- Chasing momentum into volatile ticks (toxic flow eats you)
+- Buying at mid-prices without massive edge (quartic fee dominates)
+- Re-entering same position dozens of times (compounding toxic flow)
+- Late-candle BUY at extreme prices without external confirmation
+- Cross-market merging (referee rejects)
+- Single-book inversion via 1-x (you read wrong prices)`;
 
   const userPrompt = `## Analysis of Current Arena
 ${analysis}

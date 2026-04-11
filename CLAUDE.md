@@ -44,11 +44,13 @@ fee = amount × 0.25 × (P × (1 − P))²
 - At P=0.90: 0.20% (edge trading sweet spot)
 - At P=0.99: 0.003% (near zero)
 - **MERGE: Flavor A only.** Engine must already hold BOTH sides of the same conditional pair before calling MERGE — referee burns both legs and credits $1/pair. Flavor B (buy opposite + merge atomically) was removed because it kept producing exploit paths. To emulate B, emit BUY for the opposite then MERGE on a subsequent tick.
-- Makers: 0% fee + 20% rebate of taker fees, **12% fill probability** (was 60% — unrealistic vs HFT queue priority), 5bps adverse selection
+- Makers: 0% fee + 20% rebate of taker fees, **12% fill probability** (was 60% — unrealistic vs HFT queue priority), 5bps adverse selection. **Post-Only enforced**: maker BUY rejects if `action.price >= bestAsk`; maker SELL rejects if `action.price <= bestBid`.
 - Tick size: $0.001, Latency: 50ms (realistic API lag, no artificial delay)
-- **Per-tick book snapshots:** referee clones the active books once per tick and depletes them as engines fill — engines share liquidity within a tick (no ghost liquidity)
-- **walkBook sanity:** rejects walks where best level price is < $0.005 or > $0.995 (catches stale/empty book data)
+- **Limit price enforcement**: `action.price` is the engine's max-acceptable BUY (or min-acceptable SELL). walkBook rejects fills that would breach the limit. No more "submit at $0.10, fill at $0.83" silent market-order behavior.
+- **Per-tick book snapshots:** referee eagerly clones UP+DOWN books at snapshot creation (not lazy). Engines processed in the same tick share depletion (no ghost liquidity) and see the same moment-in-time state.
+- **walkBook validity guards**: rejects walks where best price < $0.01 or > $0.99, where bid-ask spread > $0.50, where book is one-sided, or where book.timestamp > 30s old. Catches stale/empty/corrupted data.
 - **Settlement** writes a `SETTLE` row to the trades table with the true payout pnl, so `SUM(pnl)` is honest
+- **Phantom alpha detector**: arena.runRound flags any engine with > $500 single-round PnL (impossible from $50 starting cash) as a likely sim bug.
 
 ## Rules
 - Every engine must call `feeAdjustedEdge()` before trading
