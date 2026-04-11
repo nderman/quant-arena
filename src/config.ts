@@ -93,4 +93,11 @@ export const CONFIG = {
   // ── Sanity / phantom alpha ────────────────────────────────────────────────
   PHANTOM_PNL_MULTIPLIER: num("PHANTOM_PNL_MULTIPLIER", 10),  // round PnL > STARTING_CASH × this is flagged as likely sim bug
   DUAL_BOOK_MIN_SUM:      num("DUAL_BOOK_MIN_SUM", 0.85),    // UP_ask + DOWN_ask must be ≥ this; lower means stale/corrupt book data
+
+  // ── Snipe-stale-makers cancellation model ─────────────────────────────────
+  SNIPE_MOMENTUM_WINDOW_MS: num("SNIPE_MOMENTUM_WINDOW_MS", 5_000),  // window for cumulative Binance momentum
+  SNIPE_MIN_MOMENTUM:       num("SNIPE_MIN_MOMENTUM", 0.0005),       // 5 bps cumulative move triggers cancellation risk
+  SNIPE_BOOK_STALE_MS:      num("SNIPE_BOOK_STALE_MS", 100),         // book older than this since the move = stale snipe target
+  SNIPE_CANCEL_PROB_PER_BPS: num("SNIPE_CANCEL_PROB_PER_BPS", 0.10), // each bps of momentum adds 10% cancellation probability
+  SNIPE_CANCEL_PROB_MAX:    num("SNIPE_CANCEL_PROB_MAX", 0.95),      // hard cap on rejection probability
 };

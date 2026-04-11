@@ -27,12 +27,31 @@ import type {
 
 const binanceState = new Map<string, { lastMid: number; delta: number }>();
 
+// Sliding window of recent Binance moves (per symbol). Used by the
+// stale-book / snipe-stale-makers guard: when Binance has moved
+// significantly recently AND the local PM book hasn't been refreshed,
+// the book is a stale snipe target and taker orders should be rejected
+// (modeling real-world market maker cancellation latency, ~30-50ms).
+const binanceMoveHistory: Map<string, { ts: number; delta: number }[]> = new Map();
+const BINANCE_HISTORY_WINDOW_MS = 30_000; // keep ~30s of history
+
 pulseEvents.on("binance_tick", (tick: MarketTick) => {
   const sym = tick.symbol.toUpperCase();
   const prev = binanceState.get(sym);
   const lastMid = prev?.lastMid ?? 0;
   const delta = lastMid > 0 ? (tick.midPrice - lastMid) / lastMid : 0;
   binanceState.set(sym, { lastMid: tick.midPrice, delta });
+
+  // Append to sliding history; trim anything older than the window
+  const now = Date.now();
+  let history = binanceMoveHistory.get(sym);
+  if (!history) {
+    history = [];
+    binanceMoveHistory.set(sym, history);
+  }
+  history.push({ ts: now, delta });
+  const cutoff = now - BINANCE_HISTORY_WINDOW_MS;
+  while (history.length > 0 && history[0].ts < cutoff) history.shift();
 });
 
 function getBinanceDelta(): number {
@@ -42,6 +61,64 @@ function getBinanceDelta(): number {
   if (state) return state.delta;
   for (const [, s] of binanceState) return s.delta;
   return 0;
+}
+
+/**
+ * Cumulative Binance momentum over the last `windowMs` milliseconds.
+ * Returns the sum of per-tick deltas (negative for downward, positive for up).
+ */
+function getRecentBinanceMomentum(windowMs: number, now: number = Date.now()): number {
+  const primary = CONFIG.BINANCE_SYMBOL.toUpperCase();
+  const history = binanceMoveHistory.get(primary);
+  if (!history || history.length === 0) return 0;
+  const cutoff = now - windowMs;
+  let sum = 0;
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].ts < cutoff) break;
+    sum += history[i].delta;
+  }
+  return sum;
+}
+
+/**
+ * Returns true if the order should be rejected because we're sniping a
+ * stale book during a Binance move (modeling real-world MM cancellation
+ * latency, ~30-50ms). Exported for testing.
+ *
+ * Model:
+ *   1. Sum Binance momentum over the last SNIPE_MOMENTUM_WINDOW_MS.
+ *   2. If |momentum| < SNIPE_MIN_MOMENTUM, no snipe risk — calm market.
+ *   3. If the book.timestamp < SNIPE_BOOK_STALE_MS old, MMs already
+ *      re-quoted, not a stale target.
+ *   4. Otherwise, reject with probability scaling linearly with momentum
+ *      in basis points: 5 bps → ~50%, 10 bps → ~95% (capped).
+ */
+export function shouldRejectStaleSnipe(book: OrderBook, isMaker: boolean): boolean {
+  // Makers aren't snipers — they post liquidity, not consume it.
+  if (isMaker) return false;
+  if (!book.timestamp) return false;
+
+  const now = Date.now();
+  const recentMomentum = Math.abs(getRecentBinanceMomentum(CONFIG.SNIPE_MOMENTUM_WINDOW_MS, now));
+  if (recentMomentum < CONFIG.SNIPE_MIN_MOMENTUM) return false;
+
+  const bookAgeMs = now - book.timestamp;
+  if (bookAgeMs < CONFIG.SNIPE_BOOK_STALE_MS) return false;
+
+  // Linear in basis points: per-bps slope × momentum-in-bps, capped at MAX.
+  // At default 0.10/bps × 5bps = 0.50; × 10bps = 1.0 → capped to 0.95.
+  const momentumBps = recentMomentum * 10_000;
+  const cancelProb = Math.min(CONFIG.SNIPE_CANCEL_PROB_MAX, momentumBps * CONFIG.SNIPE_CANCEL_PROB_PER_BPS);
+  return Math.random() < cancelProb;
+}
+
+/** Build a "not filled" FillResult for the rejection paths. */
+function makeRejectedFill(action: EngineAction, latencyMs: number, orderType: "maker" | "taker" = "taker"): FillResult {
+  return {
+    action, filled: false, fillPrice: 0, fillSize: 0,
+    fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs,
+    toxicFlowHit: false, orderType,
+  };
 }
 
 // ── Maker Rebate Pool ───────────────────────────────────────────────────────
@@ -620,6 +697,14 @@ async function processActionNoLatency(
     const isMaker = action.orderType === "maker";
     const tokenBook = bookFromTick(action.tokenId, tickBooks);
 
+    // Stale-book / snipe-stale-makers guard. In real PM, market makers
+    // cancel/re-quote within ~30-50ms of significant Binance moves. Our sim
+    // approximates: if Binance has moved meaningfully recently AND the book
+    // hasn't been refreshed since, reject the taker fill (modeling MM cancel).
+    if (shouldRejectStaleSnipe(tokenBook, isMaker)) {
+      return makeRejectedFill(action, actualLatency);
+    }
+
     // Post-Only enforcement: maker BUY must NOT cross the spread. If the
     // engine's limit price is at or above bestAsk, the order would execute
     // immediately as a taker. Reject (matches real PM Post-Only behavior).
@@ -758,6 +843,12 @@ async function processActionNoLatency(
 
     // Each token has its own real book — no price inversion needed
     const tokenBook = bookFromTick(action.tokenId, tickBooks);
+
+    // Stale-book guard: same as BUY path. Sniping stale bid liquidity during
+    // Binance moves models real MM cancellation latency.
+    if (shouldRejectStaleSnipe(tokenBook, isMaker)) {
+      return makeRejectedFill(action, actualLatency);
+    }
 
     // Post-Only enforcement for maker SELL: limit price must be ABOVE bestBid
     // (otherwise the order would execute immediately as a taker).

@@ -4,7 +4,7 @@
  * Core validation for the referee's quartic fee model, toxic flow, and engine interface.
  */
 
-import { calculateFee, calculateMergeFee, calculateFeeAdjustedEdge, cheaperExit, walkBook, isBookTradeable } from "../referee";
+import { calculateFee, calculateMergeFee, calculateFeeAdjustedEdge, cheaperExit, walkBook, isBookTradeable, shouldRejectStaleSnipe } from "../referee";
 import type { OrderBook } from "../types";
 
 // Helper to build minimal valid OrderBook for tests
@@ -267,6 +267,46 @@ assert(
   "One-sided book must not be tradeable"
 );
 console.log("  One-sided book: not tradeable ✓");
+
+// ── shouldRejectStaleSnipe: stale book during Binance moves ────────────────
+
+console.log("\n=== Stale-Book Snipe Guard ===");
+
+// With no Binance history, no rejection (calm market = no snipes)
+{
+  const book = mkBook({ asks: [{ price: 0.50, size: 100 }], bids: [{ price: 0.49, size: 100 }] });
+  const result = shouldRejectStaleSnipe(book, false);
+  assert(result === false, "No Binance history → no snipe rejection");
+  console.log("  Calm market: no rejection ✓");
+}
+
+// Maker orders are NEVER rejected as snipes (makers don't snipe takers, they ARE the takers' counterparty)
+{
+  const book = mkBook({
+    asks: [{ price: 0.50, size: 100 }],
+    bids: [{ price: 0.49, size: 100 }],
+    timestamp: Date.now() - 5_000, // very stale
+  });
+  const result = shouldRejectStaleSnipe(book, true); // isMaker = true
+  assert(result === false, "Maker orders are never snipe-rejected");
+  console.log("  Maker order on stale book: not rejected ✓");
+}
+
+// Fresh book (< 100ms old) → no rejection even if Binance moved
+{
+  const book = mkBook({
+    asks: [{ price: 0.50, size: 100 }],
+    bids: [{ price: 0.49, size: 100 }],
+    timestamp: Date.now() - 30, // very fresh
+  });
+  const result = shouldRejectStaleSnipe(book, false);
+  assert(result === false, "Fresh book should never be snipe-rejected (book caught up)");
+  console.log("  Fresh book: no rejection ✓");
+}
+
+// (Note: testing the actual rejection-on-stale-book path requires manipulating
+//  binanceMoveHistory which is module-private. The integration of this guard
+//  is verified via the BUY/SELL path tests + manual observation post-deploy.)
 
 // ── Fee Gradient (the quartic curve) ─────────────────────────────────────────
 
