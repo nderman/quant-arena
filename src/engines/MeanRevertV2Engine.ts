@@ -12,12 +12,32 @@ export class MeanRevertV2Engine extends AbstractEngine {
   private readonly maxPositionPct = 0.10;
   private readonly minEdgeAfterFee = 0.005;
 
+  // In-flight BUY tracking. Prevents the round-start race where the referee's
+  // 50ms fill latency causes onTick to fire ~10 times before the first fill
+  // updates state.positions, leading to cash-exhausting pyramiding. Cleared
+  // when we observe the position landed, or on round boundaries.
+  private pendingTokens = new Set<string>();
+  private lastMarketKey = "";
+
   onTick(tick: MarketTick, state: EngineState, _signals?: SignalSnapshot): EngineAction[] {
     if (tick.source !== "polymarket") return [];
 
     const upTokenId = this.getUpTokenId();
     const downTokenId = this.getDownTokenId();
     if (!upTokenId || !downTokenId) return [];
+
+    // Reset pending set on market rotation (new 5m candle = new tokens).
+    const marketKey = `${upTokenId}:${downTokenId}`;
+    if (marketKey !== this.lastMarketKey) {
+      this.pendingTokens.clear();
+      this.lastMarketKey = marketKey;
+    }
+
+    // Clear pending for any token where the fill has now landed.
+    for (const pendingId of [...this.pendingTokens]) {
+      const pos = this.getPosition(pendingId);
+      if (pos && pos.shares > 0) this.pendingTokens.delete(pendingId);
+    }
 
     // Read BOTH books directly. Never derive one side's price from the other
     // via 1-x — UP and DOWN have independent dual orderbooks.
@@ -35,6 +55,11 @@ export class MeanRevertV2Engine extends AbstractEngine {
     const upMid = (upBestBid + upBestAsk) / 2;
     const deviation = upMid - 0.50;
     const absDeviation = Math.abs(deviation);
+
+    // If a BUY is in flight (submitted but referee hasn't filled yet), wait
+    // for it to resolve before doing anything else. Prevents the pyramiding
+    // race on round start where onTick fires ~10× before positions update.
+    if (this.pendingTokens.size > 0) return [];
 
     // ── Exit logic: check both positions ──
     const upPos = this.getPosition(upTokenId);
@@ -95,6 +120,10 @@ export class MeanRevertV2Engine extends AbstractEngine {
     if (shares < 5) return [];
 
     const side = buyDown ? "DOWN" : "UP";
+
+    // Mark token as having an in-flight BUY. Cleared next tick once the
+    // position appears in state.positions (fill completed), or on rotation.
+    this.pendingTokens.add(tokenId);
 
     return [this.buy(tokenId, askPrice, shares, {
       note: `mean revert ${side}: dev=${deviation.toFixed(3)}, ask=${askPrice.toFixed(3)}, edge=${edge.netEdge.toFixed(4)}`,
