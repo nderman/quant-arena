@@ -112,48 +112,6 @@ function listEngines(): string[] {
     .map(f => f.replace(".ts", ""));
 }
 
-/**
- * Rich engine list for the coder prompt: each entry has the class name, id,
- * human-readable name, and (when present) the first block comment above the
- * class. This lets the coder SEE what strategies already exist rather than
- * trying to infer from filenames alone — the key fix for the mode-collapse
- * problem where the breeder produced three merge-arb engines despite
- * merge-arb-sniper-v1 and bred-gkci already existing in the population.
- */
-function listEnginesWithSummary(): string {
-  const files = fs.readdirSync(ENGINES_DIR)
-    .filter(f => f.endsWith(".ts") && !f.startsWith("Base"))
-    .sort();
-
-  const lines: string[] = [];
-  for (const f of files) {
-    try {
-      const src = fs.readFileSync(path.join(ENGINES_DIR, f), "utf-8");
-      const classMatch = src.match(/export class (\w+)/);
-      const idMatch = src.match(/id\s*=\s*"([^"]+)"/);
-      const nameMatch = src.match(/name\s*=\s*"([^"]+)"/);
-      // Grab the first block comment (/** ... */) in the file — usually the
-      // strategy docstring above the class. Strip JSDoc stars + whitespace.
-      const docMatch = src.match(/\/\*\*\s*([\s\S]*?)\s*\*\//);
-      const doc = docMatch
-        ? docMatch[1]
-            .split("\n")
-            .map(l => l.replace(/^\s*\*\s?/, "").trim())
-            .filter(l => l.length > 0)
-            .slice(0, 3)  // first 3 lines is enough to convey the idea
-            .join(" ")
-        : "";
-      const className = classMatch?.[1] ?? f.replace(".ts", "");
-      const id = idMatch?.[1] ?? "?";
-      const name = nameMatch?.[1] ?? "?";
-      lines.push(`- ${className} (id: ${id}, "${name}"): ${doc || "[no docstring]"}`);
-    } catch {
-      lines.push(`- ${f.replace(".ts", "")} [failed to read]`);
-    }
-  }
-  return lines.join("\n");
-}
-
 function readBaseEngine(): string {
   return fs.readFileSync(path.join(ENGINES_DIR, "BaseEngine.ts"), "utf-8");
 }
@@ -215,7 +173,6 @@ function formatRoundHistory(history: RoundHistoryEntry[]): string {
 async function analyzeArena(): Promise<string> {
   const intel = readRoundIntel();
   const trades = readRecentTrades();
-  const engines = listEngines();
   const history = formatRoundHistory(loadRoundHistory());
 
   const prompt = `You are a quantitative trading analyst reviewing a Polymarket 5-minute crypto prediction market arena.
@@ -228,9 +185,6 @@ ${history}
 
 ## Recent Trades (last 100)
 ${trades}
-
-## Active Engines
-${engines.join(", ")}
 
 ## Market Rules
 - Polymarket 5M binary markets: BTC/ETH/XRP go UP or DOWN in a 5-minute window
@@ -276,7 +230,6 @@ async function generateEngine(analysis: string): Promise<{ code: string; classNa
   const baseEngine = readBaseEngine();
   const exampleEngine = readExampleEngine();
   const types = readTypes();
-  const engines = listEngines();
 
   // Generate a unique engine name
   const version = Date.now().toString(36).slice(-4);
@@ -394,18 +347,20 @@ POSITIONS, ROTATIONS, SETTLEMENT
 ═══════════════════════════════════════════════════════════════════
 STRATEGY — YOU DECIDE
 ═══════════════════════════════════════════════════════════════════
-The user message contains a DATA REPORT (not recommendations) from
-the analyst plus a list of every existing engine with its strategy
-docstring. Your job is to design a strategy the existing population
-does not already cover.
+The user message contains a DATA REPORT from the analyst describing
+what the trade data shows: entry-price clusters, time-of-candle
+patterns, maker/taker mix, toxic-flow regimes, fee-zone behavior,
+PnL distribution. Your job is to design a strategy the data
+DESCRIBES — what mechanism is the data telling you exists in the
+market right now.
 
-Rules for avoiding mode collapse:
-- READ the existing engines list carefully. If an engine with a
-  strategy like yours already exists, pick a different strategy.
-  The population already contains: mean-revert, momentum-follow,
-  maker-extreme-price-hold, merge-arb (multiple variants), fade,
-  chainlink-sniper, rotation-fade, vol-regime, and late-candle.
-  Any of those corners is ALREADY saturated.
+Do NOT think in terms of "what's missing from the engine roster"
+or "what corners are unexplored". You are not given a roster.
+Convergence with strategies that other engines also implement is
+fine — if the data warrants it, build it. The right answer is
+whatever the data describes most strongly, not whatever is novel.
+
+Rules:
 - Do NOT treat the analyst's phrasing as a recommendation. If the
   analyst says "engine X has losses concentrated at price Y", that
   is a data observation — decide yourself whether that implies
@@ -421,9 +376,6 @@ rotation handling. Within those, invent freely.`;
   const userPrompt = `## Data Report From Analyst (facts, not recommendations)
 ${analysis}
 
-## Existing Engines — DO NOT duplicate any of these strategies
-${listEnginesWithSummary()}
-
 ## Base Class
 ${baseEngine}
 
@@ -433,7 +385,7 @@ ${types}
 ## Example Engine (for reference)
 ${exampleEngine}
 
-Write a NEW engine class named ${className}. Read the existing engines list above CAREFULLY. If your first strategy idea is covered by any existing engine (even a bred one), pick a different idea. The goal is to EXPAND the population's strategy coverage — not to build a variant of something already present. Ground your design in the data report above, but treat it as facts to interpret, not a recommendation to follow.`;
+Write a NEW engine class named ${className}. Build the strategy the DATA REPORT most strongly supports — entry-price clusters where wins concentrate, time-of-candle patterns that recur, toxic-flow regimes, fee-zone gaps, recurring book imbalances. Don't think about "what's missing from the population" — think about "what mechanism does this data describe." Convergence with what other engines do is fine if the data warrants it. Ground your design in the data report above as facts to interpret, not as a recommendation to follow.`;
 
   console.log(`[breeder] Generating engine with ${CODER_MODEL}...`);
   const code = await callCoder(systemPrompt, userPrompt);
