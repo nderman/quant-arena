@@ -5,6 +5,7 @@
  */
 
 import { calculateFee, calculateMergeFee, calculateFeeAdjustedEdge, cheaperExit, walkBook, isBookTradeable, shouldRejectStaleSnipe } from "../referee";
+import { parsePmL2, isBookUpdateReasonable } from "../pulse";
 import type { OrderBook } from "../types";
 
 // Helper to build minimal valid OrderBook for tests
@@ -307,6 +308,124 @@ console.log("\n=== Stale-Book Snipe Guard ===");
 // (Note: testing the actual rejection-on-stale-book path requires manipulating
 //  binanceMoveHistory which is module-private. The integration of this guard
 //  is verified via the BUY/SELL path tests + manual observation post-deploy.)
+
+// ── parsePmL2: validate + filter PM book quotes ─────────────────────────────
+
+console.log("\n=== parsePmL2 Validation ===");
+
+// Valid book → parsed correctly
+{
+  const result = parsePmL2({
+    bids: [{ price: "0.49", size: "100" }, { price: "0.48", size: "50" }],
+    asks: [{ price: "0.50", size: "100" }, { price: "0.51", size: "50" }],
+  });
+  assert(result !== null && result.bids.length === 2 && result.asks.length === 2, "Valid book parses");
+  console.log("  Valid book: parsed ✓");
+}
+
+// Crossed book (bid >= ask) → null
+{
+  const result = parsePmL2({
+    bids: [{ price: "0.60", size: "100" }],
+    asks: [{ price: "0.50", size: "100" }],
+  });
+  assert(result === null, "Crossed book must reject");
+  console.log("  Crossed book: rejected ✓");
+}
+
+// Levels with zero size → filtered out
+{
+  const result = parsePmL2({
+    bids: [{ price: "0.49", size: "0" }, { price: "0.48", size: "100" }],
+    asks: [{ price: "0.50", size: "100" }],
+  });
+  assert(result !== null && result.bids.length === 1 && result.bids[0].price === 0.48, "Zero-size level filtered");
+  console.log("  Zero-size level: filtered ✓");
+}
+
+// Levels outside (0.001, 0.999) → filtered
+{
+  const result = parsePmL2({
+    bids: [{ price: "0.0001", size: "100" }, { price: "0.49", size: "100" }],
+    asks: [{ price: "0.50", size: "100" }, { price: "0.9999", size: "100" }],
+  });
+  assert(result !== null && result.bids.length === 1 && result.asks.length === 1, "Out-of-range levels filtered");
+  console.log("  Out-of-range levels: filtered ✓");
+}
+
+// Empty book after filtering → null
+{
+  const result = parsePmL2({
+    bids: [{ price: "0.49", size: "100" }],
+    asks: [], // no asks at all
+  });
+  assert(result === null, "Empty side → null");
+  console.log("  Empty side: rejected ✓");
+}
+
+// ── isBookUpdateReasonable: transient quote filter ─────────────────────────
+
+console.log("\n=== isBookUpdateReasonable ===");
+
+const now = Date.now();
+const baseBook = {
+  bids: [{ price: 0.49, size: 100 }],
+  asks: [{ price: 0.50, size: 100 }],
+  timestamp: now,
+};
+
+// Same prices → reasonable
+assert(
+  isBookUpdateReasonable(
+    { bids: [{ price: 0.49, size: 100 }], asks: [{ price: 0.50, size: 100 }], timestamp: now },
+    baseBook,
+  ),
+  "Identical book is reasonable"
+);
+console.log("  Identical book: reasonable ✓");
+
+// Small move (5%) → reasonable
+assert(
+  isBookUpdateReasonable(
+    { bids: [{ price: 0.515, size: 100 }], asks: [{ price: 0.525, size: 100 }], timestamp: now },
+    baseBook,
+  ),
+  "5% move is reasonable"
+);
+console.log("  5% move: reasonable ✓");
+
+// Huge jump (>25%) → unreasonable
+assert(
+  !isBookUpdateReasonable(
+    { bids: [{ price: 0.86, size: 100 }], asks: [{ price: 0.87, size: 100 }], timestamp: now },
+    baseBook,
+  ),
+  "70% jump must be flagged unreasonable (transient quote)"
+);
+console.log("  70% jump: rejected ✓");
+
+// First update (no prev book) → always reasonable
+{
+  const emptyPrev = { bids: [], asks: [], timestamp: 0 };
+  assert(
+    isBookUpdateReasonable(
+      { bids: [{ price: 0.86, size: 100 }], asks: [{ price: 0.87, size: 100 }], timestamp: now },
+      emptyPrev,
+    ),
+    "First update is always reasonable"
+  );
+  console.log("  First update (no prev): reasonable ✓");
+}
+
+// Stale prev book (>10s) → always reasonable
+assert(
+  isBookUpdateReasonable(
+    { bids: [{ price: 0.86, size: 100 }], asks: [{ price: 0.87, size: 100 }], timestamp: now },
+    { ...baseBook, timestamp: now - 15_000 },
+  ),
+  "Stale prev book → new update accepted"
+);
+console.log("  Stale prev (>10s): reasonable ✓");
 
 // ── Fee Gradient (the quartic curve) ─────────────────────────────────────────
 

@@ -258,10 +258,11 @@ export function calculateFeeAdjustedEdge(
 /**
  * Returns true if a book has the structural shape of real PM data:
  *  - Both bids AND asks present (not one-sided)
- *  - Best price in (0.01, 0.99) — outside this range is almost certainly
- *    stale/corrupt, not real PM market state
- *  - Spread < $0.50 (wider means book is half-empty)
- *  - Timestamp < 30s old (no stale snapshots)
+ *  - NOT crossed (best bid < best ask)
+ *  - Best prices in (PM_PRICE_MIN, PM_PRICE_MAX) — outside this range is
+ *    almost certainly stale/corrupt, not real PM market state
+ *  - Spread < PM_BOOK_MAX_SPREAD (wider means book is half-empty)
+ *  - Timestamp < PM_BOOK_STALE_MS old (no stale snapshots)
  *
  * Exported so engines can pre-check book quality before submitting orders
  * (avoids silent walkBook rejections).
@@ -270,10 +271,14 @@ export function isBookTradeable(book: OrderBook): boolean {
   if (!book.bids.length || !book.asks.length) return false;
   const bestBid = book.bids[0].price;
   const bestAsk = book.asks[0].price;
-  if (bestAsk < 0.01 || bestAsk > 0.99) return false;
-  if (bestBid < 0.01 || bestBid > 0.99) return false;
-  if (bestAsk - bestBid > 0.50) return false;
-  if (book.timestamp && Date.now() - book.timestamp > 30_000) return false;
+  // Crossed book detection — bestBid must be strictly less than bestAsk.
+  // The spread check below would NOT catch this (a negative spread is not
+  // > PM_BOOK_MAX_SPREAD), so we need an explicit check.
+  if (bestBid >= bestAsk) return false;
+  if (bestAsk <= CONFIG.PM_PRICE_MIN || bestAsk >= CONFIG.PM_PRICE_MAX) return false;
+  if (bestBid <= CONFIG.PM_PRICE_MIN || bestBid >= CONFIG.PM_PRICE_MAX) return false;
+  if (bestAsk - bestBid > CONFIG.PM_BOOK_MAX_SPREAD) return false;
+  if (book.timestamp && Date.now() - book.timestamp > CONFIG.PM_BOOK_STALE_MS) return false;
   return true;
 }
 

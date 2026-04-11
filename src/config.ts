@@ -100,4 +100,12 @@ export const CONFIG = {
   SNIPE_BOOK_STALE_MS:      num("SNIPE_BOOK_STALE_MS", 100),         // book older than this since the move = stale snipe target
   SNIPE_CANCEL_PROB_PER_BPS: num("SNIPE_CANCEL_PROB_PER_BPS", 0.10), // each bps of momentum adds 10% cancellation probability
   SNIPE_CANCEL_PROB_MAX:    num("SNIPE_CANCEL_PROB_MAX", 0.95),      // hard cap on rejection probability
+
+  // ── PM book validation ────────────────────────────────────────────────────
+  PM_PRICE_MIN:              num("PM_PRICE_MIN", 0.005),              // floor for any tradeable PM price
+  PM_PRICE_MAX:              num("PM_PRICE_MAX", 0.995),              // ceiling for any tradeable PM price
+  PM_BOOK_MAX_SPREAD:        num("PM_BOOK_MAX_SPREAD", 0.50),         // wider than this = half-empty/stale book
+  PM_BOOK_STALE_MS:          num("PM_BOOK_STALE_MS", 30_000),         // books older than this are not tradeable
+  PM_BOOK_MAX_JUMP_FRACTION: num("PM_BOOK_MAX_JUMP_FRACTION", 0.25),  // single-update price jump > this = transient quote, reject
+  PM_BOOK_PREV_STALE_MS:     num("PM_BOOK_PREV_STALE_MS", 10_000),    // prev book older than this = no comparison baseline, accept
 };

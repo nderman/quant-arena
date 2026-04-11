@@ -129,7 +129,7 @@ flowchart TD
 ```bash
 npm install
 npm run build       # tsc compile
-npm run test:unit   # 39 tests — must all pass before deploy
+npm run test:unit   # 49 tests — must all pass before deploy
 ```
 
 ### Run a single arena locally

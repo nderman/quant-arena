@@ -9,7 +9,7 @@ Evolutionary arena for Polymarket 5M crypto binary markets. AI-bred engines comp
 - `npm run arena:dry` — simulated data, no APIs
 - `npm run arena:live` — live PM + Binance data (auto-discovers markets)
 - `npm run arena:1round:dry` — quick test (1 min round)
-- `npm run test:unit` — 39 tests, must all pass
+- `npm run test:unit` — 49 tests, must all pass
 - `npm run build` — TypeScript compile
 - `npm run discover` — list active crypto markets
 - `npm run signals` — test all signal sources
@@ -48,7 +48,8 @@ fee = amount × 0.25 × (P × (1 − P))²
 - Tick size: $0.001, Latency: 50ms (realistic API lag, no artificial delay)
 - **Limit price enforcement**: `action.price` is the engine's max-acceptable BUY (or min-acceptable SELL). walkBook rejects fills that would breach the limit. No more "submit at $0.10, fill at $0.83" silent market-order behavior.
 - **Per-tick book snapshots:** referee eagerly clones UP+DOWN books at snapshot creation (not lazy). Engines processed in the same tick share depletion (no ghost liquidity) and see the same moment-in-time state.
-- **walkBook validity guards** (via `isBookTradeable()`): rejects walks where best price < $0.01 or > $0.99, where bid-ask spread > $0.50, where book is one-sided, or where book.timestamp > 30s old. Engines can call `isBookTradeable(book)` directly to pre-check.
+- **walkBook validity guards** (via `isBookTradeable()`): rejects walks where best bid >= best ask (crossed book), best prices outside [`PM_PRICE_MIN`, `PM_PRICE_MAX`] inclusive (default 0.005-0.995), bid-ask spread > `PM_BOOK_MAX_SPREAD` (default $0.50), one-sided book, or stale book (> `PM_BOOK_STALE_MS`, default 30s). Engines can call `isBookTradeable(book)` directly to pre-check.
+- **Ingestion-time PM book filtering** (`parsePmL2` + `isBookUpdateReasonable` in pulse.ts): drops invalid levels, rejects crossed books at parse time, filters transient quotes where best price jumps > `PM_BOOK_MAX_JUMP_FRACTION` (default 25%) in a single update. Catches PM's occasional bad/transient WS messages before they pollute our books.
 - **Dual-book consistency check**: BUY/SELL actions reject when `thisToken_ask + oppositeToken_ask < CONFIG.DUAL_BOOK_MIN_SUM` (default $0.85). Real PM keeps the sum near $1.00; impossibly cheap sums indicate stale/corrupt book data on one side.
 - **Snipe-stale-makers cancellation model**: taker BUY/SELL rejects with probability scaling on Binance momentum when the local PM book is stale relative to a recent move. Models real-world MM cancellation latency (~30-50ms). At default 5bps cumulative momentum over 5s + 100ms book staleness, rejection prob is ~50%; 10bps → ~95%. Configurable via `SNIPE_*` env vars.
 - **Settlement** writes a `SETTLE` row to the trades table with the true payout pnl, so `SUM(pnl)` is honest
