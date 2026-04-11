@@ -139,10 +139,6 @@ function loadRoundHistory(): RoundHistoryEntry[] {
   return loadHistory(COIN);
 }
 
-function buildCumulativePnl(history: RoundHistoryEntry[]): Map<string, number> {
-  return buildPnl(history);
-}
-
 function formatRoundHistory(history: RoundHistoryEntry[]): string {
   if (history.length === 0) return "No round history yet.";
 
