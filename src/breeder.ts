@@ -198,22 +198,19 @@ ${engines.join(", ")}
 - Settlement: $1 per share if correct, $0 if wrong
 - Merge: buy opposite side at real book price + dynamic gas (on-chain, 3s finality)
 
-## Key Performance Metrics
-- **sharpeRatio** (in allResults): profit-to-costs ratio. Higher = better risk-adjusted returns.
-- **Toxic Flow %** (in toxic flow summary): how often Binance moved against the engine during execution. High toxic % = engine is getting picked off by HFTs.
-- Winning engines have HIGH Sharpe (>2) AND LOW toxic flow (<20%). An engine with high P&L but 50% toxic hits is lucky, not skilled.
-- Prioritize strategies that AVOID toxic flow (trade during quiet periods, use maker orders) over strategies that trade frequently.
+## Metrics In The Data
+- **sharpeRatio** (allResults): profit-to-costs ratio — risk-adjusted return proxy.
+- **toxic_flow %** (toxic summary): share of fills where Binance moved against the engine during execution. Signal of adverse selection, not a goal in itself.
+- **total_pnl** across multi-round history: the ground truth. A strategy that made $500 across 10 rounds beats one that made $50 with zero variance.
 
 ## Your Task
-Analyze what's working and what's failing. Identify:
-1. Which strategies are profitable and WHY (edge vs fees vs timing vs toxic avoidance)
-2. Which strategies are losing and what specific flaw causes the losses
-3. What UNTRIED approach could beat the current leader (consider: maker-only, toxic flow avoidance, Sharpe optimization)
-4. Whether maker orders, DOWN token bets, merge arb, or specific entry timing could help
+Report what the data actually shows — do not prescribe a winning pattern. Specifically:
+1. Which engines are profitable, and what does their trade history show about HOW they make money (entry prices, time-to-close, maker/taker mix, token side, trade frequency)?
+2. Which engines are losing, and what specific behavior in their trade rows correlates with the losses?
+3. What is underrepresented or untried in the current population? Don't assume the answer is "more maker-only extreme-price holders" — that may already be saturated. Look at what NO engine is doing.
+4. Where does variance hide real edge? An engine that wins $500 one round and loses $50 three rounds has a +$350 expectation — don't dismiss it as inconsistent.
 
-IMPORTANT: Use multi-round history to distinguish HIGH-VARIANCE winners from consistent losers. An engine that wins big some rounds and loses big others has a REAL edge — it just needs risk management. Don't dismiss engines with negative latest-round P&L if their multi-round history shows big wins. Consistency matters but so does total P&L across rounds.
-
-Be specific and quantitative. Reference actual trade data. Output your analysis in 300 words or less.`;
+Be descriptive, not prescriptive. Quote actual numbers from the trade data. Output 300 words or less.`;
 
   console.log(`[breeder] Analyzing arena with ${ANALYST_MODEL}...`);
   return callAnalyst(prompt);
@@ -341,26 +338,35 @@ POSITIONS, ROTATIONS, SETTLEMENT
   candle close, the SETTLE row will appear with $1/share if you won.
 
 ═══════════════════════════════════════════════════════════════════
-WINNING STRATEGY PATTERNS (observed in the lab)
+STRATEGY — YOU DECIDE, LET THE DATA GUIDE
 ═══════════════════════════════════════════════════════════════════
-1. **Hold to settlement**: maker BUY at extreme prices (P<0.15 or P>0.85),
-   hold the position for the entire candle, let SETTLE pay you out.
-   Zero fees, zero toxic flow. Highest Sharpe in the lab.
-2. **Confidence drift**: BUY mid-uncertainty (mid 0.42-0.58), exit
-   when one side gains conviction (price moves toward 0.70+ or 0.30-).
-   Bet that the candle resolves over time.
-3. **Discipline**: cap entry trades per round. Top losers all overtrade
-   (80-150 trades/round) — the cap engine that does 5 trades/round
-   bleeds way less in fees and toxic flow.
-4. **Fee-disciplined**: only trade when feeAdjustedEdge.netEdge > 1.5%.
+The analysis in the user message contains actual trade data and
+multi-round PnL across all active engines. Let that evidence shape
+your approach.
 
-LOSING PATTERNS TO AVOID:
-- Chasing momentum into volatile ticks (toxic flow eats you)
-- Buying at mid-prices without massive edge (quartic fee dominates)
-- Re-entering same position dozens of times (compounding toxic flow)
-- Late-candle BUY at extreme prices without external confirmation
-- Cross-market merging (referee rejects)
-- Single-book inversion via 1-x (you read wrong prices)`;
+Do NOT assume any single pattern is the one true answer. Do NOT
+default to "maker-only, extreme prices, hold to settlement" — the
+population has already over-explored that corner, and the market
+may not currently be quoting at those prices. If every existing
+engine does X, consider Y.
+
+Viable directions include (non-exhaustive): mean reversion,
+momentum, taker on wide spreads, maker at intermediate prices,
+merge arb via sequential fills, mid-price conviction, volatility
+timing, cross-asset signals from Binance/Chainlink, late-candle
+resolution bets, DOWN-side contrarian, UP-side momentum. The
+"right" answer is whichever the data says no engine is capturing.
+
+Variance is allowed and often where edge hides. An engine that
+wins big on some rounds and loses small on others can have higher
+expectancy than a flat-line. Size position to survive drawdowns,
+but do not optimize for zero variance — flat engines earn nothing.
+
+Your only hard constraints are the correctness rules above — fee
+model, dual books, merge Flavor A, post-only, validity guards,
+rotation handling. Within those, invent freely and base sizing
+and entry logic on what you observe in the data, not on any
+blessed pattern list.`;
 
   const userPrompt = `## Analysis of Current Arena
 ${analysis}
@@ -377,7 +383,7 @@ ${types}
 ## Example Engine (for reference)
 ${exampleEngine}
 
-Write a NEW engine class named ${className} that implements a strategy designed to beat the current leader based on the analysis above. Be creative but realistic — the referee simulates toxic flow, book walking, and parabolic fees. The engine that wins is the one that manages fees and timing, not the one that trades the most.`;
+Write a NEW engine class named ${className}. Base your strategy on what the analysis above actually shows — not on any prescribed pattern. If the data points to an underexplored corner, exploit it. If it points to a known corner still working, refine it. Be creative but grounded in the numbers. The referee faithfully simulates toxic flow, book walking, quartic fees, latency, and settlement — your engine must survive all of them.`;
 
   console.log(`[breeder] Generating engine with ${CODER_MODEL}...`);
   const code = await callCoder(systemPrompt, userPrompt);
