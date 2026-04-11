@@ -9,7 +9,7 @@ Evolutionary arena for Polymarket 5M crypto binary markets. AI-bred engines comp
 - `npm run arena:dry` — simulated data, no APIs
 - `npm run arena:live` — live PM + Binance data (auto-discovers markets)
 - `npm run arena:1round:dry` — quick test (1 min round)
-- `npm run test:unit` — 21 tests, must all pass
+- `npm run test:unit` — 36 tests, must all pass
 - `npm run build` — TypeScript compile
 - `npm run discover` — list active crypto markets
 - `npm run signals` — test all signal sources
@@ -48,7 +48,8 @@ fee = amount × 0.25 × (P × (1 − P))²
 - Tick size: $0.001, Latency: 50ms (realistic API lag, no artificial delay)
 - **Limit price enforcement**: `action.price` is the engine's max-acceptable BUY (or min-acceptable SELL). walkBook rejects fills that would breach the limit. No more "submit at $0.10, fill at $0.83" silent market-order behavior.
 - **Per-tick book snapshots:** referee eagerly clones UP+DOWN books at snapshot creation (not lazy). Engines processed in the same tick share depletion (no ghost liquidity) and see the same moment-in-time state.
-- **walkBook validity guards**: rejects walks where best price < $0.01 or > $0.99, where bid-ask spread > $0.50, where book is one-sided, or where book.timestamp > 30s old. Catches stale/empty/corrupted data.
+- **walkBook validity guards** (via `isBookTradeable()`): rejects walks where best price < $0.01 or > $0.99, where bid-ask spread > $0.50, where book is one-sided, or where book.timestamp > 30s old. Engines can call `isBookTradeable(book)` directly to pre-check.
+- **Dual-book consistency check**: BUY/SELL actions reject when `thisToken_ask + oppositeToken_ask < CONFIG.DUAL_BOOK_MIN_SUM` (default $0.85). Real PM keeps the sum near $1.00; impossibly cheap sums indicate stale/corrupt book data on one side.
 - **Settlement** writes a `SETTLE` row to the trades table with the true payout pnl, so `SUM(pnl)` is honest
 - **Phantom alpha detector**: arena.runRound flags any engine with > $500 single-round PnL (impossible from $50 starting cash) as a likely sim bug.
 

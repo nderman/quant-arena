@@ -4,7 +4,21 @@
  * Core validation for the referee's quartic fee model, toxic flow, and engine interface.
  */
 
-import { calculateFee, calculateMergeFee, calculateFeeAdjustedEdge, cheaperExit } from "../referee";
+import { calculateFee, calculateMergeFee, calculateFeeAdjustedEdge, cheaperExit, walkBook, isBookTradeable } from "../referee";
+import type { OrderBook } from "../types";
+
+// Helper to build minimal valid OrderBook for tests
+function mkBook(opts: {
+  asks?: { price: number; size: number }[];
+  bids?: { price: number; size: number }[];
+  timestamp?: number;
+}): OrderBook {
+  return {
+    asks: opts.asks ?? [],
+    bids: opts.bids ?? [],
+    timestamp: opts.timestamp ?? Date.now(),
+  };
+}
 
 let passed = 0;
 let failed = 0;
@@ -123,6 +137,136 @@ console.log(`  P=0.50 with-opp: ${exit50_hasOpp.method} (sell=$${exit50_hasOpp.s
 const exit99_hasOpp = cheaperExit(0.99, 100, true);
 assert(exit99_hasOpp.method === "SELL", `P=0.99 with-opposite should still prefer SELL (sell fee is near-zero, beats gas)`);
 console.log(`  P=0.99 with-opp: ${exit99_hasOpp.method} (sell=$${exit99_hasOpp.sellFee.toFixed(4)}, merge=$${exit99_hasOpp.mergeFee.toFixed(4)}) ✓`);
+
+// ── walkBook: limit price enforcement ───────────────────────────────────────
+
+console.log("\n=== walkBook Limit Price Enforcement ===");
+
+// BUY with limit at 0.50 against book best ask 0.60 → reject (would fill above limit)
+{
+  const book = mkBook({ asks: [{ price: 0.60, size: 100 }], bids: [{ price: 0.59, size: 100 }] });
+  const result = walkBook(10, "BUY", book, 5, false, 0.50);
+  assert(result === null, "BUY with limit 0.50 must reject when best ask is 0.60");
+  console.log("  BUY limit 0.50 vs ask 0.60: rejected ✓");
+}
+
+// BUY with limit at 0.65 against book best ask 0.60 → fill at 0.60
+{
+  const book = mkBook({ asks: [{ price: 0.60, size: 100 }], bids: [{ price: 0.59, size: 100 }] });
+  const result = walkBook(10, "BUY", book, 5, false, 0.65);
+  assert(result !== null && approx(result.effectivePrice, 0.60), "BUY with limit 0.65 must fill at 0.60");
+  console.log(`  BUY limit 0.65 vs ask 0.60: filled at ${result?.effectivePrice} ✓`);
+}
+
+// SELL with limit at 0.60 against best bid 0.50 → reject (would fill below limit)
+{
+  const book = mkBook({ asks: [{ price: 0.51, size: 100 }], bids: [{ price: 0.50, size: 100 }] });
+  const result = walkBook(10, "SELL", book, 5, false, 0.60);
+  assert(result === null, "SELL with limit 0.60 must reject when best bid is 0.50");
+  console.log("  SELL limit 0.60 vs bid 0.50: rejected ✓");
+}
+
+// SELL with limit at 0.45 against best bid 0.50 → fill at 0.50
+{
+  const book = mkBook({ asks: [{ price: 0.51, size: 100 }], bids: [{ price: 0.50, size: 100 }] });
+  const result = walkBook(10, "SELL", book, 5, false, 0.45);
+  assert(result !== null && approx(result.effectivePrice, 0.50), "SELL with limit 0.45 must fill at 0.50");
+  console.log(`  SELL limit 0.45 vs bid 0.50: filled at ${result?.effectivePrice} ✓`);
+}
+
+// No limit (undefined) → no enforcement, fills at market
+{
+  const book = mkBook({ asks: [{ price: 0.99, size: 100 }], bids: [{ price: 0.50, size: 100 }] });
+  const result = walkBook(10, "BUY", book, 5, false, undefined);
+  // Will be rejected by validity guard (best ask 0.99 > 0.99 false, wait it's strict <0.01 || >0.99)
+  // 0.99 is not > 0.99, so it passes. But spread 0.99 - 0.50 = 0.49 which is < 0.50. Passes.
+  assert(result !== null, "No-limit BUY should fill (no limit = no enforcement)");
+  console.log("  BUY no-limit: fills without enforcement ✓");
+}
+
+// ── walkBook: book validity guards ──────────────────────────────────────────
+
+console.log("\n=== walkBook Book Validity Guards ===");
+
+// Best price below 0.01 → reject
+{
+  const book = mkBook({ asks: [{ price: 0.005, size: 100 }], bids: [{ price: 0.003, size: 100 }] });
+  const result = walkBook(10, "BUY", book);
+  assert(result === null, "Best ask 0.005 must reject (below 0.01 floor)");
+  console.log("  Best price 0.005: rejected ✓");
+}
+
+// Best price above 0.99 → reject
+{
+  const book = mkBook({ asks: [{ price: 0.995, size: 100 }], bids: [{ price: 0.992, size: 100 }] });
+  const result = walkBook(10, "BUY", book);
+  assert(result === null, "Best ask 0.995 must reject (above 0.99 ceiling)");
+  console.log("  Best price 0.995: rejected ✓");
+}
+
+// Wide spread (> 0.50) → reject (half-empty book)
+{
+  const book = mkBook({ asks: [{ price: 0.80, size: 100 }], bids: [{ price: 0.20, size: 100 }] });
+  const result = walkBook(10, "BUY", book);
+  assert(result === null, "Wide spread (0.60) must reject as half-empty book");
+  console.log("  Spread 0.60: rejected ✓");
+}
+
+// One-sided book (no bids) → reject
+{
+  const book = mkBook({ asks: [{ price: 0.50, size: 100 }], bids: [] });
+  const result = walkBook(10, "BUY", book);
+  assert(result === null, "One-sided book (no bids) must reject");
+  console.log("  One-sided book: rejected ✓");
+}
+
+// Stale book (timestamp > 30s old) → reject
+{
+  const book = mkBook({
+    asks: [{ price: 0.50, size: 100 }],
+    bids: [{ price: 0.49, size: 100 }],
+    timestamp: Date.now() - 60_000,
+  });
+  const result = walkBook(10, "BUY", book);
+  assert(result === null, "Stale book (60s old) must reject");
+  console.log("  Stale book (60s): rejected ✓");
+}
+
+// Fresh, valid book → fills normally
+{
+  const book = mkBook({ asks: [{ price: 0.50, size: 100 }], bids: [{ price: 0.49, size: 100 }] });
+  const result = walkBook(10, "BUY", book, 5, false, 0.55);
+  assert(result !== null && result.filledSize === 10, "Valid book must fill");
+  console.log(`  Valid book: filled ${result?.filledSize} shares ✓`);
+}
+
+// ── isBookTradeable: standalone helper engines can use ─────────────────────
+
+console.log("\n=== isBookTradeable Helper ===");
+
+assert(
+  isBookTradeable(mkBook({ asks: [{ price: 0.50, size: 100 }], bids: [{ price: 0.49, size: 100 }] })),
+  "Valid book must be tradeable"
+);
+console.log("  Valid book: tradeable ✓");
+
+assert(
+  !isBookTradeable(mkBook({ asks: [{ price: 0.005, size: 100 }], bids: [{ price: 0.003, size: 100 }] })),
+  "Below-floor price must not be tradeable"
+);
+console.log("  Below-floor price: not tradeable ✓");
+
+assert(
+  !isBookTradeable(mkBook({ asks: [{ price: 0.80, size: 100 }], bids: [{ price: 0.20, size: 100 }] })),
+  "Wide spread must not be tradeable"
+);
+console.log("  Wide spread: not tradeable ✓");
+
+assert(
+  !isBookTradeable(mkBook({ asks: [{ price: 0.50, size: 100 }], bids: [] })),
+  "One-sided book must not be tradeable"
+);
+console.log("  One-sided book: not tradeable ✓");
 
 // ── Fee Gradient (the quartic curve) ─────────────────────────────────────────
 

@@ -323,16 +323,16 @@ async function runRound(
   // Sort by P&L
   results.sort((a, b) => b.totalPnl - a.totalPnl);
 
-  // Phantom alpha detector: $50 starting cash * 10x ceiling = $500 per round
-  // is the absolute most a legitimate strategy could produce. Anything beyond
-  // is almost certainly a sim bug — flag loudly so we catch it before it
-  // contaminates round_history and the breeder learns from fake signal.
-  const PHANTOM_PNL_THRESHOLD = 500;
+  // Phantom alpha detector: STARTING_CASH × multiplier (default 10x = $500)
+  // is the absolute most a legitimate strategy could produce in one round.
+  // Anything beyond is almost certainly a sim bug — flag loudly so we catch
+  // it before it contaminates round_history and the breeder learns fake signal.
+  const phantomThreshold = CONFIG.STARTING_CASH * CONFIG.PHANTOM_PNL_MULTIPLIER;
   for (const r of results) {
-    if (r.totalPnl > PHANTOM_PNL_THRESHOLD) {
+    if (r.totalPnl > phantomThreshold) {
       console.error(
         `\n🚨 [PHANTOM ALPHA] ${r.engineId} produced +$${r.totalPnl.toFixed(2)} ` +
-        `in round ${roundId} (threshold $${PHANTOM_PNL_THRESHOLD}). ` +
+        `in round ${roundId} (threshold $${phantomThreshold.toFixed(0)}). ` +
         `Likely sim bug — audit trades immediately.`
       );
     }

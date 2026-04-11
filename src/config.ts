@@ -89,4 +89,8 @@ export const CONFIG = {
   // ── Logging ────────────────────────────────────────────────────────────────
   LOG_LEVEL:              str("LOG_LEVEL", "info"),
   ROUND_INTEL_PATH:       str("ROUND_INTEL_PATH", `./data/round_intel_${_coin}.json`),
+
+  // ── Sanity / phantom alpha ────────────────────────────────────────────────
+  PHANTOM_PNL_MULTIPLIER: num("PHANTOM_PNL_MULTIPLIER", 10),  // round PnL > STARTING_CASH × this is flagged as likely sim bug
+  DUAL_BOOK_MIN_SUM:      num("DUAL_BOOK_MIN_SUM", 0.85),    // UP_ask + DOWN_ask must be ≥ this; lower means stale/corrupt book data
 };

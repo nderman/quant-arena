@@ -178,7 +178,30 @@ export function calculateFeeAdjustedEdge(
  * Returns null if insufficient liquidity.
  * Returns { filled, remaining } for partial fill support.
  */
-function walkBook(
+/**
+ * Returns true if a book has the structural shape of real PM data:
+ *  - Both bids AND asks present (not one-sided)
+ *  - Best price in (0.01, 0.99) — outside this range is almost certainly
+ *    stale/corrupt, not real PM market state
+ *  - Spread < $0.50 (wider means book is half-empty)
+ *  - Timestamp < 30s old (no stale snapshots)
+ *
+ * Exported so engines can pre-check book quality before submitting orders
+ * (avoids silent walkBook rejections).
+ */
+export function isBookTradeable(book: OrderBook): boolean {
+  if (!book.bids.length || !book.asks.length) return false;
+  const bestBid = book.bids[0].price;
+  const bestAsk = book.asks[0].price;
+  if (bestAsk < 0.01 || bestAsk > 0.99) return false;
+  if (bestBid < 0.01 || bestBid > 0.99) return false;
+  if (bestAsk - bestBid > 0.50) return false;
+  if (book.timestamp && Date.now() - book.timestamp > 30_000) return false;
+  return true;
+}
+
+// Exported for unit tests — pure function, no side effects unless mutate=true
+export function walkBook(
   size: number,
   side: "BUY" | "SELL",
   book: OrderBook,
@@ -186,22 +209,8 @@ function walkBook(
   mutate: boolean = false,
   limitPrice?: number,
 ): { effectivePrice: number; totalCost: number; filledSize: number } | null {
+  if (!isBookTradeable(book)) return null;
   const levels = side === "BUY" ? book.asks : book.bids;
-  if (!levels.length) return null;
-
-  // ── Book validity guards ──
-  // 1. Best price must be in (0.01, 0.99) — outside this range is almost
-  //    certainly stale/corrupt data, not a real PM market state.
-  // 2. The book must have BOTH bids and asks (one-sided book = stale).
-  // 3. Spread must be < $0.50 (anything wider means the book is half-empty).
-  // 4. Book must be reasonably fresh (< 30s old).
-  const bestLevel = levels[0];
-  if (!bestLevel || bestLevel.price < 0.01 || bestLevel.price > 0.99) return null;
-  if (!book.bids.length || !book.asks.length) return null;
-  const bestBid = book.bids[0]?.price ?? 0;
-  const bestAsk = book.asks[0]?.price ?? 0;
-  if (bestAsk - bestBid > 0.50) return null;
-  if (book.timestamp && Date.now() - book.timestamp > 30_000) return null;
 
   const decayEnabled = CONFIG.FILL_DECAY_ENABLED;
   const decayMult = CONFIG.FILL_DECAY_MULTIPLIER;
@@ -578,6 +587,32 @@ async function processActionNoLatency(
 
   // Detect DOWN token for position side tracking
   const isDownToken = !!(state.activeDownTokenId && action.tokenId === state.activeDownTokenId);
+
+  // Dual-book consistency: in real PM, UP_ask + DOWN_ask is always near $1.00
+  // (Croissant's tightest observed sum was $0.91). If both sides' books are
+  // showing impossibly cheap prices (sum < $0.85), the data is stale or
+  // corrupted — reject the trade. Catches the bred-5h5h Gemini-audit pattern
+  // where extreme-underdog buys at $0.01-$0.04 happened against books that
+  // wouldn't exist in real PM.
+  if (action.side === "BUY" || action.side === "SELL") {
+    const oppositeTokenId =
+      action.tokenId === state.activeTokenId ? state.activeDownTokenId :
+      action.tokenId === state.activeDownTokenId ? state.activeTokenId :
+      "";
+    if (oppositeTokenId) {
+      const thisBook = bookFromTick(action.tokenId, tickBooks);
+      const oppBook = bookFromTick(oppositeTokenId, tickBooks);
+      const thisAsk = thisBook.asks[0]?.price;
+      const oppAsk = oppBook.asks[0]?.price;
+      if (thisAsk !== undefined && oppAsk !== undefined && (thisAsk + oppAsk) < CONFIG.DUAL_BOOK_MIN_SUM) {
+        return {
+          action, filled: false, fillPrice: 0, fillSize: 0,
+          fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
+          toxicFlowHit: false, orderType: action.orderType ?? "taker",
+        };
+      }
+    }
+  }
 
   // ── BUY action (off-chain CLOB — no gas) ──
   // Each token has its own real book — no price inversion needed
