@@ -104,11 +104,10 @@ flowchart TD
   FeeCalc["quartic fee:<br/>amount × 0.25 × (P×(1-P))²"]
   FeeCalc --> Fill["update positions, cash, pnl"]
 
-  RouteAction -- "MERGE" --> MergeFlavor{hold both sides?}
-  MergeFlavor -- "yes (Flavor A)" --> MergeA["just merge:<br/>gas only, 3s on-chain delay"]
-  MergeFlavor -- "no (Flavor B)" --> MergeB["buy opposite at real book + gas<br/>then merge, 3s delay"]
+  RouteAction -- "MERGE" --> MergeCheck{hold both sides<br/>of current market?}
+  MergeCheck -- "no" --> Reject3["reject (Flavor A only)"]
+  MergeCheck -- "yes" --> MergeA["burn both legs:<br/>credit $1/pair, gas only,<br/>3s on-chain delay"]
   MergeA --> Fill
-  MergeB --> Fill
 
   Fill --> Ledger[("recordFill →<br/>ledger.db")]
 
@@ -130,7 +129,7 @@ flowchart TD
 ```bash
 npm install
 npm run build       # tsc compile
-npm run test:unit   # 15 tests — must all pass before deploy
+npm run test:unit   # 21 tests — must all pass before deploy
 ```
 
 ### Run a single arena locally
@@ -189,7 +188,7 @@ fee = amount × 0.25 × (P × (1−P))²
 
 **Maker orders:** 0% fee + 20% rebate of taker fees, **12% fill probability** (was 60% — calibrated down to match real HFT queue priority), 5bps adverse selection.
 
-**MERGE:** the contract itself is free; pay gas + the cost of buying the opposite side at its real book price (Flavor B), or just gas if you already hold both sides (Flavor A).
+**MERGE:** Flavor A only — engine must already hold both UP and DOWN of the same conditional pair. The referee burns both legs and credits $1 per pair (minus gas). Flavor B (buy opposite + merge atomically) was removed because it kept producing exploit paths in our sim. To do a Flavor B-style arb, emit a BUY for the opposite side first, wait for the fill, then call MERGE on a subsequent tick.
 
 Winning engines must do at least one of:
 1. Trade at the edges (P > 0.85 or P < 0.15) where fees vanish
