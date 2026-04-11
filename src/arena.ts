@@ -42,9 +42,54 @@ let currentActiveDownTokenId = "";
 // ── Engine Loading ───────────────────────────────────────────────────────────
 
 /**
- * Load all engines from the engines directory.
- * Each engine file must export a class that implements BaseEngine.
+ * Scan the engines directory for files not yet in the provided list and
+ * append new engine instances to it. Used at round-start to pick up
+ * freshly-bred engines without requiring a full arena restart.
+ *
+ * Returns the count of newly loaded engines.
  */
+function reloadNewEngines(existing: BaseEngine[]): number {
+  const existingIds = new Set(existing.map(e => e.id));
+  const builtinDir = path.resolve(__dirname, "engines");
+  if (!fs.existsSync(builtinDir)) return 0;
+
+  const files = fs.readdirSync(builtinDir).filter(f =>
+    (f.endsWith(".ts") || f.endsWith(".js")) && !f.startsWith("Base")
+  );
+
+  let added = 0;
+  for (const file of files) {
+    const fullPath = path.join(builtinDir, file);
+    try {
+      // Clear require cache for this file so we pick up the fresh version
+      // (in case of dist rebuilds). Safe because engine files are self-
+      // contained — they don't mutate shared module state.
+      delete require.cache[require.resolve(fullPath)];
+      const mod = require(fullPath);
+      for (const key of Object.keys(mod)) {
+        if (typeof mod[key] === "function") {
+          const instance = new mod[key]();
+          if (typeof instance.onTick === "function" && !existingIds.has(instance.id)) {
+            existing.push(instance);
+            existingIds.add(instance.id);
+            added++;
+            console.log(`[arena] Hot-loaded bred engine: ${instance.name} (${instance.id})`);
+            break;
+          }
+        }
+      }
+    } catch (err: any) {
+      // MODULE_NOT_FOUND is the expected case for a freshly-bred .ts engine
+      // whose .js hasn't been compiled yet — skip quietly. Other failures
+      // (syntax errors, constructor throws) are real bugs worth surfacing.
+      if (err?.code !== "MODULE_NOT_FOUND") {
+        console.error(`[arena] Failed to hot-load ${file}:`, err.message);
+      }
+    }
+  }
+  return added;
+}
+
 function loadEngines(): BaseEngine[] {
   const engines: BaseEngine[] = [];
 
@@ -143,6 +188,12 @@ async function runRound(
   console.log(`${"=".repeat(60)}\n`);
 
   recordRoundStart(roundId);
+
+  // Hot-load any newly bred engines that appeared since last round
+  const newCount = reloadNewEngines(engines);
+  if (newCount > 0) {
+    console.log(`[arena] Hot-loaded ${newCount} new engine(s) at round start`);
+  }
 
   // Initialize engine states
   const states = new Map<string, EngineState>();
