@@ -686,7 +686,24 @@ async function processActionNoLatency(
       const oppBook = bookFromTick(oppositeTokenId, tickBooks);
       const thisAsk = thisBook.asks[0]?.price;
       const oppAsk = oppBook.asks[0]?.price;
+      const now = Date.now();
+
+      // Reject when the dual-book sum is structurally impossible (<0.95).
       if (thisAsk !== undefined && oppAsk !== undefined && (thisAsk + oppAsk) < CONFIG.DUAL_BOOK_MIN_SUM) {
+        return {
+          action, filled: false, fillPrice: 0, fillSize: 0,
+          fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
+          toxicFlowHit: false, orderType: action.orderType ?? "taker",
+        };
+      }
+
+      // Reject when the OPPOSITE book is stale while our target is fresh.
+      // In real PM the two sides stay arb'd within ~100ms; if one side has
+      // gone silent for >PM_BOOK_STALE_MS while the other is active, the
+      // "gap" between them is data artifact, not a real opportunity. This
+      // is the stale-side exploit class (one book frozen while the other
+      // updates — merge-arb-sniper-v1 harvested $59 from this on Apr 11).
+      if (oppBook.timestamp && now - oppBook.timestamp > CONFIG.PM_BOOK_STALE_MS) {
         return {
           action, filled: false, fillPrice: 0, fillSize: 0,
           fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,

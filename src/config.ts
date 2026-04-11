@@ -92,7 +92,7 @@ export const CONFIG = {
 
   // ── Sanity / phantom alpha ────────────────────────────────────────────────
   PHANTOM_PNL_MULTIPLIER: num("PHANTOM_PNL_MULTIPLIER", 10),  // round PnL > STARTING_CASH × this is flagged as likely sim bug
-  DUAL_BOOK_MIN_SUM:      num("DUAL_BOOK_MIN_SUM", 0.85),    // UP_ask + DOWN_ask must be ≥ this; lower means stale/corrupt book data
+  DUAL_BOOK_MIN_SUM:      num("DUAL_BOOK_MIN_SUM", 0.95),    // UP_ask + DOWN_ask must be ≥ this; lower means stale/corrupt book data. Real PM arbitrageurs keep sums > 0.97; anything below 0.95 is structurally impossible
 
   // ── Snipe-stale-makers cancellation model ─────────────────────────────────
   SNIPE_MOMENTUM_WINDOW_MS: num("SNIPE_MOMENTUM_WINDOW_MS", 5_000),  // window for cumulative Binance momentum
@@ -105,7 +105,7 @@ export const CONFIG = {
   PM_PRICE_MIN:              num("PM_PRICE_MIN", 0.005),              // floor for any tradeable PM price
   PM_PRICE_MAX:              num("PM_PRICE_MAX", 0.995),              // ceiling for any tradeable PM price
   PM_BOOK_MAX_SPREAD:        num("PM_BOOK_MAX_SPREAD", 0.50),         // wider than this = half-empty/stale book
-  PM_BOOK_STALE_MS:          num("PM_BOOK_STALE_MS", 30_000),         // books older than this are not tradeable
+  PM_BOOK_STALE_MS:          num("PM_BOOK_STALE_MS", 3_000),          // books older than this are not tradeable. Real PM arb bots treat >500ms as dead; 3000ms accommodates quiet-market WS gaps without allowing the "frozen side" stale-book exploits that 30s permitted.
   PM_BOOK_MAX_JUMP_FRACTION: num("PM_BOOK_MAX_JUMP_FRACTION", 0.25),  // single-update price jump > this = transient quote, reject
   PM_BOOK_PREV_STALE_MS:     num("PM_BOOK_PREV_STALE_MS", 10_000),    // prev book older than this = no comparison baseline, accept
 };
