@@ -34,9 +34,6 @@ export class MergeArbSniperEngine extends AbstractEngine {
   private readonly minShares = 20;
   // Don't let a single arb consume more than this fraction of cash
   private readonly maxCashPct = 0.40;
-  // Track in-flight legs to prevent pyramiding across the latency window
-  private pendingTokens = new Set<string>();
-  private lastMarketKey = "";
   // Once we hold both sides, emit MERGE next tick
   private armMergeNextTick = false;
 
@@ -48,18 +45,8 @@ export class MergeArbSniperEngine extends AbstractEngine {
     if (!upTokenId || !downTokenId) return [];
 
     // Reset on rotation — stranded legs will settle on their own.
-    const marketKey = `${upTokenId}:${downTokenId}`;
-    if (marketKey !== this.lastMarketKey) {
-      this.pendingTokens.clear();
-      this.armMergeNextTick = false;
-      this.lastMarketKey = marketKey;
-    }
-
-    // Clear pending for any token now visible in positions (fill landed)
-    for (const tokenId of [...this.pendingTokens]) {
-      const pos = this.getPosition(tokenId);
-      if (pos && pos.shares > 0) this.pendingTokens.delete(tokenId);
-    }
+    const rotated = this.updatePendingOrders();
+    if (rotated) this.armMergeNextTick = false;
 
     const upPos = this.getPosition(upTokenId);
     const downPos = this.getPosition(downTokenId);
@@ -78,7 +65,7 @@ export class MergeArbSniperEngine extends AbstractEngine {
     }
 
     // Wait for in-flight BUYs to finalize before evaluating a new arb.
-    if (this.pendingTokens.size > 0) return [];
+    if (this.hasPendingOrder()) return [];
 
     // Don't re-enter if we're partially stranded (one leg filled, the other
     // didn't) — let it settle. This is rare (both fills should land within
@@ -106,8 +93,8 @@ export class MergeArbSniperEngine extends AbstractEngine {
 
     // Mark both pending — the buys will fill ~50ms later and we'll pick up
     // holdsBoth on a subsequent tick.
-    this.pendingTokens.add(upTokenId);
-    this.pendingTokens.add(downTokenId);
+    this.markPending(upTokenId);
+    this.markPending(downTokenId);
     this.armMergeNextTick = true;
 
     const grossProfit = (1 - sum) * shares;
@@ -126,8 +113,7 @@ export class MergeArbSniperEngine extends AbstractEngine {
   }
 
   onRoundEnd(_state: EngineState): void {
-    this.pendingTokens.clear();
+    this.clearPendingOrders();
     this.armMergeNextTick = false;
-    this.lastMarketKey = "";
   }
 }

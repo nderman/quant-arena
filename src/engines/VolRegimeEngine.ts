@@ -35,9 +35,7 @@ export class VolRegimeEngine extends AbstractEngine {
   private readonly revertEntryMin = 0.15;
   // Sizing
   private readonly maxCashPct = 0.25;
-  // Race protection
-  private pendingTokens = new Set<string>();
-  private lastMarketKey = "";
+  // Race protection via AbstractEngine.updatePendingOrders()
 
   onTick(tick: MarketTick, state: EngineState, _signals?: SignalSnapshot): EngineAction[] {
     // Update vol estimate from Binance ticks
@@ -53,17 +51,8 @@ export class VolRegimeEngine extends AbstractEngine {
     const downTokenId = this.getDownTokenId();
     if (!upTokenId || !downTokenId) return [];
 
-    // Reset pending on rotation
-    const marketKey = `${upTokenId}:${downTokenId}`;
-    if (marketKey !== this.lastMarketKey) {
-      this.pendingTokens.clear();
-      this.lastMarketKey = marketKey;
-    }
-    for (const t of [...this.pendingTokens]) {
-      const pos = this.getPosition(t);
-      if (pos && pos.shares > 0) this.pendingTokens.delete(t);
-    }
-    if (this.pendingTokens.size > 0) return [];
+    this.updatePendingOrders();
+    if (this.hasPendingOrder()) return [];
 
     // Need enough history to compute vol
     if (this.binancePrices.length < this.windowSize) return [];
@@ -110,7 +99,7 @@ export class VolRegimeEngine extends AbstractEngine {
       const shares = Math.floor((state.cashBalance * this.maxCashPct) / askPrice);
       if (shares < 5) return [];
 
-      this.pendingTokens.add(tokenId);
+      this.markPending(tokenId);
       return [this.buy(tokenId, askPrice, shares, {
         orderType: "taker",
         note: `momentum: vol=${(realizedVol * 10000).toFixed(1)}bps, ${buyUp ? "UP" : "DOWN"} @ ${askPrice.toFixed(3)}`,
@@ -134,7 +123,7 @@ export class VolRegimeEngine extends AbstractEngine {
     const shares = Math.floor((state.cashBalance * this.maxCashPct) / askPrice);
     if (shares < 5) return [];
 
-    this.pendingTokens.add(tokenId);
+    this.markPending(tokenId);
     return [this.buy(tokenId, askPrice, shares, {
       orderType: "taker",
       note: `revert: vol=${(realizedVol * 10000).toFixed(1)}bps, ${buyUp ? "UP" : "DOWN"} @ ${askPrice.toFixed(3)}`,
@@ -144,7 +133,6 @@ export class VolRegimeEngine extends AbstractEngine {
 
   onRoundEnd(_state: EngineState): void {
     this.binancePrices = [];
-    this.pendingTokens.clear();
-    this.lastMarketKey = "";
+    this.clearPendingOrders();
   }
 }

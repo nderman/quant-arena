@@ -95,6 +95,44 @@ export abstract class AbstractEngine implements IBaseEngine {
     return this.state.cashBalance + this.totalPositionValue(currentPrice);
   }
 
+  // ── Pending-Order Guard ──────────────────────────────────────────────────
+  // Prevents pyramiding during the ~50ms fill latency window: between
+  // emitting a BUY and seeing the fill in state.positions, onTick fires
+  // multiple times. This Set tracks in-flight tokens and auto-clears on
+  // fill confirmation or market rotation.
+
+  private _pendingTokens = new Set<string>();
+  private _lastMarketKey = "";
+
+  protected hasPendingOrder(): boolean {
+    return this._pendingTokens.size > 0;
+  }
+
+  protected markPending(tokenId: string): void {
+    this._pendingTokens.add(tokenId);
+  }
+
+  /** Call at the start of onTick (after source filter). Clears on rotation, removes filled. Returns true if market rotated. */
+  protected updatePendingOrders(): boolean {
+    const marketKey = `${this.getUpTokenId()}:${this.getDownTokenId()}`;
+    let rotated = false;
+    if (marketKey !== this._lastMarketKey) {
+      this._pendingTokens.clear();
+      this._lastMarketKey = marketKey;
+      rotated = true;
+    }
+    for (const t of [...this._pendingTokens]) {
+      const pos = this.getPosition(t);
+      if (pos && pos.shares > 0) this._pendingTokens.delete(t);
+    }
+    return rotated;
+  }
+
+  protected clearPendingOrders(): void {
+    this._pendingTokens.clear();
+    this._lastMarketKey = "";
+  }
+
   // ── Token Helpers ────────────────────────────────────────────────────────
 
   /** Get the DOWN (NO) token ID for the current market */

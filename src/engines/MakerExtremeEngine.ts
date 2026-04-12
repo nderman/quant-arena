@@ -18,8 +18,7 @@ export class MakerExtremeEngine extends AbstractEngine {
   private readonly maxCashPct = 0.30;
   private readonly maxEntriesPerCandle = 2;
   private entriesThisCandle = 0;
-  private pendingTokens = new Set<string>();
-  private lastMarketKey = "";
+  private lastCandleKey = "";
 
   onTick(tick: MarketTick, state: EngineState, _signals?: SignalSnapshot): EngineAction[] {
     if (tick.source !== "polymarket") return [];
@@ -28,17 +27,13 @@ export class MakerExtremeEngine extends AbstractEngine {
     const downTokenId = this.getDownTokenId();
     if (!upTokenId || !downTokenId) return [];
 
-    const marketKey = `${upTokenId}:${downTokenId}`;
-    if (marketKey !== this.lastMarketKey) {
-      this.pendingTokens.clear();
+    this.updatePendingOrders();
+    const candleKey = `${upTokenId}:${downTokenId}`;
+    if (candleKey !== this.lastCandleKey) {
       this.entriesThisCandle = 0;
-      this.lastMarketKey = marketKey;
+      this.lastCandleKey = candleKey;
     }
-    for (const t of [...this.pendingTokens]) {
-      const pos = this.getPosition(t);
-      if (pos && pos.shares > 0) this.pendingTokens.delete(t);
-    }
-    if (this.pendingTokens.size > 0) return [];
+    if (this.hasPendingOrder()) return [];
     if (this.entriesThisCandle >= this.maxEntriesPerCandle) return [];
 
     const upBook = getBookForToken(upTokenId);
@@ -66,7 +61,7 @@ export class MakerExtremeEngine extends AbstractEngine {
     const makerPrice = Math.round((askPrice - 0.003) * 1000) / 1000;
 
     this.entriesThisCandle++;
-    this.pendingTokens.add(tokenId);
+    this.markPending(tokenId);
 
     if (makerPrice >= bestAsk) {
       return [this.buy(tokenId, askPrice, shares, {
@@ -84,8 +79,7 @@ export class MakerExtremeEngine extends AbstractEngine {
   }
 
   onRoundEnd(_state: EngineState): void {
-    this.pendingTokens.clear();
+    this.clearPendingOrders();
     this.entriesThisCandle = 0;
-    this.lastMarketKey = "";
   }
 }

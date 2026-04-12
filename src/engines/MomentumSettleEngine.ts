@@ -16,9 +16,6 @@ export class MomentumSettleEngine extends AbstractEngine {
   private readonly entryMin = 0.60;
   private readonly entryMax = 0.75;
   private readonly maxCashPct = 0.25;
-  private pendingTokens = new Set<string>();
-  private lastMarketKey = "";
-
   onTick(tick: MarketTick, state: EngineState, _signals?: SignalSnapshot): EngineAction[] {
     if (tick.source !== "polymarket") return [];
 
@@ -26,16 +23,8 @@ export class MomentumSettleEngine extends AbstractEngine {
     const downTokenId = this.getDownTokenId();
     if (!upTokenId || !downTokenId) return [];
 
-    const marketKey = `${upTokenId}:${downTokenId}`;
-    if (marketKey !== this.lastMarketKey) {
-      this.pendingTokens.clear();
-      this.lastMarketKey = marketKey;
-    }
-    for (const t of [...this.pendingTokens]) {
-      const pos = this.getPosition(t);
-      if (pos && pos.shares > 0) this.pendingTokens.delete(t);
-    }
-    if (this.pendingTokens.size > 0) return [];
+    this.updatePendingOrders();
+    if (this.hasPendingOrder()) return [];
 
     const upPos = this.getPosition(upTokenId);
     const downPos = this.getPosition(downTokenId);
@@ -68,7 +57,7 @@ export class MomentumSettleEngine extends AbstractEngine {
 
     if (makerPrice >= bestAsk) {
       // Would cross spread — fall back to taker
-      this.pendingTokens.add(tokenId);
+      this.markPending(tokenId);
       return [this.buy(tokenId, askPrice, shares, {
         orderType: "taker",
         note: `momentum-settle: taker ${buyUp ? "UP" : "DOWN"} @ ${askPrice.toFixed(3)}, hold to settle`,
@@ -76,7 +65,7 @@ export class MomentumSettleEngine extends AbstractEngine {
       })];
     }
 
-    this.pendingTokens.add(tokenId);
+    this.markPending(tokenId);
     return [this.buy(tokenId, makerPrice, shares, {
       orderType: "maker",
       note: `momentum-settle: maker ${buyUp ? "UP" : "DOWN"} @ ${makerPrice.toFixed(3)}, hold to settle`,
@@ -85,7 +74,6 @@ export class MomentumSettleEngine extends AbstractEngine {
   }
 
   onRoundEnd(_state: EngineState): void {
-    this.pendingTokens.clear();
-    this.lastMarketKey = "";
+    this.clearPendingOrders();
   }
 }

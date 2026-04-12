@@ -32,9 +32,6 @@ export class RotationFadeEngine extends AbstractEngine {
   private readonly maxCashPct = 0.20;
   private readonly minEdgeAfterFee = 0.005;
 
-  private pendingTokens = new Set<string>();
-  private lastMarketKey = "";
-
   onTick(tick: MarketTick, state: EngineState, _signals?: SignalSnapshot): EngineAction[] {
     if (tick.source !== "polymarket") return [];
 
@@ -42,15 +39,7 @@ export class RotationFadeEngine extends AbstractEngine {
     const downTokenId = this.getDownTokenId();
     if (!upTokenId || !downTokenId) return [];
 
-    const marketKey = `${upTokenId}:${downTokenId}`;
-    if (marketKey !== this.lastMarketKey) {
-      this.pendingTokens.clear();
-      this.lastMarketKey = marketKey;
-    }
-    for (const t of [...this.pendingTokens]) {
-      const pos = this.getPosition(t);
-      if (pos && pos.shares > 0) this.pendingTokens.delete(t);
-    }
+    this.updatePendingOrders();
 
     const upBook = getBookForToken(upTokenId);
     const downBook = getBookForToken(downTokenId);
@@ -92,7 +81,7 @@ export class RotationFadeEngine extends AbstractEngine {
     }
 
     // ── Entry logic ──
-    if (this.pendingTokens.size > 0) return [];
+    if (this.hasPendingOrder()) return [];
 
     // Only in the first 20 seconds of the candle
     const windowStart = this.getWindowStart();
@@ -114,7 +103,7 @@ export class RotationFadeEngine extends AbstractEngine {
     const shares = Math.floor((state.cashBalance * this.maxCashPct) / askPrice);
     if (shares < 5) return [];
 
-    this.pendingTokens.add(tokenId);
+    this.markPending(tokenId);
     return [this.buy(tokenId, askPrice, shares, {
       orderType: "taker",
       note: `rotation fade ${buyDown ? "DOWN" : "UP"}: dev=${deviation.toFixed(3)}, t+${secsIntoWindow.toFixed(0)}s`,
@@ -123,7 +112,6 @@ export class RotationFadeEngine extends AbstractEngine {
   }
 
   onRoundEnd(_state: EngineState): void {
-    this.pendingTokens.clear();
-    this.lastMarketKey = "";
+    this.clearPendingOrders();
   }
 }

@@ -43,8 +43,6 @@ export class ChainlinkMomentumEngine extends AbstractEngine {
 
   // Chainlink samples: [timestamp, price]
   private clSamples: Array<[number, number]> = [];
-  private pendingTokens = new Set<string>();
-  private lastMarketKey = "";
   private candleEntries = 0;
   private readonly maxEntriesPerCandle = 1;
 
@@ -56,12 +54,10 @@ export class ChainlinkMomentumEngine extends AbstractEngine {
     if (!upTokenId || !downTokenId) return [];
 
     // Rotation: reset per-candle state, drop stale chainlink samples
-    const marketKey = `${upTokenId}:${downTokenId}`;
-    if (marketKey !== this.lastMarketKey) {
-      this.pendingTokens.clear();
+    const rotated = this.updatePendingOrders();
+    if (rotated) {
       this.candleEntries = 0;
       this.clSamples = [];
-      this.lastMarketKey = marketKey;
     }
 
     // Sample chainlink every tick (pulse throttles the underlying fetch)
@@ -76,12 +72,7 @@ export class ChainlinkMomentumEngine extends AbstractEngine {
       }
     }
 
-    // Clear pending once fills land
-    for (const t of [...this.pendingTokens]) {
-      const pos = this.getPosition(t);
-      if (pos && pos.shares > 0) this.pendingTokens.delete(t);
-    }
-    if (this.pendingTokens.size > 0) return [];
+    if (this.hasPendingOrder()) return [];
 
     if (this.candleEntries >= this.maxEntriesPerCandle) return [];
 
@@ -130,7 +121,7 @@ export class ChainlinkMomentumEngine extends AbstractEngine {
     const shares = Math.floor((state.cashBalance * this.maxCashPct) / askPrice);
     if (shares < 5) return [];
 
-    this.pendingTokens.add(tokenId);
+    this.markPending(tokenId);
     this.candleEntries++;
 
     return [this.buy(tokenId, askPrice, shares, {
@@ -141,9 +132,8 @@ export class ChainlinkMomentumEngine extends AbstractEngine {
   }
 
   onRoundEnd(_state: EngineState): void {
+    this.clearPendingOrders();
     this.clSamples = [];
-    this.pendingTokens.clear();
     this.candleEntries = 0;
-    this.lastMarketKey = "";
   }
 }
