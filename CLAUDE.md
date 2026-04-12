@@ -56,6 +56,7 @@ fee = amount × 0.25 × (P × (1 − P))²
 - **Phantom alpha detector**: arena.runRound flags any engine with > $500 single-round PnL (impossible from $50 starting cash) as a likely sim bug.
 
 ## Rules
+- Use `updatePendingOrders()` / `hasPendingOrder()` / `markPending()` for fill-latency race protection (prevents pyramiding during 50ms fill window). Returns true on market rotation.
 - Every engine must call `feeAdjustedEdge()` before trading
 - Never trade at mid-prices without > 2% raw edge
 - Use `cheapestExit(price, shares, tokenId)` to compare SELL vs MERGE with real book prices

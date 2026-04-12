@@ -427,6 +427,89 @@ assert(
 );
 console.log("  Stale prev (>10s): reasonable ✓");
 
+// ── Pending-Order Helpers (AbstractEngine) ──────────────────────────────────
+
+import { AbstractEngine } from "../engines/BaseEngine";
+import type { EngineAction, EngineState, MarketTick, SignalSnapshot, PositionState } from "../types";
+
+class TestEngine extends AbstractEngine {
+  id = "test-engine";
+  name = "Test";
+  version = "1.0.0";
+  onTick(_t: MarketTick, _s: EngineState, _sig?: SignalSnapshot): EngineAction[] { return []; }
+
+  // Expose protected methods for testing
+  testUpdatePending() { return this.updatePendingOrders(); }
+  testHasPending() { return this.hasPendingOrder(); }
+  testMarkPending(id: string) { this.markPending(id); }
+  testClearPending() { this.clearPendingOrders(); }
+}
+
+function mkState(opts: { upToken?: string; downToken?: string; positions?: Map<string, PositionState> }): EngineState {
+  return {
+    engineId: "test-engine",
+    cashBalance: 50,
+    roundPnl: 0,
+    tradeCount: 0,
+    feePaid: 0,
+    feeRebate: 0,
+    slippageCost: 0,
+    positions: opts.positions ?? new Map(),
+    activeTokenId: opts.upToken ?? "UP1",
+    activeDownTokenId: opts.downToken ?? "DOWN1",
+    marketSymbol: "BTCUSDT",
+    marketWindowStart: 0,
+    marketWindowEnd: 0,
+  };
+}
+
+console.log("\n=== Pending-Order Helpers ===");
+{
+  const e = new TestEngine();
+  e.init(mkState({}));
+
+  // Initially no pending orders
+  assert(!e.testHasPending(), "no pending initially");
+
+  // markPending + hasPendingOrder
+  e.testMarkPending("UP1");
+  assert(e.testHasPending(), "has pending after mark");
+
+  // Fill clears pending
+  const posMap = new Map<string, PositionState>();
+  posMap.set("UP1", { shares: 10, avgEntry: 0.5, costBasis: 5, side: "YES", tokenId: "UP1" });
+  e.init(mkState({ positions: posMap }));
+  e.testUpdatePending();
+  assert(!e.testHasPending(), "fill clears pending");
+}
+
+{
+  const e = new TestEngine();
+  e.init(mkState({}));
+  e.testMarkPending("UP1");
+
+  // Rotation clears pending and returns true
+  e.init(mkState({ upToken: "UP2", downToken: "DOWN2" }));
+  const rotated = e.testUpdatePending();
+  assert(rotated === true, "rotation returns true");
+  assert(!e.testHasPending(), "rotation clears pending");
+
+  // No rotation returns false
+  const notRotated = e.testUpdatePending();
+  assert(notRotated === false, "no rotation returns false");
+}
+
+{
+  const e = new TestEngine();
+  e.init(mkState({}));
+  e.testMarkPending("UP1");
+  e.testMarkPending("DOWN1");
+  assert(e.testHasPending(), "multiple pending");
+
+  e.testClearPending();
+  assert(!e.testHasPending(), "clearPendingOrders resets all");
+}
+
 // ── Fee Gradient (the quartic curve) ─────────────────────────────────────────
 
 console.log("\n=== Fee Gradient (Quartic Curve) ===");
