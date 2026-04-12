@@ -38,6 +38,9 @@ import type {
 let activeStates: Map<string, EngineState> | null = null;
 let currentActiveTokenId = "";
 let currentActiveDownTokenId = "";
+let currentMarketSymbol = "";
+let currentWindowEnd = 0;
+let currentWindowStart = 0;
 
 // ── Engine Loading ───────────────────────────────────────────────────────────
 
@@ -167,9 +170,9 @@ function createEngineState(engineId: string): EngineState {
     slippageCost: 0,
     activeTokenId: currentActiveTokenId,
     activeDownTokenId: currentActiveDownTokenId,
-    marketSymbol: "",
-    marketWindowEnd: 0,
-    marketWindowStart: 0,
+    marketSymbol: currentMarketSymbol,
+    marketWindowEnd: currentWindowEnd,
+    marketWindowStart: currentWindowStart,
   };
 }
 
@@ -460,7 +463,7 @@ async function main(): Promise<void> {
     // Retry with backoff. We REQUIRE at least one 5M market for the configured coin —
     // never fall back to simulated pulse when running live (the whole point is real data).
     const maxAttempts = 10;
-    let pick: { title?: string; slug?: string; yesTokenId: string; noTokenId: string; liquidity: number } | null = null;
+    let pick: { title?: string; slug?: string; endDate?: string; yesTokenId: string; noTokenId: string; liquidity: number } | null = null;
     for (let attempt = 1; attempt <= maxAttempts && !pick; attempt++) {
       // Each call is independent — one timeout shouldn't kill the others.
       const [fiveMinR, updownR, cryptoR] = await Promise.allSettled([
@@ -499,10 +502,22 @@ async function main(): Promise<void> {
     CONFIG.PM_CONDITION_ID = pick.yesTokenId;
     currentActiveTokenId = pick.yesTokenId;
     currentActiveDownTokenId = pick.noTokenId;
+    // Set window times immediately so engines using getSecondsRemaining()
+    // work from the very first candle (not just after first rotation).
+    if (pick.endDate) {
+      currentWindowEnd = new Date(pick.endDate).getTime();
+    } else if (pick.slug) {
+      // Extract epoch from slug like "btc-updown-5m-1775964108"
+      const epochMatch = pick.slug.match(/(\d{10,})$/);
+      if (epochMatch) currentWindowEnd = parseInt(epochMatch[1]) * 1000 + 300_000;
+    }
+    currentWindowStart = currentWindowEnd - 300_000;
+    currentMarketSymbol = slugToBinanceSymbol(pick.slug ?? "");
     setPmSubscriptionTokens([pick.yesTokenId, pick.noTokenId]);
     console.log(`\n[arena] Auto-selected: "${pick.title}"`);
     console.log(`  UP token:   ${pick.yesTokenId.slice(0, 20)}...`);
-    console.log(`  DOWN token: ${pick.noTokenId.slice(0, 20)}...\n`);
+    console.log(`  DOWN token: ${pick.noTokenId.slice(0, 20)}...`);
+    console.log(`  Window:     ${new Date(currentWindowStart).toISOString()} → ${new Date(currentWindowEnd).toISOString()}\n`);
   }
 
   // Start data pulse
@@ -538,16 +553,16 @@ async function main(): Promise<void> {
       // Update to new market — old positions settle via settlement.ts ($1 or $0)
       currentActiveTokenId = picked.yesTokenId;
       currentActiveDownTokenId = picked.noTokenId;
-      const pickedSymbol = slugToBinanceSymbol(picked.slug);
-      const pickedWindowEnd = new Date(picked.endDate).getTime();
-      const pickedWindowStart = pickedWindowEnd - 300_000;
+      currentMarketSymbol = slugToBinanceSymbol(picked.slug);
+      currentWindowEnd = new Date(picked.endDate).getTime();
+      currentWindowStart = currentWindowEnd - 300_000;
       if (activeStates) {
         for (const [, state] of activeStates) {
           state.activeTokenId = picked.yesTokenId;
           state.activeDownTokenId = picked.noTokenId;
-          state.marketSymbol = pickedSymbol;
-          state.marketWindowEnd = pickedWindowEnd;
-          state.marketWindowStart = pickedWindowStart;
+          state.marketSymbol = currentMarketSymbol;
+          state.marketWindowEnd = currentWindowEnd;
+          state.marketWindowStart = currentWindowStart;
         }
       }
 

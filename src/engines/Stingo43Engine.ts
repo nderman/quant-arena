@@ -53,12 +53,18 @@ export class Stingo43Engine extends AbstractEngine {
     if (this.candleOpenPrice <= 0 || this.lastBinancePrice <= 0) return [];
 
     const secsRemaining = this.getSecondsRemaining();
-    if (secsRemaining < 0) return [];
+    if (secsRemaining < 0) {
+      console.log(`[stingo43] SKIP: secsRemaining=${secsRemaining} (windowEnd not set?)`);
+      return [];
+    }
     const elapsed = 300 - secsRemaining;
     if (elapsed < this.entryWindowStartSec || elapsed > this.entryWindowEndSec) return [];
 
     const momentum = (this.lastBinancePrice - this.candleOpenPrice) / this.candleOpenPrice;
-    if (Math.abs(momentum) < this.momentumThreshold) return [];
+    if (Math.abs(momentum) < this.momentumThreshold) {
+      console.log(`[stingo43] SKIP: mom=${(momentum*100).toFixed(4)}% < threshold at T+${elapsed.toFixed(0)}s`);
+      return [];
+    }
 
     const buyUp = momentum > 0;
     const tokenId = buyUp ? upTokenId : downTokenId;
