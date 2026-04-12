@@ -233,6 +233,9 @@ async function runRound(
 
   // ── Tick handler: feed every tick to every engine ──
   const onTick = async (tick: MarketTick) => {
+    // Binance WS delivers all symbols; only pass the configured coin to engines
+    if (tick.source === "binance" && tick.symbol !== CONFIG.ARENA_BINANCE_SYMBOL) return;
+
     if (tick.source === "polymarket") lastPmTick = tick;
     tickCount++;
 
