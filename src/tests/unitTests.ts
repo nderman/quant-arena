@@ -796,6 +796,79 @@ async function runLiveExecutorTests(): Promise<void> {
   const pos = live.positions.get("DOWN1");
   assert(pos !== undefined && pos.side === "NO", `positionSide: expected NO, got ${pos?.side}`);
 }
+
+// ── Reconciliation ────────────────────────────────────────────────────────
+const { reconcilePending: reconcile } = await import("../live/liveReconcile");
+
+console.log("\n=== LiveReconcile ===");
+
+// 9. Full fill of a GTC order: position created, pending cleared
+{
+  const live = mkLiveState(500);
+  live.cashBalance = 480; // $20 reserved earlier
+  live.pendingOrders.set("o1", {
+    clientOrderId: "o1", tokenId: "UP1", side: "BUY", price: 0.10, size: 200,
+    postedAt: Date.now() - 5_000, filledSize: 0,
+  });
+  const lookup = async () => ({
+    clientOrderId: "o1", status: "FILLED" as const, filledSize: 200, avgFillPrice: 0.10,
+  });
+  const r = await reconcile(live, lookup, { minAgeMs: 0 });
+  assert(r.filled === 1, `reconcile full: filled=1, got ${r.filled}`);
+  assert(live.pendingOrders.size === 0, "reconcile full: pending cleared");
+  const pos = live.positions.get("UP1");
+  assert(pos !== undefined && pos.shares === 200, `reconcile full: position shares=200, got ${pos?.shares}`);
+}
+
+// 10. Cancelled order releases reserved cash
+{
+  const live = mkLiveState(500);
+  live.cashBalance = 480; // $20 reserved
+  live.pendingOrders.set("o2", {
+    clientOrderId: "o2", tokenId: "UP1", side: "BUY", price: 0.10, size: 200,
+    postedAt: Date.now() - 5_000, filledSize: 0,
+  });
+  const lookup = async () => ({
+    clientOrderId: "o2", status: "CANCELLED" as const, filledSize: 0, avgFillPrice: 0,
+  });
+  const r = await reconcile(live, lookup, { minAgeMs: 0 });
+  assert(r.cancelled === 1, `reconcile cancel: cancelled=1, got ${r.cancelled}`);
+  assert(Math.abs(live.cashBalance - 500) < 0.01, `reconcile cancel: cash restored to 500, got ${live.cashBalance}`);
+  assert(live.pendingOrders.size === 0, "reconcile cancel: pending cleared");
+}
+
+// 11. Partial fill updates filledSize without clearing
+{
+  const live = mkLiveState(500);
+  live.cashBalance = 480;
+  live.pendingOrders.set("o3", {
+    clientOrderId: "o3", tokenId: "UP1", side: "BUY", price: 0.10, size: 200,
+    postedAt: Date.now() - 5_000, filledSize: 0,
+  });
+  const lookup = async () => ({
+    clientOrderId: "o3", status: "OPEN" as const, filledSize: 100, avgFillPrice: 0.10,
+  });
+  const r = await reconcile(live, lookup, { minAgeMs: 0 });
+  assert(r.partialFills === 1, `reconcile partial: partialFills=1, got ${r.partialFills}`);
+  assert(live.pendingOrders.size === 1, "reconcile partial: pending still tracked");
+  assert(live.pendingOrders.get("o3")!.filledSize === 100, "reconcile partial: filledSize updated");
+  const pos = live.positions.get("UP1");
+  assert(pos !== undefined && pos.shares === 100, `reconcile partial: 100 shares, got ${pos?.shares}`);
+}
+
+// 12. minAge guard skips recent orders
+{
+  const live = mkLiveState(500);
+  live.pendingOrders.set("o4", {
+    clientOrderId: "o4", tokenId: "UP1", side: "BUY", price: 0.10, size: 200,
+    postedAt: Date.now(), filledSize: 0,
+  });
+  let called = 0;
+  const lookup = async () => { called++; return null; };
+  const r = await reconcile(live, lookup, { minAgeMs: 5_000 });
+  assert(r.checked === 0, `reconcile minAge: checked=0, got ${r.checked}`);
+  assert(called === 0, "reconcile minAge: lookup not called");
+}
 } // end runLiveExecutorTests
 
 // ── Fee Gradient (the quartic curve) ─────────────────────────────────────────
