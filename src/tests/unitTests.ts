@@ -510,6 +510,134 @@ console.log("\n=== Pending-Order Helpers ===");
   assert(!e.testHasPending(), "clearPendingOrders resets all");
 }
 
+// ── LiveSizingWrapper ──────────────────────────────────────────────────────
+
+import { sizeForLive, computeCandleExposure } from "../live/liveSizing";
+import { createLiveState } from "../live/liveState";
+
+function mkLiveState(bankroll: number, cash?: number): ReturnType<typeof createLiveState> {
+  const s = createLiveState("test-engine", "0xwallet", bankroll, "R0001-test");
+  if (cash !== undefined) s.cashBalance = cash;
+  return s;
+}
+
+console.log("\n=== LiveSizingWrapper ===");
+
+// 1. Basic 10x scale under cap: $2 sim → $20 live at 10¢ = 200 shares
+{
+  const live = mkLiveState(500);
+  const r = sizeForLive(
+    { side: "BUY", tokenId: "UP1", price: 0.10, size: 20 },
+    live,
+    { liveBankrollUsd: 500, simBankrollUsd: 50 },
+  );
+  assert(r.action !== null, "10x scale action non-null");
+  assert(r.action!.size === 200, `10x scale: expected 200 shares ($20 / $0.10), got ${r.action!.size}`);
+  assert(r.clippedBy === undefined, "no clipping at $20 target (cap is $25)");
+}
+
+// 1b. Bankroll cap: $30 target on $500 bankroll (cap $25) → 250 shares
+{
+  const live = mkLiveState(500);
+  const r = sizeForLive(
+    { side: "BUY", tokenId: "UP1", price: 0.10, size: 30 }, // $3 sim × 10 = $30 target
+    live,
+    { liveBankrollUsd: 500, simBankrollUsd: 50 },
+  );
+  assert(r.action !== null, "bankroll cap action non-null");
+  assert(r.clippedBy === "bankroll_cap", `bankroll cap: got ${r.clippedBy}`);
+  assert(r.action!.size === 250, `bankroll cap: expected 250 shares ($25 / $0.10), got ${r.action!.size}`);
+}
+
+// 2. Scale without hitting cap: small sim order, big live bankroll
+{
+  const live = mkLiveState(1000);
+  const r = sizeForLive(
+    { side: "BUY", tokenId: "UP1", price: 0.10, size: 5 }, // $0.50 sim
+    live,
+    { liveBankrollUsd: 1000, simBankrollUsd: 50 },
+  );
+  // $0.50 × 20x = $10 → 100 shares at 10¢. Under the $50 cap (5% of $1000).
+  assert(r.action !== null && r.action.size === 100, `small scale: expected 100 shares, got ${r.action?.size}`);
+  assert(r.clippedBy === undefined, "no clipping needed");
+}
+
+// 3. Cash clip: insufficient cash
+{
+  const live = mkLiveState(500, 10); // bankroll $500, but only $10 cash
+  const r = sizeForLive(
+    { side: "BUY", tokenId: "UP1", price: 0.10, size: 20 }, // $2 sim × 10 = $20 target
+    live,
+    { liveBankrollUsd: 500, simBankrollUsd: 50 },
+  );
+  assert(r.action !== null, "cash clip action non-null");
+  assert(r.clippedBy === "cash", `cash clip: got ${r.clippedBy}`);
+  assert(r.action!.size === 100, `cash clip: $10 / $0.10 = 100 shares, got ${r.action!.size}`);
+}
+
+// 4. Min order floor: sized below $1 returns null
+{
+  const live = mkLiveState(5); // tiny bankroll
+  const r = sizeForLive(
+    { side: "BUY", tokenId: "UP1", price: 0.10, size: 1 }, // $0.10 sim
+    live,
+    { liveBankrollUsd: 5, simBankrollUsd: 50 },
+  );
+  // scale ratio 0.1, target $0.01 — way below $1 minimum
+  assert(r.action === null, "min order: action null");
+  assert(r.clippedBy === "min_order", `min order: got ${r.clippedBy}`);
+}
+
+// 5. Candle exposure cap
+{
+  const live = mkLiveState(1000);
+  const r = sizeForLive(
+    { side: "BUY", tokenId: "UP1", price: 0.10, size: 20 },
+    live,
+    { liveBankrollUsd: 1000, simBankrollUsd: 50, maxCandleExposurePct: 0.60, currentCandleExposureUsd: 590 },
+  );
+  // $10 remaining exposure budget, target $40, clipped to $10 → 100 shares
+  assert(r.action !== null, "exposure cap: non-null");
+  assert(r.clippedBy === "exposure_cap", `exposure cap: got ${r.clippedBy}`);
+  assert(r.action!.size === 100, `exposure cap: got ${r.action!.size}`);
+}
+
+// 6. HOLD passes through
+{
+  const live = mkLiveState(500);
+  const r = sizeForLive(
+    { side: "HOLD", tokenId: "UP1", price: 0, size: 0 },
+    live,
+    { liveBankrollUsd: 500, simBankrollUsd: 50 },
+  );
+  assert(r.action !== null && r.action.side === "HOLD", "HOLD passes through");
+}
+
+// 7. SELL beyond position is clipped
+{
+  const live = mkLiveState(500);
+  live.positions.set("UP1", {
+    tokenId: "UP1", side: "YES", shares: 30, avgEntry: 0.10, costBasis: 3,
+  });
+  const r = sizeForLive(
+    { side: "SELL", tokenId: "UP1", price: 0.15, size: 100 },
+    live,
+    { liveBankrollUsd: 500, simBankrollUsd: 50 },
+  );
+  assert(r.action !== null && r.action.size === 30, `SELL clip: expected 30, got ${r.action?.size}`);
+}
+
+// 8. computeCandleExposure
+{
+  const live = mkLiveState(500);
+  live.positions.set("UP1", { tokenId: "UP1", side: "YES", shares: 50, avgEntry: 0.10, costBasis: 5 });
+  live.pendingOrders.set("o1", {
+    clientOrderId: "o1", tokenId: "UP1", side: "BUY", price: 0.10, size: 20, postedAt: 0, filledSize: 0,
+  });
+  const exp = computeCandleExposure(live);
+  assert(Math.abs(exp - 7) < 0.001, `exposure: expected $7 ($5 cost + $2 pending), got ${exp}`);
+}
+
 // ── Fee Gradient (the quartic curve) ─────────────────────────────────────────
 
 console.log("\n=== Fee Gradient (Quartic Curve) ===");
