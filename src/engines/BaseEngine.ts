@@ -210,20 +210,84 @@ export abstract class AbstractEngine implements IBaseEngine {
   }
 
   /**
-   * Coarse regime label based on the last 60s of Binance. Values:
-   *   - "QUIET"  : realizedVol < 2 bps, abs momentum < 0.05%
-   *   - "CHOP"   : vol between 2-8 bps, low momentum
-   *   - "TREND"  : abs momentum >= 0.10% over 60s
+   * Coarse regime label based on the last `lookbackSec` of Binance.
    *   - "SPIKE"  : realizedVol >= 15 bps
+   *   - "TREND"  : abs momentum >= 10 bps
+   *   - "CHOP"   : vol >= 2 bps
+   *   - "QUIET"  : below all of the above
    * Returns "QUIET" when insufficient data.
+   *
+   * Computed fresh per call — sensitive to the most recent window. For
+   * stability against whipsaw, use `currentRegimeStable()` instead.
    */
-  protected currentRegime(): "QUIET" | "CHOP" | "TREND" | "SPIKE" {
-    const vol = this.realizedVol(60);
-    const mom = this.absMomentum(60);
+  protected currentRegime(lookbackSec: number = 60): "QUIET" | "CHOP" | "TREND" | "SPIKE" {
+    const vol = this.realizedVol(lookbackSec);
+    const mom = this.absMomentum(lookbackSec);
     if (vol >= 0.0015) return "SPIKE";
     if (mom >= 0.0010) return "TREND";
     if (vol >= 0.0002) return "CHOP";
     return "QUIET";
+  }
+
+  // Rolling regime history for stability tracking
+  private _regimeHistory: { label: string; time: number }[] = [];
+  private _stableRegime: "QUIET" | "CHOP" | "TREND" | "SPIKE" = "QUIET";
+  private _stableSince = 0;
+
+  /**
+   * Hysteresis-protected regime label. Only flips to a new label after the
+   * raw `currentRegime()` has agreed on the new label for at least
+   * `holdMs` consecutive milliseconds. Prevents whipsaw on regime boundaries.
+   *
+   * @param holdMs how long the new regime must hold before flipping (default 30s)
+   * @param lookbackSec the regime calc window (default 60s)
+   */
+  protected currentRegimeStable(
+    holdMs: number = 30_000,
+    lookbackSec: number = 60,
+  ): "QUIET" | "CHOP" | "TREND" | "SPIKE" {
+    const now = Date.now();
+    const raw = this.currentRegime(lookbackSec);
+
+    // Track the raw label history so we can detect "consistent for K ms"
+    this._regimeHistory.push({ label: raw, time: now });
+    // Trim anything older than 2× holdMs to bound memory
+    const cutoff = now - holdMs * 2;
+    while (this._regimeHistory.length > 0 && this._regimeHistory[0].time < cutoff) {
+      this._regimeHistory.shift();
+    }
+
+    if (raw === this._stableRegime) {
+      this._stableSince = now;
+      return this._stableRegime;
+    }
+
+    // Different from current stable. Has the new label held continuously
+    // for `holdMs`? Walk back to find the earliest run of the new label.
+    let earliestNew = now;
+    for (let i = this._regimeHistory.length - 1; i >= 0; i--) {
+      const entry = this._regimeHistory[i];
+      if (entry.label !== raw) break;
+      earliestNew = entry.time;
+    }
+
+    if (now - earliestNew >= holdMs) {
+      this._stableRegime = raw;
+      this._stableSince = now;
+    }
+    return this._stableRegime;
+  }
+
+  /**
+   * Multi-window regime agreement: only returns the label if both the short
+   * (60s) and long (300s) windows agree. Otherwise returns "QUIET" as a
+   * conservative no-trade signal. Useful for engines that want maximum
+   * regime confidence at the cost of trading frequency.
+   */
+  protected currentRegimeConfirmed(): "QUIET" | "CHOP" | "TREND" | "SPIKE" {
+    const short = this.currentRegime(60);
+    const long = this.currentRegime(300);
+    return short === long ? short : "QUIET";
   }
 
   // ── Token Helpers ────────────────────────────────────────────────────────

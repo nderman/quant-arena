@@ -630,6 +630,52 @@ console.log("\n=== Regime Signals ===");
   assert(reg === "TREND" || reg === "SPIKE", `expected TREND/SPIKE, got ${reg}`);
 }
 
+// 8. currentRegimeStable: doesn't flip until holdMs satisfied
+class StableRegimeEngine extends AbstractEngine {
+  id = "stable-test";
+  name = "Stable Regime Test";
+  version = "1.0.0";
+  onTick(_t: MarketTick, _s: EngineState, _sig?: SignalSnapshot): EngineAction[] { return []; }
+
+  testTrack(tick: MarketTick) { this.trackBinance(tick); }
+  testStable(holdMs: number, lb: number) { return this.currentRegimeStable(holdMs, lb); }
+  testConfirmed() { return this.currentRegimeConfirmed(); }
+}
+
+{
+  const e = new StableRegimeEngine();
+  e.init(mkState({}));
+
+  // Seed with QUIET (flat prices)
+  for (let i = 0; i < 10; i++) {
+    e.testTrack(mkBinanceTick(80000 + (i % 2 === 0 ? 1 : -1)));
+  }
+  const initial = e.testStable(5_000, 60);
+  assert(initial === "QUIET" || initial === "CHOP", `initial QUIET/CHOP, got ${initial}`);
+
+  // Now feed a sudden trending burst — but the stable should NOT flip yet
+  // because we just started seeing the new label
+  for (let i = 0; i < 5; i++) {
+    e.testTrack(mkBinanceTick(80100 + i * 20)); // big jump
+  }
+  const stillStable = e.testStable(5_000, 60);
+  // Should still be the initial label since holdMs=5s and we just started
+  assert(
+    stillStable === initial,
+    `stable should not flip immediately, expected ${initial}, got ${stillStable}`,
+  );
+}
+
+// 9. currentRegimeConfirmed: returns QUIET on disagreement
+{
+  const e = new StableRegimeEngine();
+  e.init(mkState({}));
+  // Empty buffer → both windows return QUIET (insufficient data)
+  // → they agree, returns QUIET
+  const r = e.testConfirmed();
+  assert(r === "QUIET", `empty → QUIET, got ${r}`);
+}
+
 // ── LiveSizingWrapper ──────────────────────────────────────────────────────
 
 import { sizeForLive, computeCandleExposure } from "../live/liveSizing";
