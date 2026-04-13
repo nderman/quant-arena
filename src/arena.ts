@@ -436,6 +436,17 @@ function writeRoundIntel(roundId: string, results: EngineRoundResult[]): void {
   // Keep last 20 rounds
   if (history.length > 20) history = history.slice(-20);
   fs.writeFileSync(historyPath, JSON.stringify(history, null, 2));
+
+  // Flag graduation candidates AFTER history is updated. Read-only on
+  // live_engines.json; only writes new candidates to live_candidates.json
+  // for manual review. No auto-promote.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { flagGraduationCandidates } = require("./live/graduation");
+    flagGraduationCandidates(CONFIG.ARENA_COIN, roundId);
+  } catch (err) {
+    console.warn(`[arena] graduation hook error: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 // ── Main Loop ────────────────────────────────────────────────────────────────

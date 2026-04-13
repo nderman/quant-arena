@@ -23,9 +23,6 @@ export class VolRegimeEngine extends AbstractEngine {
   name = "Vol Regime Switcher";
   version = "1.0.0";
 
-  // Binance price buffer (last 60 seconds, typically ~12 ticks)
-  private binancePrices: number[] = [];
-  private readonly windowSize = 12;
   // Realized-vol threshold (stddev of pct returns). >0.0005 = ~5bps/tick = high vol
   private readonly highVolThreshold = 0.0005;
   // Entry price gates
@@ -35,15 +32,10 @@ export class VolRegimeEngine extends AbstractEngine {
   private readonly revertEntryMin = 0.15;
   // Sizing
   private readonly maxCashPct = 0.25;
-  // Race protection via AbstractEngine.updatePendingOrders()
 
   onTick(tick: MarketTick, state: EngineState, _signals?: SignalSnapshot): EngineAction[] {
-    // Update vol estimate from Binance ticks
-    if (tick.source === "binance") {
-      this.binancePrices.push(tick.midPrice);
-      if (this.binancePrices.length > this.windowSize) this.binancePrices.shift();
-      return [];
-    }
+    // Feed the shared AbstractEngine Binance buffer
+    this.trackBinance(tick);
 
     if (tick.source !== "polymarket") return [];
 
@@ -55,23 +47,14 @@ export class VolRegimeEngine extends AbstractEngine {
     if (this.hasPendingOrder()) return [];
 
     // Need enough history to compute vol
-    if (this.binancePrices.length < this.windowSize) return [];
-
     // Don't re-enter if already holding either side
     const upPos = this.getPosition(upTokenId);
     const downPos = this.getPosition(downTokenId);
     if ((upPos && upPos.shares > 0) || (downPos && downPos.shares > 0)) return [];
 
-    // Realized vol as stddev of log returns
-    const returns: number[] = [];
-    for (let i = 1; i < this.binancePrices.length; i++) {
-      const prev = this.binancePrices[i - 1];
-      const curr = this.binancePrices[i];
-      if (prev > 0) returns.push((curr - prev) / prev);
-    }
-    const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
-    const variance = returns.reduce((a, b) => a + (b - mean) ** 2, 0) / returns.length;
-    const realizedVol = Math.sqrt(variance);
+    // Realized vol from the shared Binance buffer (last 60s)
+    const realizedVol = this.realizedVol(60);
+    if (realizedVol === 0) return []; // insufficient data
 
     const upBook = getBookForToken(upTokenId);
     const downBook = getBookForToken(downTokenId);
@@ -132,7 +115,6 @@ export class VolRegimeEngine extends AbstractEngine {
   }
 
   onRoundEnd(_state: EngineState): void {
-    this.binancePrices = [];
     this.clearPendingOrders();
   }
 }

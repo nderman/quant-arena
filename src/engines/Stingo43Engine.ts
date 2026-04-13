@@ -9,6 +9,9 @@ import type { EngineAction, EngineState, MarketTick, SignalSnapshot } from "../t
  * Inspired by stingo43 (#10 weekly LB, +$340k, 69% WR, 0 sells, all coins).
  * No PM price gate — buys at whatever price PM offers for the winning side.
  * No exits — pure hold to settlement.
+ *
+ * Uses AbstractEngine.trackBinance() + recentMomentum() helpers (no private
+ * price buffer).
  */
 export class Stingo43Engine extends AbstractEngine {
   id = "stingo43-v1";
@@ -17,19 +20,14 @@ export class Stingo43Engine extends AbstractEngine {
 
   private readonly entryWindowStartSec = 60;
   private readonly entryWindowEndSec = 120;
-  private readonly momentumThreshold = 0.0005; // 5bps minimum move from candle open
+  private readonly momentumThreshold = 0.0005; // 5 bps
   private readonly maxCashPct = 0.30;
 
-  private candleOpenPrice = 0;
-  private lastBnb = 0;
   private enteredThisCandle = false;
   private lastCandleKey = "";
 
   onTick(tick: MarketTick, state: EngineState, _signals?: SignalSnapshot): EngineAction[] {
-    if (tick.source === "binance") {
-      this.lastBnb = tick.midPrice;
-      return [];
-    }
+    this.trackBinance(tick);
 
     if (tick.source !== "polymarket") return [];
 
@@ -43,28 +41,21 @@ export class Stingo43Engine extends AbstractEngine {
     if (candleKey !== this.lastCandleKey || rotated) {
       this.enteredThisCandle = false;
       this.lastCandleKey = candleKey;
-      if (this.lastBnb > 0) {
-        this.candleOpenPrice = this.lastBnb;
-      }
     }
 
     if (this.hasPendingOrder()) return [];
     if (this.enteredThisCandle) return [];
-    if (this.candleOpenPrice <= 0 || this.lastBnb <= 0) return [];
 
     const secsRemaining = this.getSecondsRemaining();
-    if (secsRemaining < 0) {
-      console.log(`[stingo43] SKIP: secsRemaining=${secsRemaining} (windowEnd not set?)`);
-      return [];
-    }
+    if (secsRemaining < 0) return [];
     const elapsed = 300 - secsRemaining;
     if (elapsed < this.entryWindowStartSec || elapsed > this.entryWindowEndSec) return [];
 
-    const momentum = (this.lastBnb - this.candleOpenPrice) / this.candleOpenPrice;
-    if (Math.abs(momentum) < this.momentumThreshold) {
-      console.log(`[stingo43] SKIP: mom=${(momentum*100).toFixed(4)}% < threshold at T+${elapsed.toFixed(0)}s`);
-      return [];
-    }
+    // Momentum from candle open (T+0) to now. Lookback = elapsed so we
+    // capture the full candle move without pulling samples from the
+    // previous candle.
+    const momentum = this.recentMomentum(Math.min(elapsed, 240));
+    if (Math.abs(momentum) < this.momentumThreshold) return [];
 
     const buyUp = momentum > 0;
     const tokenId = buyUp ? upTokenId : downTokenId;
@@ -91,6 +82,5 @@ export class Stingo43Engine extends AbstractEngine {
     this.clearPendingOrders();
     this.enteredThisCandle = false;
     this.lastCandleKey = "";
-    this.candleOpenPrice = 0;
   }
 }
