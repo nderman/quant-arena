@@ -12,10 +12,22 @@ import type { EngineRoundResult } from "./types";
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 export const DATA_DIR = path.resolve(PROJECT_ROOT, "data");
 
+export type RegimeLabel = "QUIET" | "CHOP" | "TREND" | "SPIKE";
+
+export interface RegimeStats {
+  label: RegimeLabel;
+  realizedVolBps: number;  // stddev of 1-min log returns, in bps
+  totalReturnPct: number;  // open-to-close %
+  persistencePct: number;  // % of 1-min candles moving in same direction as overall
+  durationMin: number;
+}
+
 export interface RoundHistoryEntry {
   roundId: string;
   allResults: EngineRoundResult[];
   timestamp?: string;
+  /** Regime label + metrics for this round's Binance window. Added retroactively. */
+  regime?: RegimeStats;
 }
 
 export function roundHistoryPath(coin: string): string {
