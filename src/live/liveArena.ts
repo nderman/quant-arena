@@ -106,37 +106,53 @@ export function startLiveArena(cfg: LiveArenaConfig): LiveArenaHandle {
   const reconcileMs = cfg.reconcileIntervalMs ?? 5_000;
   const settlementMs = cfg.settlementIntervalMs ?? 30_000;
 
-  // Reconcile loop: poll CLOB for fills on pending orders
-  const reconcileTimer = setInterval(async () => {
-    if (states.size === 0) return;
-    for (const [engineId, state] of states) {
-      if (state.pendingOrders.size === 0) continue;
-      try {
-        const r = await reconcilePending(state, cfg.getOrder);
-        if (r.filled + r.cancelled + r.partialFills > 0) {
-          console.log(`[live-reconcile:${engineId}] filled=${r.filled} partial=${r.partialFills} cancelled=${r.cancelled}`);
-        }
-      } catch (err) {
-        console.warn(`[live-reconcile:${engineId}] error: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-  }, reconcileMs);
+  // Use recursive setTimeout instead of setInterval so a slow poll can't
+  // stack up behind itself. Each loop waits for its previous run to finish
+  // before scheduling the next.
+  let running = true;
+  let reconcileTimer: NodeJS.Timeout | null = null;
+  let settlementTimer: NodeJS.Timeout | null = null;
 
-  // Settlement loop: poll Gamma for resolutions
-  const settlementTimer = setInterval(async () => {
-    if (states.size === 0) return;
+  const runReconcile = async (): Promise<void> => {
+    if (!running) return;
     try {
-      const results = await pollLiveSettlements(states, {
-        tokenSlugPrefix: `${cfg.coin}-updown-5m`,
-      });
-      if (results.length > 0) {
-        const netPnl = results.reduce((s, r) => s + r.pnl, 0);
-        console.log(`[live-settle:${cfg.coin}] ${results.length} settlements, net $${netPnl.toFixed(2)}`);
+      for (const [engineId, state] of states) {
+        if (state.pendingOrders.size === 0) continue;
+        try {
+          const r = await reconcilePending(state, cfg.getOrder);
+          if (r.filled + r.cancelled + r.partialFills > 0) {
+            console.log(`[live-reconcile:${engineId}] filled=${r.filled} partial=${r.partialFills} cancelled=${r.cancelled}`);
+          }
+        } catch (err) {
+          console.warn(`[live-reconcile:${engineId}] error: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    } finally {
+      if (running) reconcileTimer = setTimeout(runReconcile, reconcileMs);
+    }
+  };
+
+  const runSettlement = async (): Promise<void> => {
+    if (!running) return;
+    try {
+      if (states.size > 0) {
+        const results = await pollLiveSettlements(states, {
+          tokenSlugPrefix: `${cfg.coin}-updown-5m`,
+        });
+        if (results.length > 0) {
+          const netPnl = results.reduce((s, r) => s + r.pnl, 0);
+          console.log(`[live-settle:${cfg.coin}] ${results.length} settlements, net $${netPnl.toFixed(2)}`);
+        }
       }
     } catch (err) {
       console.warn(`[live-settle:${cfg.coin}] error: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      if (running) settlementTimer = setTimeout(runSettlement, settlementMs);
     }
-  }, settlementMs);
+  };
+
+  reconcileTimer = setTimeout(runReconcile, reconcileMs);
+  settlementTimer = setTimeout(runSettlement, settlementMs);
 
   const onSimAction = async (
     engineId: string,
@@ -154,8 +170,9 @@ export function startLiveArena(cfg: LiveArenaConfig): LiveArenaHandle {
   };
 
   const stop = (): void => {
-    clearInterval(reconcileTimer);
-    clearInterval(settlementTimer);
+    running = false;
+    if (reconcileTimer) clearTimeout(reconcileTimer);
+    if (settlementTimer) clearTimeout(settlementTimer);
   };
 
   const snapshot = (): LiveSnapshot => ({

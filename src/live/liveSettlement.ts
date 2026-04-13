@@ -138,15 +138,13 @@ export async function pollLiveSettlements(
     }
   }
 
-  // Cap per-engine settled sets
+  // Cap per-engine settled sets. Convert to array first — deleting from
+  // a Set while iterating has undefined order and can skip entries.
   for (const [, set] of settledByEngine) {
     if (set.size > 5000) {
       const toDelete = set.size - 4000;
-      let i = 0;
-      for (const t of set) {
-        if (i++ >= toDelete) break;
-        set.delete(t);
-      }
+      const toRemove = [...set].slice(0, toDelete);
+      for (const t of toRemove) set.delete(t);
     }
   }
 
