@@ -33,7 +33,11 @@ export class DcaExtremeEngine extends AbstractEngine {
   onTick(tick: MarketTick, state: EngineState, _signals?: SignalSnapshot): EngineAction[] {
     this.trackBinance(tick);
     if (tick.source !== "polymarket") return [];
-    if (tick.tokenSide !== "UP") return [];
+    // No tokenSide filter: we read BOTH books via getBookForToken regardless
+    // of which token the tick came from. Filtering to UP only halved our
+    // opportunity for no benefit — bred-4h85's tokenSide bug was in a
+    // DIFFERENT engine that used tick.midPrice directly; dca-extreme reads
+    // the books per-token-id so every tick is a valid trigger.
 
     const upTokenId = this.getUpTokenId();
     const downTokenId = this.getDownTokenId();
