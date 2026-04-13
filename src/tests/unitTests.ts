@@ -510,6 +510,126 @@ console.log("\n=== Pending-Order Helpers ===");
   assert(!e.testHasPending(), "clearPendingOrders resets all");
 }
 
+// ── Regime Signals ─────────────────────────────────────────────────────────
+
+class RegimeTestEngine extends AbstractEngine {
+  id = "regime-test";
+  name = "Regime Test";
+  version = "1.0.0";
+  onTick(_t: MarketTick, _s: EngineState, _sig?: SignalSnapshot): EngineAction[] { return []; }
+
+  testTrack(tick: MarketTick) { this.trackBinance(tick); }
+  testVol(sec: number) { return this.realizedVol(sec); }
+  testMom(sec: number) { return this.recentMomentum(sec); }
+  testAbsMom(sec: number) { return this.absMomentum(sec); }
+  testRegime() { return this.currentRegime(); }
+  testLastPrice() { return this.lastBinancePrice(); }
+}
+
+function mkBinanceTick(price: number): MarketTick {
+  return {
+    source: "binance",
+    symbol: "BTCUSDT",
+    midPrice: price,
+    bestBid: price - 0.01,
+    bestAsk: price + 0.01,
+    spread: 0.02,
+    distanceFrom50: 0,
+    book: { asks: [], bids: [], timestamp: Date.now() },
+    timestamp: Date.now(),
+  };
+}
+
+console.log("\n=== Regime Signals ===");
+
+// 1. trackBinance records ticks and lastBinancePrice reflects latest
+{
+  const e = new RegimeTestEngine();
+  e.init(mkState({}));
+  assert(e.testLastPrice() === 0, "initial price is 0");
+  e.testTrack(mkBinanceTick(80000));
+  e.testTrack(mkBinanceTick(80010));
+  assert(e.testLastPrice() === 80010, `latest = 80010, got ${e.testLastPrice()}`);
+}
+
+// 2. trackBinance ignores non-binance ticks
+{
+  const e = new RegimeTestEngine();
+  e.init(mkState({}));
+  const pmTick: MarketTick = {
+    source: "polymarket", symbol: "PM", midPrice: 0.5,
+    bestBid: 0.49, bestAsk: 0.51, spread: 0.02, distanceFrom50: 0,
+    book: { asks: [], bids: [], timestamp: Date.now() }, timestamp: Date.now(),
+  };
+  e.testTrack(pmTick);
+  assert(e.testLastPrice() === 0, "pm tick ignored");
+}
+
+// 3. realizedVol returns 0 with insufficient samples
+{
+  const e = new RegimeTestEngine();
+  e.init(mkState({}));
+  e.testTrack(mkBinanceTick(80000));
+  assert(e.testVol(60) === 0, "vol 0 with 1 sample");
+}
+
+// 4. recentMomentum: +0.1% move over the window
+{
+  const e = new RegimeTestEngine();
+  e.init(mkState({}));
+  // Seed a price history with a ~0.1% uptrend
+  const now = Date.now();
+  for (let i = 0; i < 10; i++) {
+    const price = 80000 + (i * 10); // 80000 → 80090 = +0.1125%
+    const tick = mkBinanceTick(price);
+    tick.timestamp = now - (10 - i) * 1000;
+    e.testTrack(tick);
+  }
+  const mom = e.testMom(60);
+  assert(mom > 0, `momentum positive, got ${mom}`);
+  assert(mom > 0.0005 && mom < 0.002, `momentum ~0.11%, got ${mom}`);
+}
+
+// 5. absMomentum is always non-negative
+{
+  const e = new RegimeTestEngine();
+  e.init(mkState({}));
+  for (let i = 0; i < 10; i++) {
+    e.testTrack(mkBinanceTick(80000 - i * 5)); // downtrend
+  }
+  const am = e.testAbsMom(60);
+  const m = e.testMom(60);
+  assert(am >= 0, "abs momentum non-negative");
+  assert(am === Math.abs(m), "abs equals |mom|");
+}
+
+// 6. currentRegime: QUIET when flat
+{
+  const e = new RegimeTestEngine();
+  e.init(mkState({}));
+  for (let i = 0; i < 20; i++) {
+    e.testTrack(mkBinanceTick(80000 + (i % 2 === 0 ? 1 : -1))); // tiny chop
+  }
+  // Under 2bps vol, abs momentum ~0 → QUIET
+  const reg = e.testRegime();
+  assert(reg === "QUIET" || reg === "CHOP", `expected QUIET/CHOP, got ${reg}`);
+}
+
+// 7. currentRegime: TREND when large monotonic move
+{
+  const e = new RegimeTestEngine();
+  e.init(mkState({}));
+  const now = Date.now();
+  for (let i = 0; i < 60; i++) {
+    const price = 80000 + i * 2; // +0.15% over the window
+    const tick = mkBinanceTick(price);
+    tick.timestamp = now - (60 - i) * 1000;
+    e.testTrack(tick);
+  }
+  const reg = e.testRegime();
+  assert(reg === "TREND" || reg === "SPIKE", `expected TREND/SPIKE, got ${reg}`);
+}
+
 // ── LiveSizingWrapper ──────────────────────────────────────────────────────
 
 import { sizeForLive, computeCandleExposure } from "../live/liveSizing";

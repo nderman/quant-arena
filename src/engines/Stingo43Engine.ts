@@ -21,13 +21,13 @@ export class Stingo43Engine extends AbstractEngine {
   private readonly maxCashPct = 0.30;
 
   private candleOpenPrice = 0;
-  private lastBinancePrice = 0;
+  private lastBnb = 0;
   private enteredThisCandle = false;
   private lastCandleKey = "";
 
   onTick(tick: MarketTick, state: EngineState, _signals?: SignalSnapshot): EngineAction[] {
     if (tick.source === "binance") {
-      this.lastBinancePrice = tick.midPrice;
+      this.lastBnb = tick.midPrice;
       return [];
     }
 
@@ -43,14 +43,14 @@ export class Stingo43Engine extends AbstractEngine {
     if (candleKey !== this.lastCandleKey || rotated) {
       this.enteredThisCandle = false;
       this.lastCandleKey = candleKey;
-      if (this.lastBinancePrice > 0) {
-        this.candleOpenPrice = this.lastBinancePrice;
+      if (this.lastBnb > 0) {
+        this.candleOpenPrice = this.lastBnb;
       }
     }
 
     if (this.hasPendingOrder()) return [];
     if (this.enteredThisCandle) return [];
-    if (this.candleOpenPrice <= 0 || this.lastBinancePrice <= 0) return [];
+    if (this.candleOpenPrice <= 0 || this.lastBnb <= 0) return [];
 
     const secsRemaining = this.getSecondsRemaining();
     if (secsRemaining < 0) {
@@ -60,7 +60,7 @@ export class Stingo43Engine extends AbstractEngine {
     const elapsed = 300 - secsRemaining;
     if (elapsed < this.entryWindowStartSec || elapsed > this.entryWindowEndSec) return [];
 
-    const momentum = (this.lastBinancePrice - this.candleOpenPrice) / this.candleOpenPrice;
+    const momentum = (this.lastBnb - this.candleOpenPrice) / this.candleOpenPrice;
     if (Math.abs(momentum) < this.momentumThreshold) {
       console.log(`[stingo43] SKIP: mom=${(momentum*100).toFixed(4)}% < threshold at T+${elapsed.toFixed(0)}s`);
       return [];

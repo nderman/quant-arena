@@ -133,6 +133,99 @@ export abstract class AbstractEngine implements IBaseEngine {
     this._lastMarketKey = "";
   }
 
+  // ── Regime Signals ──────────────────────────────────────────────────────
+  // Track Binance price history so engines can compute realized vol and
+  // momentum without each maintaining their own buffer. Fed automatically
+  // whenever the engine sees a Binance tick — call `trackBinance(tick)` at
+  // the start of onTick() (before the source filter) to enable.
+
+  private _binancePrices: { price: number; time: number }[] = [];
+  private readonly _binanceMaxSamples = 120; // ~2 minutes @ 1 sample/sec
+
+  /**
+   * Call from onTick() before your source filter. Records Binance ticks
+   * into a bounded rolling window. Safe to call on non-Binance ticks
+   * (it's a no-op).
+   */
+  protected trackBinance(tick: MarketTick): void {
+    if (tick.source !== "binance") return;
+    this._binancePrices.push({ price: tick.midPrice, time: Date.now() });
+    if (this._binancePrices.length > this._binanceMaxSamples) {
+      this._binancePrices.shift();
+    }
+  }
+
+  /** Most recent Binance price, or 0 if none seen yet. */
+  protected lastBinancePrice(): number {
+    const n = this._binancePrices.length;
+    return n > 0 ? this._binancePrices[n - 1].price : 0;
+  }
+
+  /**
+   * Realized vol over the last `lookbackSec` seconds as stddev of 1-sample
+   * log returns (proportional, not annualized). Returns 0 if insufficient data.
+   * Typical BTC 5-min vol is 1-5 bps per tick (~0.0001-0.0005); use >0.0005
+   * as a "high vol / trending" threshold.
+   */
+  protected realizedVol(lookbackSec: number = 60): number {
+    const cutoff = Date.now() - lookbackSec * 1000;
+    const samples = this._binancePrices.filter(s => s.time >= cutoff);
+    if (samples.length < 3) return 0;
+    const returns: number[] = [];
+    for (let i = 1; i < samples.length; i++) {
+      const prev = samples[i - 1].price;
+      const curr = samples[i].price;
+      if (prev > 0) returns.push((curr - prev) / prev);
+    }
+    if (returns.length === 0) return 0;
+    const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+    const variance = returns.reduce((a, b) => a + (b - mean) ** 2, 0) / returns.length;
+    return Math.sqrt(variance);
+  }
+
+  /**
+   * Recent momentum: fractional return from `lookbackSec` seconds ago to now.
+   * Positive = price up, negative = price down. Returns 0 if insufficient data.
+   * Example: 0.001 = +0.1% move, -0.002 = -0.2% move.
+   */
+  protected recentMomentum(lookbackSec: number = 60): number {
+    if (this._binancePrices.length === 0) return 0;
+    const cutoff = Date.now() - lookbackSec * 1000;
+    const latest = this._binancePrices[this._binancePrices.length - 1];
+    // Find the oldest sample at or after the cutoff
+    let oldest = this._binancePrices[0];
+    for (const s of this._binancePrices) {
+      if (s.time >= cutoff) { oldest = s; break; }
+    }
+    if (oldest.price <= 0 || oldest === latest) return 0;
+    return (latest.price - oldest.price) / oldest.price;
+  }
+
+  /**
+   * Absolute momentum — useful for "is anything happening" gates without
+   * caring about direction. Equivalent to `Math.abs(recentMomentum())`.
+   */
+  protected absMomentum(lookbackSec: number = 60): number {
+    return Math.abs(this.recentMomentum(lookbackSec));
+  }
+
+  /**
+   * Coarse regime label based on the last 60s of Binance. Values:
+   *   - "QUIET"  : realizedVol < 2 bps, abs momentum < 0.05%
+   *   - "CHOP"   : vol between 2-8 bps, low momentum
+   *   - "TREND"  : abs momentum >= 0.10% over 60s
+   *   - "SPIKE"  : realizedVol >= 15 bps
+   * Returns "QUIET" when insufficient data.
+   */
+  protected currentRegime(): "QUIET" | "CHOP" | "TREND" | "SPIKE" {
+    const vol = this.realizedVol(60);
+    const mom = this.absMomentum(60);
+    if (vol >= 0.0015) return "SPIKE";
+    if (mom >= 0.0010) return "TREND";
+    if (vol >= 0.0002) return "CHOP";
+    return "QUIET";
+  }
+
   // ── Token Helpers ────────────────────────────────────────────────────────
 
   /** Get the DOWN (NO) token ID for the current market */
