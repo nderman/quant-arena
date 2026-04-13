@@ -14,7 +14,7 @@ const arenaApp = (coin) => ({
     STARTING_CASH: "50",
     MAX_ROUNDS: "0",
     LATENCY_MS: "50",
-    ROUND_DURATION_MS: "3600000", // 1h rounds — harsher environment
+    ROUND_DURATION_MS: "21600000", // 6h rounds — multi-regime stress test
   },
   exp_backoff_restart_delay: 100,
   log_date_format: "YYYY-MM-DD HH:mm:ss Z",

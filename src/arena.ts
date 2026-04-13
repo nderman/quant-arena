@@ -488,7 +488,18 @@ async function main(): Promise<void> {
       const failed = [fiveMinR, updownR, cryptoR].filter(r => r.status === "rejected") as PromiseRejectedResult[];
       for (const f of failed) console.warn(`[arena] discovery sub-call failed: ${f.reason?.message ?? f.reason}`);
 
-      const all = [...fiveMin, ...updown, ...crypto];
+      // CRITICAL: filter all results by ARENA_COIN before merging. Without
+      // this, SOL arena could pick a BTC market from the updown/crypto
+      // fallback when no SOL 5M markets are available, which causes the
+      // wrong subscription. Slug check matches the per-coin discovery
+      // output format: "{coin}-updown-5m-..." or "{coin}-up-down-...".
+      const coinPrefix = `${CONFIG.ARENA_COIN}-`;
+      const coinFilter = (m: { slug?: string }) =>
+        !!m.slug && m.slug.toLowerCase().startsWith(coinPrefix);
+
+      const filteredUpdown = updown.filter(coinFilter);
+      const filteredCrypto = crypto.filter(coinFilter);
+      const all = [...fiveMin, ...filteredUpdown, ...filteredCrypto];
       all.sort((a, b) => {
         const a5m = a.slug?.includes("-5m-") ? 1 : 0;
         const b5m = b.slug?.includes("-5m-") ? 1 : 0;
