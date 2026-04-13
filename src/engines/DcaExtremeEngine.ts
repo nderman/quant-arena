@@ -31,6 +31,7 @@ export class DcaExtremeEngine extends AbstractEngine {
   private lastCandleKey = "";
 
   onTick(tick: MarketTick, state: EngineState, _signals?: SignalSnapshot): EngineAction[] {
+    this.trackBinance(tick);
     if (tick.source !== "polymarket") return [];
     if (tick.tokenSide !== "UP") return [];
 
@@ -51,6 +52,11 @@ export class DcaExtremeEngine extends AbstractEngine {
 
     if (this.hasPendingOrder()) return [];
     if (this.candleEntries >= this.maxEntriesPerCandle) return [];
+
+    // Regime gate (Apr 13 analysis): inherits bred-4h85's TREND specialty
+    // (+$82/round in TREND vs +$23 in CHOP). Restrict to TREND/SPIKE.
+    const regime = this.currentRegime();
+    if (regime !== "TREND" && regime !== "SPIKE") return [];
 
     const upBook = getBookForToken(upTokenId);
     const downBook = getBookForToken(downTokenId);

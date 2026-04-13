@@ -13,6 +13,9 @@ export class MeanRevertV2Engine extends AbstractEngine {
   private readonly minEdgeAfterFee = 0.005;
 
   onTick(tick: MarketTick, state: EngineState, _signals?: SignalSnapshot): EngineAction[] {
+    // Feed the regime tracker so we can gate entries on currentRegime()
+    this.trackBinance(tick);
+
     if (tick.source !== "polymarket") return [];
 
     const upTokenId = this.getUpTokenId();
@@ -86,6 +89,13 @@ export class MeanRevertV2Engine extends AbstractEngine {
     }
 
     // ── Entry logic ──
+    // Regime gate (Apr 13 analysis): mean-revert wins in CHOP (+$84/round)
+    // and loses in TREND (-$8/round). Restrict entries to CHOP or QUIET.
+    // Exits above remain ungated — if a trending round develops, let
+    // existing positions exit through the normal reversion logic.
+    const regime = this.currentRegime();
+    if (regime !== "CHOP" && regime !== "QUIET") return [];
+
     if (absDeviation < this.entryThreshold) return [];
 
     // Price high → buy DOWN (cheap side). Price low → buy UP (cheap side).

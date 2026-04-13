@@ -26,6 +26,7 @@ export class DcaSettleEngine extends AbstractEngine {
   private enteredSide: "UP" | "DOWN" | null = null;
 
   onTick(tick: MarketTick, state: EngineState, _signals?: SignalSnapshot): EngineAction[] {
+    this.trackBinance(tick);
     if (tick.source !== "polymarket") return [];
 
     const upTokenId = this.getUpTokenId();
@@ -43,6 +44,12 @@ export class DcaSettleEngine extends AbstractEngine {
 
     if (this.hasPendingOrder()) return [];
     if (this.entriesThisCandle >= this.maxEntries) return [];
+
+    // Regime gate (Apr 13 analysis): dca-settle wins in TREND (+$28/round,
+    // +$103/round on SOL TREND specifically) and loses in CHOP (-$38/round).
+    // Restrict entries to TREND or SPIKE.
+    const regime = this.currentRegime();
+    if (regime !== "TREND" && regime !== "SPIKE") return [];
 
     const secsRemaining = this.getSecondsRemaining();
     if (secsRemaining >= 0 && secsRemaining < this.entryWindowEndSec) return [];
