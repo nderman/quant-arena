@@ -638,6 +638,166 @@ console.log("\n=== LiveSizingWrapper ===");
   assert(Math.abs(exp - 7) < 0.001, `exposure: expected $7 ($5 cost + $2 pending), got ${exp}`);
 }
 
+// ── LiveExecutor (async — wrapped in IIFE because CommonJS) ────────────────
+
+import { executeLive, applyFill, type SubmitResult, type OrderSubmitter } from "../live/liveExecutor";
+
+// Build a submitter that records calls and returns instant fills
+function instantFillSubmitter(): { submit: OrderSubmitter; calls: EngineAction[] } {
+  const calls: EngineAction[] = [];
+  const submit: OrderSubmitter = async (action: EngineAction) => {
+    calls.push(action);
+    return {
+      ok: true,
+      clientOrderId: `test-${calls.length}`,
+      filledSize: action.size,
+      avgFillPrice: action.price,
+    } as SubmitResult;
+  };
+  return { submit, calls };
+}
+
+function rejectSubmitter(reason: string): OrderSubmitter {
+  return async () => ({ ok: false, reason });
+}
+
+async function runLiveExecutorTests(): Promise<void> {
+  console.log("\n=== LiveExecutor ===");
+
+// 1. Happy path: BUY is sized, submitted, filled, position updated
+{
+  const live = mkLiveState(500);
+  const { submit, calls } = instantFillSubmitter();
+  const r = await executeLive(
+    "test",
+    { side: "BUY", tokenId: "UP1", price: 0.10, size: 20 }, // $2 sim × 10 = $20
+    live,
+    submit,
+    { simBankrollUsd: 50 },
+  );
+  assert(r.accepted === true, `exec happy: accepted, got ${r.reason}`);
+  assert(calls.length === 1, `exec happy: submitter called once, got ${calls.length}`);
+  assert(calls[0].size === 200, `exec happy: sized to 200 shares, got ${calls[0].size}`);
+  assert(Math.abs(live.cashBalance - (500 - 20)) < 0.01, `exec happy: cash $480, got ${live.cashBalance}`);
+  const pos = live.positions.get("UP1");
+  assert(pos !== undefined && pos.shares === 200, `exec happy: 200 shares in position`);
+  assert(live.pendingOrders.size === 0, `exec happy: pending cleared on fill`);
+}
+
+// 2. Halted: rejected before sizing
+{
+  const live = mkLiveState(500);
+  live.paused = true;
+  live.pauseReason = "test halt";
+  const { submit, calls } = instantFillSubmitter();
+  const r = await executeLive(
+    "test",
+    { side: "BUY", tokenId: "UP1", price: 0.10, size: 20 },
+    live,
+    submit,
+    { simBankrollUsd: 50 },
+  );
+  assert(r.accepted === false, "exec halted: rejected");
+  assert(calls.length === 0, "exec halted: submitter not called");
+  assert(live.cashBalance === 500, "exec halted: cash unchanged");
+}
+
+// 3. Submit rejection: state not mutated
+{
+  const live = mkLiveState(500);
+  const submit = rejectSubmitter("CLOB 429");
+  const r = await executeLive(
+    "test",
+    { side: "BUY", tokenId: "UP1", price: 0.10, size: 20 },
+    live,
+    submit,
+    { simBankrollUsd: 50 },
+  );
+  assert(r.accepted === false, "exec submit reject: rejected");
+  assert(r.reason?.includes("CLOB 429") === true, `exec submit reject: reason includes 429, got ${r.reason}`);
+  assert(live.cashBalance === 500, "exec submit reject: cash unchanged");
+  assert(live.positions.size === 0, "exec submit reject: no position");
+}
+
+// 4. HOLD passes through without submission
+{
+  const live = mkLiveState(500);
+  const { submit, calls } = instantFillSubmitter();
+  const r = await executeLive(
+    "test",
+    { side: "HOLD", tokenId: "", price: 0, size: 0 },
+    live,
+    submit,
+    { simBankrollUsd: 50 },
+  );
+  assert(r.accepted === true, "exec HOLD: accepted");
+  assert(calls.length === 0, "exec HOLD: not submitted");
+}
+
+// 5. Min order floor rejects without submitting
+{
+  const live = mkLiveState(5); // tiny bankroll
+  const { submit, calls } = instantFillSubmitter();
+  const r = await executeLive(
+    "test",
+    { side: "BUY", tokenId: "UP1", price: 0.10, size: 1 },
+    live,
+    submit,
+    { simBankrollUsd: 50 },
+  );
+  assert(r.accepted === false, "exec min order: rejected");
+  assert(calls.length === 0, "exec min order: not submitted");
+  assert(r.reason?.includes("min") === true, `exec min order: reason mentions min, got ${r.reason}`);
+}
+
+// 6. applyFill: SELL reduces position and credits cash
+{
+  const live = mkLiveState(500);
+  live.positions.set("UP1", { tokenId: "UP1", side: "YES", shares: 100, avgEntry: 0.10, costBasis: 10 });
+  live.cashBalance = 490;
+  applyFill(
+    live,
+    { side: "SELL", tokenId: "UP1", price: 0.15, size: 60 },
+    { filledSize: 60, avgFillPrice: 0.15 },
+  );
+  const pos = live.positions.get("UP1")!;
+  assert(pos.shares === 40, `applyFill SELL: 40 shares, got ${pos.shares}`);
+  assert(Math.abs(live.cashBalance - (490 + 9)) < 0.01, `applyFill SELL: cash $499, got ${live.cashBalance}`);
+  // Cost basis should be reduced proportionally: 40/100 × $10 = $4
+  assert(Math.abs(pos.costBasis - 4) < 0.01, `applyFill SELL: basis $4, got ${pos.costBasis}`);
+}
+
+// 7. applyFill: BUY adds to existing position (weighted avg)
+{
+  const live = mkLiveState(500);
+  live.positions.set("UP1", { tokenId: "UP1", side: "YES", shares: 100, avgEntry: 0.10, costBasis: 10 });
+  applyFill(
+    live,
+    { side: "BUY", tokenId: "UP1", price: 0.20, size: 100 },
+    { filledSize: 100, avgFillPrice: 0.20 },
+  );
+  const pos = live.positions.get("UP1")!;
+  assert(pos.shares === 200, `applyFill BUY: 200 shares, got ${pos.shares}`);
+  assert(Math.abs(pos.costBasis - 30) < 0.01, `applyFill BUY: basis $30, got ${pos.costBasis}`);
+  assert(Math.abs(pos.avgEntry - 0.15) < 0.01, `applyFill BUY: avg 0.15, got ${pos.avgEntry}`);
+}
+
+// 8. positionSide: BUY DOWN via executor records correct side
+{
+  const live = mkLiveState(500);
+  const { submit } = instantFillSubmitter();
+  await executeLive(
+    "test",
+    { side: "BUY", tokenId: "DOWN1", price: 0.10, size: 20 },
+    live,
+    submit,
+    { simBankrollUsd: 50, positionSide: "NO" },
+  );
+  const pos = live.positions.get("DOWN1");
+  assert(pos !== undefined && pos.side === "NO", `positionSide: expected NO, got ${pos?.side}`);
+}
+} // end runLiveExecutorTests
+
 // ── Fee Gradient (the quartic curve) ─────────────────────────────────────────
 
 console.log("\n=== Fee Gradient (Quartic Curve) ===");
@@ -651,10 +811,17 @@ for (const p of [0.01, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.9
 
 // ── Summary ──────────────────────────────────────────────────────────────────
 
-console.log(`\n${"=".repeat(40)}`);
-console.log(`Tests: ${passed} passed, ${failed} failed`);
-if (failed > 0) {
-  process.exit(1);
-} else {
-  console.log("All tests passed ✓");
-}
+runLiveExecutorTests()
+  .then(() => {
+    console.log(`\n${"=".repeat(40)}`);
+    console.log(`Tests: ${passed} passed, ${failed} failed`);
+    if (failed > 0) {
+      process.exit(1);
+    } else {
+      console.log("All tests passed ✓");
+    }
+  })
+  .catch((err) => {
+    console.error("Test runner error:", err);
+    process.exit(1);
+  });
