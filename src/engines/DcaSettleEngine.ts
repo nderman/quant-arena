@@ -47,9 +47,9 @@ export class DcaSettleEngine extends AbstractEngine {
 
     // Regime gate (Apr 13 analysis): dca-settle wins in TREND (+$28/round,
     // +$103/round on SOL TREND specifically) and loses in CHOP (-$38/round).
-    // Stable variant with 30s hysteresis + 90s lookback — moderate
-    // reactivity since DCA wants to catch trends as they form.
-    const regime = this.currentRegimeStable(30_000, 90);
+    // Lookback 600s (10 min) to catch slow macro trends. 30s hysteresis
+    // keeps reactivity quick enough to catch trends as they form.
+    const regime = this.currentRegimeStable(30_000, 600);
     if (regime !== "TREND" && regime !== "SPIKE") return [];
 
     const secsRemaining = this.getSecondsRemaining();

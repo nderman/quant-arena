@@ -91,10 +91,11 @@ export class MeanRevertV2Engine extends AbstractEngine {
     // ── Entry logic ──
     // Regime gate (Apr 13 analysis): mean-revert wins in CHOP (+$84/round)
     // and loses in TREND (-$8/round). Restrict entries to CHOP or QUIET.
-    // Stable variant with 60s hysteresis + 120s lookback — slow conviction.
+    // Lookback 600s (10 min) to capture slow drifts that look like CHOP
+    // on 60s windows. Hysteresis 60s to avoid flipping on noise.
     // Exits above remain ungated — if a trending round develops, let
     // existing positions exit through the normal reversion logic.
-    const regime = this.currentRegimeStable(60_000, 120);
+    const regime = this.currentRegimeStable(60_000, 600);
     if (regime !== "CHOP" && regime !== "QUIET") return [];
 
     if (absDeviation < this.entryThreshold) return [];

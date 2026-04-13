@@ -55,8 +55,10 @@ export class DcaExtremeEngine extends AbstractEngine {
 
     // Regime gate (Apr 13 analysis): inherits bred-4h85's TREND specialty
     // (+$82/round in TREND vs +$23 in CHOP). Restrict to TREND/SPIKE.
-    // Same hysteresis as dca-settle — 30s hold, 90s lookback.
-    const regime = this.currentRegimeStable(30_000, 90);
+    // 600s lookback to capture slow macro drifts that look like CHOP on
+    // 60s windows. bred-4h85 (ungated) showed this round traded like
+    // TREND at the round scale despite CHOP-ish micro windows.
+    const regime = this.currentRegimeStable(30_000, 600);
     if (regime !== "TREND" && regime !== "SPIKE") return [];
 
     const upBook = getBookForToken(upTokenId);

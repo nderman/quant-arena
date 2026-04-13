@@ -140,7 +140,9 @@ export abstract class AbstractEngine implements IBaseEngine {
   // the start of onTick() (before the source filter) to enable.
 
   private _binancePrices: { price: number; time: number }[] = [];
-  private readonly _binanceMaxSamples = 120; // ~2 minutes @ 1 sample/sec
+  private readonly _binanceMaxSamples = 900; // ~15 minutes @ 1 sample/sec
+  // Rationale: the regime gates use lookbacks up to 600s (10 min) to catch
+  // slow drifts that 60s windows miss. 900 samples gives headroom.
 
   /**
    * Call from onTick() before your source filter. Records Binance ticks
