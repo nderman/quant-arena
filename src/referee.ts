@@ -12,6 +12,7 @@
 
 import { CONFIG } from "./config";
 import { getBookForToken, getBinanceVolumeSpike, pulseEvents } from "./pulse";
+import { random } from "./rng";
 import type {
   EngineAction,
   FillResult,
@@ -110,7 +111,7 @@ export function shouldRejectStaleSnipe(book: OrderBook, isMaker: boolean): boole
   // At default 0.10/bps × 5bps = 0.50; × 10bps = 1.0 → capped to 0.95.
   const momentumBps = recentMomentum * 10_000;
   const cancelProb = Math.min(CONFIG.SNIPE_CANCEL_PROB_MAX, momentumBps * CONFIG.SNIPE_CANCEL_PROB_PER_BPS);
-  return Math.random() < cancelProb;
+  return random() < cancelProb;
 }
 
 /**
@@ -148,7 +149,7 @@ export function shouldRejectCompetingTaker(
   const priceFactor = (CONFIG.COMPETE_MAX_PRICE - price) / CONFIG.COMPETE_MAX_PRICE;
   const sizeFactor = Math.min(1, size / CONFIG.COMPETE_SIZE_CAP);
   const prob = priceFactor * sizeFactor * CONFIG.COMPETE_PROB_MAX;
-  return Math.random() < prob;
+  return random() < prob;
 }
 
 /** Build a "not filled" FillResult for the rejection paths. */
@@ -446,7 +447,7 @@ function simulateToxicFlow(
   else if (volSpike > 2) toxicProb = Math.min(0.95, toxicProb + 0.20);
   else if (volSpike > 1.5) toxicProb = Math.min(0.95, toxicProb + 0.10);
 
-  if (Math.random() > toxicProb) {
+  if (random() > toxicProb) {
     return { adjustedPrice: action.price, toxicHit: false, slippage: 0 };
   }
 
@@ -719,7 +720,7 @@ async function processActionNoLatency(
     } else {
       fillProb = Math.max(0.05, Math.min(0.95, fillProb + adjustment)); // price up → asks more likely
     }
-    if (Math.random() > fillProb) {
+    if (random() > fillProb) {
       return {
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,

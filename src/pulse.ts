@@ -11,6 +11,7 @@
 import WebSocket from "ws";
 import { EventEmitter } from "events";
 import { CONFIG } from "./config";
+import { random } from "./rng";
 import type { MarketTick, L2Level, OrderBook } from "./types";
 
 // ── Event Bus ────────────────────────────────────────────────────────────────
@@ -500,23 +501,23 @@ export function startSimulatedPulse(opts: {
 
   simInterval = setInterval(() => {
     // Random walk
-    const move = (Math.random() - 0.5) * 2 * volatility;
+    const move = (random() - 0.5) * 2 * volatility;
     price = Math.max(0.01, Math.min(0.99, price + move));
 
-    const spread = 0.01 + Math.random() * 0.02;
+    const spread = 0.01 + random() * 0.02;
     const bestBid = price - spread / 2;
     const bestAsk = price + spread / 2;
 
     const book: OrderBook = {
       bids: [
-        { price: bestBid, size: 100 + Math.random() * 500 },
-        { price: bestBid - 0.01, size: 200 + Math.random() * 800 },
-        { price: bestBid - 0.02, size: 300 + Math.random() * 1000 },
+        { price: bestBid, size: 100 + random() * 500 },
+        { price: bestBid - 0.01, size: 200 + random() * 800 },
+        { price: bestBid - 0.02, size: 300 + random() * 1000 },
       ],
       asks: [
-        { price: bestAsk, size: 100 + Math.random() * 500 },
-        { price: bestAsk + 0.01, size: 200 + Math.random() * 800 },
-        { price: bestAsk + 0.02, size: 300 + Math.random() * 1000 },
+        { price: bestAsk, size: 100 + random() * 500 },
+        { price: bestAsk + 0.01, size: 200 + random() * 800 },
+        { price: bestAsk + 0.02, size: 300 + random() * 1000 },
       ],
       timestamp: Date.now(),
     };

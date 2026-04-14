@@ -362,6 +362,83 @@ console.log("\n=== Competing Taker Guard ===");
   console.log(`  cheap+small: ~${(rate * 100).toFixed(1)}% rejection (target 3.75%) ✓`);
 }
 
+// ── Seeded RNG (task #28) ──────────────────────────────────────────────────
+
+console.log("\n=== Seeded RNG ===");
+
+import { seedRng, random as rngRandom, isSeeded, _resetForTest } from "../rng";
+
+// Reproducibility: same seed → identical sequence
+{
+  seedRng(42);
+  const seq1 = [rngRandom(), rngRandom(), rngRandom(), rngRandom(), rngRandom()];
+  seedRng(42);
+  const seq2 = [rngRandom(), rngRandom(), rngRandom(), rngRandom(), rngRandom()];
+  for (let i = 0; i < seq1.length; i++) {
+    assert(seq1[i] === seq2[i],
+      `seed 42 should be reproducible at index ${i}: ${seq1[i]} vs ${seq2[i]}`);
+  }
+  console.log("  seed 42 produces identical sequence ✓");
+}
+
+// Different seeds produce different sequences
+{
+  seedRng(42);
+  const a = rngRandom();
+  seedRng(43);
+  const b = rngRandom();
+  assert(a !== b, "seeds 42 and 43 should produce different first values");
+  console.log("  different seeds → different sequences ✓");
+}
+
+// Range: every output is in [0, 1)
+{
+  seedRng(1234);
+  let allInRange = true;
+  let badValue = 0;
+  for (let i = 0; i < 1000; i++) {
+    const x = rngRandom();
+    if (x < 0 || x >= 1) { allInRange = false; badValue = x; break; }
+  }
+  assert(allInRange, `RNG out of range over 1000 samples: ${badValue}`);
+  console.log("  1000 samples all in [0, 1) ✓");
+}
+
+// Distribution sanity: mean of 10k samples ≈ 0.5
+{
+  seedRng(7777);
+  let sum = 0;
+  const n = 10_000;
+  for (let i = 0; i < n; i++) sum += rngRandom();
+  const mean = sum / n;
+  assert(Math.abs(mean - 0.5) < 0.02, `mean drift ${mean.toFixed(4)} far from 0.5`);
+  console.log(`  10k mean = ${mean.toFixed(4)} (target 0.5) ✓`);
+}
+
+// Unseeded → falls back to Math.random (no determinism)
+{
+  _resetForTest();
+  assert(isSeeded() === false, "after reset, isSeeded should be false");
+  // Just verify it returns a valid number
+  const x = rngRandom();
+  assert(x >= 0 && x < 1, `unseeded RNG out of range: ${x}`);
+  console.log("  unseeded falls back to Math.random ✓");
+}
+
+// End-to-end: seeded shouldRejectCompetingTaker is reproducible
+{
+  seedRng(99);
+  const run1: boolean[] = [];
+  for (let i = 0; i < 50; i++) run1.push(shouldRejectCompetingTaker(0.05, 50, false));
+  seedRng(99);
+  const run2: boolean[] = [];
+  for (let i = 0; i < 50; i++) run2.push(shouldRejectCompetingTaker(0.05, 50, false));
+  for (let i = 0; i < run1.length; i++) {
+    assert(run1[i] === run2[i], `competing-taker reproducibility broke at ${i}`);
+  }
+  console.log("  shouldRejectCompetingTaker reproduces under seed ✓");
+}
+
 // ── Rejection reason codes (task #24) — async, awaited from orchestrator ──
 
 async function runRejectionReasonTests(): Promise<void> {

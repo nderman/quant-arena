@@ -94,6 +94,13 @@ export const CONFIG = {
 
   // ── Sanity / phantom alpha ────────────────────────────────────────────────
   PHANTOM_PNL_MULTIPLIER: num("PHANTOM_PNL_MULTIPLIER", 10),  // round PnL > STARTING_CASH × this is flagged as likely sim bug
+
+  // ── Determinism ──────────────────────────────────────────────────────────
+  // Seed for the referee + sim-pulse RNG. 0 (default) keeps non-deterministic
+  // Math.random behavior. Set a non-zero integer to replay a run exactly —
+  // useful for debugging odd rejection patterns or post-hoc rejection-reason
+  // analysis. Engines that use their own Math.random aren't affected.
+  RNG_SEED:               num("RNG_SEED", 0),
   DUAL_BOOK_MIN_SUM:      num("DUAL_BOOK_MIN_SUM", 0.95),    // UP_ask + DOWN_ask must be ≥ this; lower means stale/corrupt book data. Real PM arbitrageurs keep sums > 0.97; anything below 0.95 is structurally impossible
 
   // ── Snipe-stale-makers cancellation model ─────────────────────────────────

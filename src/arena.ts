@@ -23,6 +23,7 @@ import { fetchSignalSnapshot } from "./signals";
 import { discoverCryptoMarkets, discoverUpDownMarkets, discover5mMarkets } from "./discovery";
 import { pollAndSettle } from "./settlement";
 import { startChainlinkPoller } from "./chainlink";
+import { seedRng, random } from "./rng";
 import type {
   BaseEngine,
   EngineAction,
@@ -466,6 +467,14 @@ async function main(): Promise<void> {
 ╚═══════════════════════════════════════════════════════╝
 `);
 
+  // Determinism: seed referee + sim-pulse RNG if RNG_SEED is set. 0 keeps
+  // production non-determinism; non-zero replays exactly. Engines that use
+  // their own Math.random aren't affected.
+  if (CONFIG.RNG_SEED !== 0) {
+    seedRng(CONFIG.RNG_SEED);
+    console.log(`[arena] RNG seeded with ${CONFIG.RNG_SEED} — run is deterministic`);
+  }
+
   // Load engines
   const engines = loadEngines();
   if (engines.length === 0) {
@@ -553,7 +562,7 @@ async function main(): Promise<void> {
   if (CONFIG.DRY_RUN) {
     console.log("[arena] DRY_RUN — using simulated pulse");
     startSimulatedPulse({
-      startPrice: 0.50 + (Math.random() - 0.5) * 0.4,
+      startPrice: 0.50 + (random() - 0.5) * 0.4,
       volatility: 0.008,
       intervalMs: CONFIG.TICK_INTERVAL_MS,
     });
