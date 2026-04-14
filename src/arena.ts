@@ -149,6 +149,57 @@ function loadEngines(): BaseEngine[] {
   return engines;
 }
 
+/**
+ * Purge Node's require cache for every engine file so the next loadEngines()
+ * picks up fresh code. Called by the reload-flag handler in the main loop —
+ * lets the surgical engine-only deploy script ship new engines without a
+ * full pm2 restart (which would wipe in-flight positions).
+ */
+function clearEngineRequireCache(): void {
+  const builtinDir = path.resolve(__dirname, "engines");
+  const userDir = path.resolve(CONFIG.ENGINES_DIR);
+  for (const cachedKey of Object.keys(require.cache)) {
+    if (cachedKey.startsWith(builtinDir) || cachedKey.startsWith(userDir)) {
+      delete require.cache[cachedKey];
+    }
+  }
+}
+
+/**
+ * Path to the engine-reload flag for this coin. Touched by deploy-engines.sh
+ * after a successful rsync; checked at every round boundary. Per-coin so a
+ * BTC-only engine deploy doesn't disrupt the ETH/SOL arenas.
+ */
+function reloadFlagPath(): string {
+  return path.resolve("data", `reload_engines_${CONFIG.ARENA_COIN}.flag`);
+}
+
+/**
+ * Check the reload flag and rebuild the engine roster if present. Returns
+ * the (possibly new) engines array. Safe to call between rounds — it
+ * doesn't touch in-flight position state because positions live in
+ * EngineState (held by the round loop), not on the engine instances.
+ */
+function maybeReloadEngines(current: BaseEngine[]): BaseEngine[] {
+  const flag = reloadFlagPath();
+  if (!fs.existsSync(flag)) return current;
+  console.log(`[arena] Engine reload flag detected at ${flag} — rebuilding roster`);
+  try {
+    clearEngineRequireCache();
+    const fresh = loadEngines();
+    fs.unlinkSync(flag);
+    if (fresh.length === 0) {
+      console.error("[arena] Reload produced 0 engines — keeping previous roster");
+      return current;
+    }
+    console.log(`[arena] Reload complete: ${fresh.length} engines (was ${current.length})`);
+    return fresh;
+  } catch (err: any) {
+    console.error("[arena] Engine reload failed, keeping previous roster:", err.message);
+    return current;
+  }
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 function slugToBinanceSymbol(slug: string): string {
@@ -475,8 +526,9 @@ async function main(): Promise<void> {
     console.log(`[arena] RNG seeded with ${CONFIG.RNG_SEED} — run is deterministic`);
   }
 
-  // Load engines
-  const engines = loadEngines();
+  // Load engines (mutable — surgical deploy can swap the roster between
+  // rounds via the reload flag, see maybeReloadEngines)
+  let engines = loadEngines();
   if (engines.length === 0) {
     console.error("[arena] No engines found. Add engines to src/engines/ or set ENGINES_DIR.");
     process.exit(1);
@@ -624,6 +676,12 @@ async function main(): Promise<void> {
       console.log(`[arena] Max rounds (${maxRounds}) reached. Stopping.`);
       break;
     }
+
+    // Surgical engine-only deploy: check the reload flag at every round
+    // boundary and rebuild the roster if a new engine was just rsynced in.
+    // Position state lives in EngineState (per-round), not on engine
+    // instances, so rebuilding here is safe — no in-flight positions lost.
+    engines = maybeReloadEngines(engines);
 
     const roundId = `R${String(roundNum).padStart(4, "0")}-${Date.now()}`;
 
