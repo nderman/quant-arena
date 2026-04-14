@@ -118,7 +118,7 @@ function readBaseEngine(): string {
 
 function readExampleEngine(): string {
   // Try multiple examples in order — any might be pruned
-  const candidates = ["FadeV3Engine.ts", "FadeV2Engine.ts", "MeanRevertV2Engine.ts", "EdgeSniperEngine.ts"];
+  const candidates = ["DcaExtremeEngine.ts", "Stingo43Engine.ts", "FadeV3Engine.ts", "BaseEngine.ts"];
   for (const name of candidates) {
     try {
       return fs.readFileSync(path.join(ENGINES_DIR, name), "utf-8");

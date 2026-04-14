@@ -57,13 +57,10 @@ export class DcaExtremeEngine extends AbstractEngine {
     if (this.hasPendingOrder()) return [];
     if (this.candleEntries >= this.maxEntriesPerCandle) return [];
 
-    // Regime gate (Apr 13 analysis): inherits bred-4h85's TREND specialty
-    // (+$82/round in TREND vs +$23 in CHOP). Restrict to TREND/SPIKE.
-    // 600s lookback to capture slow macro drifts that look like CHOP on
-    // 60s windows. bred-4h85 (ungated) showed this round traded like
-    // TREND at the round scale despite CHOP-ish micro windows.
-    const regime = this.currentRegimeStable(30_000, 600);
-    if (regime !== "TREND" && regime !== "SPIKE") return [];
+    // No regime gate: Apr 14 engineRegimeReport showed bred-4h85 wins in
+    // BOTH CHOP (+$17/round) and TREND (+$83/round). The earlier TREND
+    // gate was fit on 3-round data and gated out profitable CHOP trades.
+    // The strategy's edge is in asymmetric price payoff, not direction.
 
     const upBook = getBookForToken(upTokenId);
     const downBook = getBookForToken(downTokenId);
