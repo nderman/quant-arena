@@ -9,10 +9,13 @@ Evolutionary arena for Polymarket 5M crypto binary markets. AI-bred engines comp
 - `npm run arena:dry` — simulated data, no APIs
 - `npm run arena:live` — live PM + Binance data (auto-discovers markets)
 - `npm run arena:1round:dry` — quick test (1 min round)
-- `npm run test:unit` — 49 tests, must all pass
+- `npm run test:unit` — 200 tests, must all pass
 - `npm run build` — TypeScript compile
 - `npm run discover` — list active crypto markets
 - `npm run signals` — test all signal sources
+- `python3 scripts/engineSelectivity.py` — selectivity-aware leaderboard (mean PnL per firing round, firing win rate)
+- `python3 scripts/engineCompare.py --prefix dca-` — head-to-head engine A/B comparison
+- `python3 scripts/engineRegimeReport.py` — engine PnL cross-tabulated by regime
 
 ## Architecture
 - `src/arena.ts` — main loop, loads engines, runs rounds
@@ -67,11 +70,15 @@ fee = amount × 0.25 × (P × (1 − P))²
 
 ## Deploy
 ```bash
-bash scripts/deploy.sh  # rsync to VPS, rebuild, PM2 restart
+bash scripts/deploy.sh           # full deploy: rsync, rebuild, PM2 restart (kills in-flight rounds)
+bash scripts/deploy-engines.sh   # surgical: rsync only src/engines/, no PM2 restart
+bash scripts/deploy-engines.sh btc  # only one coin
 ```
 - VPS: 165.22.29.245 (DigitalOcean)
 - PM2 processes (7 total): `quant-arena-{btc,eth,sol}`, `quant-breeder-{btc,eth,sol}`, `quant-telegram`
 - Deploy excludes BredEngine_* files and `data/` (preserved on VPS)
+- **Use deploy-engines.sh for hand-built engine adds/edits/deletes** — it touches a per-coin reload flag that arena.ts picks up at the next round boundary, swapping the engine roster without disrupting the round. Position state lives per-round in EngineState so swapping instances is safe.
+- **Use full deploy.sh** for arena.ts / referee.ts / pulse.ts changes — those don't go through the require-cache reload path and need a real restart.
 
 ## Config
 All via environment variables. Key:

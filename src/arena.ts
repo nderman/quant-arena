@@ -169,8 +169,10 @@ function clearEngineRequireCache(): void {
  * Path to the engine-reload flag for this coin. Touched by deploy-engines.sh
  * after a successful rsync; checked at every round boundary. Per-coin so a
  * BTC-only engine deploy doesn't disrupt the ETH/SOL arenas.
+ *
+ * Exported for unit tests.
  */
-function reloadFlagPath(): string {
+export function reloadFlagPath(): string {
   return path.resolve("data", `reload_engines_${CONFIG.ARENA_COIN}.flag`);
 }
 
@@ -179,8 +181,10 @@ function reloadFlagPath(): string {
  * the (possibly new) engines array. Safe to call between rounds — it
  * doesn't touch in-flight position state because positions live in
  * EngineState (held by the round loop), not on the engine instances.
+ *
+ * Exported for unit tests.
  */
-function maybeReloadEngines(current: BaseEngine[]): BaseEngine[] {
+export function maybeReloadEngines(current: BaseEngine[]): BaseEngine[] {
   const flag = reloadFlagPath();
   if (!fs.existsSync(flag)) return current;
   console.log(`[arena] Engine reload flag detected at ${flag} — rebuilding roster`);
@@ -721,8 +725,13 @@ process.on("SIGINT", () => { console.log("\n[arena] SIGINT received"); gracefulS
 process.on("SIGTERM", () => { console.log("\n[arena] SIGTERM received"); gracefulShutdown(); });
 
 // ── Entry Point ──────────────────────────────────────────────────────────────
+// Guard against accidental auto-start when arena.ts is imported by something
+// other than the CLI (e.g. unit tests importing reloadFlagPath / maybeReloadEngines).
+// Only run main() when this module IS the entry point.
 
-main().catch(err => {
-  console.error("[arena] Fatal error:", err);
-  gracefulShutdown(1);
-});
+if (require.main === module) {
+  main().catch(err => {
+    console.error("[arena] Fatal error:", err);
+    gracefulShutdown(1);
+  });
+}

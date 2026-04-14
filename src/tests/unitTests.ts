@@ -362,6 +362,33 @@ console.log("\n=== Competing Taker Guard ===");
   console.log(`  cheap+small: ~${(rate * 100).toFixed(1)}% rejection (target 3.75%) ✓`);
 }
 
+// ── Engine reload mechanism (surgical deploy) ──────────────────────────────
+
+console.log("\n=== Engine Reload Mechanism ===");
+
+import { reloadFlagPath, maybeReloadEngines } from "../arena";
+import * as fsRT from "fs";
+import type { BaseEngine } from "../types";
+
+// reloadFlagPath is per-coin and lives under data/
+{
+  const p = reloadFlagPath();
+  assert(p.endsWith(".flag"), `flag path should end .flag, got ${p}`);
+  assert(p.includes("reload_engines_"), `flag path should include prefix, got ${p}`);
+  assert(p.includes("data"), `flag path should be under data/, got ${p}`);
+  console.log(`  reloadFlagPath ends with .flag and includes coin ✓`);
+}
+
+// No flag present → maybeReloadEngines returns the same array (no-op)
+{
+  const flag = reloadFlagPath();
+  if (fsRT.existsSync(flag)) fsRT.unlinkSync(flag); // ensure clean state
+  const fakeEngines = [{ id: "fake", name: "Fake", version: "1.0.0" } as unknown as BaseEngine];
+  const result = maybeReloadEngines(fakeEngines);
+  assert(result === fakeEngines, "no flag → returns same array reference");
+  console.log("  no flag: maybeReloadEngines is a no-op ✓");
+}
+
 // ── Seeded RNG (task #28) ──────────────────────────────────────────────────
 
 console.log("\n=== Seeded RNG ===");
