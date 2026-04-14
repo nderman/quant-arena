@@ -4,7 +4,7 @@
  * Core validation for the referee's quartic fee model, toxic flow, and engine interface.
  */
 
-import { calculateFee, calculateMergeFee, calculateFeeAdjustedEdge, cheaperExit, walkBook, isBookTradeable, shouldRejectStaleSnipe } from "../referee";
+import { calculateFee, calculateMergeFee, calculateFeeAdjustedEdge, cheaperExit, walkBook, isBookTradeable, shouldRejectStaleSnipe, shouldRejectCompetingTaker } from "../referee";
 import { parsePmL2, isBookUpdateReasonable } from "../pulse";
 import type { OrderBook } from "../types";
 
@@ -308,6 +308,59 @@ console.log("\n=== Stale-Book Snipe Guard ===");
 // (Note: testing the actual rejection-on-stale-book path requires manipulating
 //  binanceMoveHistory which is module-private. The integration of this guard
 //  is verified via the BUY/SELL path tests + manual observation post-deploy.)
+
+// ── shouldRejectCompetingTaker: visible-cheap-price competition ────────────
+
+console.log("\n=== Competing Taker Guard ===");
+
+// Prices at or above MAX_PRICE (0.20) → never rejected (no visible asymmetric payoff)
+{
+  let rejects = 0;
+  for (let i = 0; i < 1000; i++) {
+    if (shouldRejectCompetingTaker(0.20, 50, false)) rejects++;
+    if (shouldRejectCompetingTaker(0.50, 50, false)) rejects++;
+    if (shouldRejectCompetingTaker(0.95, 50, false)) rejects++;
+  }
+  assert(rejects === 0, `price >= MAX should never reject, got ${rejects}`);
+  console.log("  Mid/high prices: never rejected ✓");
+}
+
+// Maker orders → never rejected
+{
+  let rejects = 0;
+  for (let i = 0; i < 1000; i++) {
+    if (shouldRejectCompetingTaker(0.05, 50, true)) rejects++;
+  }
+  assert(rejects === 0, `maker should never reject, got ${rejects}`);
+  console.log("  Makers: never rejected ✓");
+}
+
+// Rejection rate at cheap price + full size should be near the expected 37.5%
+// (price=0.05 → priceFactor=0.75, size=50 → sizeFactor=1.0, cap=0.50)
+{
+  let rejects = 0;
+  const n = 10_000;
+  for (let i = 0; i < n; i++) {
+    if (shouldRejectCompetingTaker(0.05, 50, false)) rejects++;
+  }
+  const rate = rejects / n;
+  const expected = 0.375;
+  assert(Math.abs(rate - expected) < 0.02, `expected ~37.5%, got ${(rate * 100).toFixed(1)}%`);
+  console.log(`  cheap+large: ~${(rate * 100).toFixed(1)}% rejection (target 37.5%) ✓`);
+}
+
+// Small orders at cheap prices face much less competition
+{
+  let rejects = 0;
+  const n = 10_000;
+  for (let i = 0; i < n; i++) {
+    if (shouldRejectCompetingTaker(0.05, 5, false)) rejects++;
+  }
+  const rate = rejects / n;
+  // 0.75 × 0.10 × 0.50 = 0.0375
+  assert(rate < 0.06, `small orders should be rarely rejected, got ${(rate * 100).toFixed(1)}%`);
+  console.log(`  cheap+small: ~${(rate * 100).toFixed(1)}% rejection (target 3.75%) ✓`);
+}
 
 // ── parsePmL2: validate + filter PM book quotes ─────────────────────────────
 

@@ -112,6 +112,44 @@ export function shouldRejectStaleSnipe(book: OrderBook, isMaker: boolean): boole
   return Math.random() < cancelProb;
 }
 
+/**
+ * Returns true if the taker order should be rejected because competing
+ * real-world takers raced us to visibly cheap liquidity. Complements
+ * `shouldRejectStaleSnipe` (which models MMs pulling quotes on Binance
+ * moves) — this one models other humans/bots seeing the same obvious
+ * opportunity we do.
+ *
+ * Model:
+ *   1. Only fires for taker BUYs below COMPETE_MAX_PRICE (default 20¢) —
+ *      the extreme-underdog zone where asymmetric payoff is publicly
+ *      visible on PM's leaderboard and price history.
+ *   2. Cheaper price = more obvious opportunity = more competition.
+ *      Linear scale from MAX_PRICE→0 to 0→COMPETE_PROB_MAX.
+ *   3. Larger size = higher collision probability with racing takers.
+ *      Linear scale from 0→SIZE_CAP, clipped to [0,1].
+ *   4. Final prob = priceFactor × sizeFactor × PROB_MAX.
+ *
+ * Examples at default config (MAX_PRICE=0.20, PROB_MAX=0.50, SIZE_CAP=50):
+ *   price=0.05, size=50 → 0.75 × 1.00 × 0.50 = 37.5%
+ *   price=0.05, size=10 → 0.75 × 0.20 × 0.50 = 7.5%
+ *   price=0.15, size=50 → 0.25 × 1.00 × 0.50 = 12.5%
+ *   price=0.25, size=50 → 0 (above max — no competition)
+ */
+export function shouldRejectCompetingTaker(
+  price: number,
+  size: number,
+  isMaker: boolean,
+): boolean {
+  if (!CONFIG.COMPETE_ENABLED) return false;
+  if (isMaker) return false; // makers post liquidity, aren't racing
+  if (price <= 0 || price >= CONFIG.COMPETE_MAX_PRICE) return false;
+
+  const priceFactor = (CONFIG.COMPETE_MAX_PRICE - price) / CONFIG.COMPETE_MAX_PRICE;
+  const sizeFactor = Math.min(1, size / CONFIG.COMPETE_SIZE_CAP);
+  const prob = priceFactor * sizeFactor * CONFIG.COMPETE_PROB_MAX;
+  return Math.random() < prob;
+}
+
 /** Build a "not filled" FillResult for the rejection paths. */
 function makeRejectedFill(action: EngineAction, latencyMs: number, orderType: "maker" | "taker" = "taker"): FillResult {
   return {
@@ -724,6 +762,15 @@ async function processActionNoLatency(
     // approximates: if Binance has moved meaningfully recently AND the book
     // hasn't been refreshed since, reject the taker fill (modeling MM cancel).
     if (shouldRejectStaleSnipe(tokenBook, isMaker)) {
+      return makeRejectedFill(action, actualLatency);
+    }
+
+    // Competing-taker guard. When the price is visibly cheap, real-world
+    // takers (humans + bots) race us for the same liquidity. The cheaper
+    // the price, the more obvious the asymmetric-payoff opportunity, the
+    // more competition. Fires in calm markets — complements stale-snipe.
+    const takerRefPrice = action.price > 0 ? action.price : (tokenBook.asks[0]?.price ?? 0);
+    if (shouldRejectCompetingTaker(takerRefPrice, action.size, isMaker)) {
       return makeRejectedFill(action, actualLatency);
     }
 

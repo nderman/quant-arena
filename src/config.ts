@@ -103,6 +103,18 @@ export const CONFIG = {
   SNIPE_CANCEL_PROB_PER_BPS: num("SNIPE_CANCEL_PROB_PER_BPS", 0.10), // each bps of momentum adds 10% cancellation probability
   SNIPE_CANCEL_PROB_MAX:    num("SNIPE_CANCEL_PROB_MAX", 0.95),      // hard cap on rejection probability
 
+  // ── Competing-taker model ────────────────────────────────────────────────
+  // When a PM price is visibly cheap (extreme underdog), the opportunity is
+  // public — real-world takers racing us for the same liquidity is a real
+  // hit to our fill rate that the Binance-correlated snipe model doesn't
+  // capture. This fires even in calm markets, scales with how obviously
+  // asymmetric the payoff is, and is independent of toxic flow (which models
+  // HFT front-running post-fill, not pre-fill competition).
+  COMPETE_ENABLED:           bool("COMPETE_ENABLED", true),
+  COMPETE_MAX_PRICE:         num("COMPETE_MAX_PRICE", 0.20),          // only prices below this attract taker competition
+  COMPETE_PROB_MAX:          num("COMPETE_PROB_MAX", 0.50),           // hard cap on rejection probability (50%)
+  COMPETE_SIZE_CAP:          num("COMPETE_SIZE_CAP", 50),             // orders >= this size face full size-penalty
+
   // ── PM book validation ────────────────────────────────────────────────────
   PM_PRICE_MIN:              num("PM_PRICE_MIN", 0.005),              // floor for any tradeable PM price
   PM_PRICE_MAX:              num("PM_PRICE_MAX", 0.995),              // ceiling for any tradeable PM price
