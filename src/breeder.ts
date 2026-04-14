@@ -193,7 +193,15 @@ ${trades}
 ## Metrics In The Data
 - **sharpeRatio** (allResults): profit-to-costs ratio — risk-adjusted return proxy.
 - **toxic_flow %** (toxic summary): share of fills where Binance moved against the engine during execution. Signal of adverse selection, not a goal in itself.
-- **total_pnl** across multi-round history: the ground truth. A strategy that made $500 across 10 rounds beats one that made $50 with zero variance.
+- **total_pnl** across multi-round history: cumulative cash result.
+- **mean PnL per FIRING round** (rounds where the engine traded, excluding silent rounds): the right yardstick for selective engines. A strategy that's silent 60% of the time but earns +$50 mean per firing round beats one that fires every round for +$5 mean.
+- **firing win rate** (% of firing rounds with positive PnL): when an engine activates, does it usually win?
+
+Trade frequency is NOT a quality metric. Engines that fire only when conditions favor their edge can outperform engines that trade constantly. The four cases:
+1. Winning + low trade count → fine, don't penalize for silence.
+2. Winning + high trade count → fine, don't penalize for noise.
+3. Losing + low trade count → cull slowly, sample size may be too small (need n_firing ≥ 10).
+4. Losing + high trade count → cull fast, the verdict is in.
 
 ## Your Task
 Report the observable facts in the data. You are a DATA REPORTER, not a strategist.
@@ -210,8 +218,9 @@ Instead, describe:
 2. Cross-engine patterns in the raw data: are losing engines concentrated at
    certain prices, certain times-of-candle, certain tick volumes? Is toxic
    flow clustered in specific regimes?
-3. The multi-round PnL distribution: is any engine reliably positive across
-   ≥3 rounds, or is the arena mostly coin flips with occasional outliers?
+3. The multi-round PnL distribution: which engines have firing win rate ≥ 50%
+   over n_firing ≥ 10 rounds? Which engines fire constantly but lose per fire
+   (the canonical anti-pattern)? Quote actual numbers.
 
 Facts only. Leave the strategy inference to the coder stage. Output 300 words
 or less.`;
@@ -364,6 +373,15 @@ Rules:
 - Variance is allowed. An engine that wins $500 some rounds and
   loses $50 others can have positive expectation; don't optimize
   for flatness. Size to survive drawdowns but accept variance.
+- **Trade frequency is NOT a quality signal.** Silent rounds are
+  fine if the firing rounds win. The arena has shown engines that
+  fire 17 times per round and bleed (-$2/fire, 24% WR) AND engines
+  that fire 5 times per round and win big (+$80/fire, 67% WR). The
+  difference is gating, not entry band. Prefer multiple
+  pre-conditions (regime check + price band + book sanity + maybe
+  Binance momentum direction) over fire-on-any-cheap-price designs.
+- A miss costs nothing. A wrong fire costs $5-40. Gates are cheap
+  insurance.
 
 Your only hard constraints are the correctness rules above — fee
 model, dual books, merge Flavor A, post-only, validity guards,
