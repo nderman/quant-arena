@@ -1,5 +1,4 @@
 import { AbstractEngine } from "./BaseEngine";
-import { getBookForToken } from "../pulse";
 import type { EngineAction, EngineState, MarketTick, SignalSnapshot } from "../types";
 
 /**
@@ -62,8 +61,8 @@ export class DcaExtremeEngine extends AbstractEngine {
     // gate was fit on 3-round data and gated out profitable CHOP trades.
     // The strategy's edge is in asymmetric price payoff, not direction.
 
-    const upBook = getBookForToken(upTokenId);
-    const downBook = getBookForToken(downTokenId);
+    const upBook = this.getBookForToken(upTokenId);
+    const downBook = this.getBookForToken(downTokenId);
     const upAsk = upBook.asks[0]?.price ?? 0;
     const downAsk = downBook.asks[0]?.price ?? 0;
     if (upAsk <= 0 || downAsk <= 0) return [];

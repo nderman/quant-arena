@@ -10,8 +10,8 @@
  * Engines extend this and implement onTick() with their strategy.
  */
 
-import { calculateFeeAdjustedEdge, cheaperExit } from "../referee";
-import { getBookForToken } from "../pulse";
+import { calculateFeeAdjustedEdge, cheaperExit, isBookTradeable as _isBookTradeable } from "../referee";
+import { getBookForToken as _getBookForToken } from "../pulse";
 import type {
   BaseEngine as IBaseEngine,
   EngineAction,
@@ -20,6 +20,7 @@ import type {
   SignalSnapshot,
   FeeAdjustedEdge,
   PositionState,
+  OrderBook,
 } from "../types";
 
 export abstract class AbstractEngine implements IBaseEngine {
@@ -84,11 +85,31 @@ export abstract class AbstractEngine implements IBaseEngine {
   protected totalPositionValue(_currentPrice?: number): number {
     let value = 0;
     for (const [tokenId, pos] of this.state.positions) {
-      const book = getBookForToken(tokenId);
+      const book = this.getBookForToken(tokenId);
       const bestBid = book.bids[0]?.price;
       value += pos.shares * (bestBid && bestBid > 0 ? bestBid : pos.avgEntry);
     }
     return value;
+  }
+
+  // ── Book Access ──────────────────────────────────────────────────────────
+  // Expose pulse+referee book helpers as protected methods so engines don't
+  // need to import them directly. Keeps concrete engines free of module
+  // coupling and gives us a single place to swap the implementation.
+
+  /** Get the current L2 book for a specific token id (dual-book aware). */
+  protected getBookForToken(tokenId: string): OrderBook {
+    return _getBookForToken(tokenId);
+  }
+
+  /**
+   * Check whether a book is currently tradeable — rejects crossed books,
+   * one-sided books, books with prices outside PM limits, excessive spreads,
+   * and stale books. Engines should gate trades on this to avoid
+   * processAction-time rejections.
+   */
+  protected isBookTradeable(book: OrderBook): boolean {
+    return _isBookTradeable(book);
   }
 
   protected portfolioValue(currentPrice: number): number {
