@@ -146,19 +146,30 @@ def main():
     print("THE TWO ENDS OF THE SELECTIVITY SPECTRUM")
     print("=" * 130)
 
-    # Most selective (highest silence, top mean-per-firing)
+    # Most selective AND statistically meaningful (silence ≥ 50%, n_firing ≥ 10)
+    # Without the n_firing floor, a 2-sample lucky engine looks like alpha.
+    # bred-gki8 (Apr 14): 2 firings, 1 win 1 loss → +$72/fire mean is noise.
     selective = sorted(
-        [r for r in rows if r["silence_pct"] >= 50],
+        [r for r in rows if r["silence_pct"] >= 50 and r["n_firing"] >= 10],
         key=lambda r: -r["mean_per_firing"]
     )[:5]
     if selective:
-        print("\nMost selective AND profitable (silence ≥ 50%, sorted by mean/fire):")
+        print("\nMost selective AND profitable (silence ≥ 50%, n_firing ≥ 10):")
         for r in selective:
             print(f"  {r['eid']:<28} silence {r['silence_pct']:.0f}%  "
                   f"mean/fire ${r['mean_per_firing']:+.2f}  "
                   f"win% {r['firing_win_pct']:.0f}  total ${r['total_pnl']:+.0f}")
     else:
-        print("\nNo selective engines yet (none with silence ≥ 50%)")
+        print("\nNo selective engines yet (need silence ≥ 50% AND n_firing ≥ 10)")
+
+    # Also flag tiny-sample standouts as suspicious-not-alpha
+    tiny_high = [r for r in rows if r["n_firing"] < 10 and r["mean_per_firing"] > 20]
+    if tiny_high:
+        print("\nTiny-sample standouts (n<10, mean/fire > +$20) — likely noise, NOT alpha:")
+        for r in tiny_high:
+            print(f"  {r['eid']:<28} n_firing={r['n_firing']:<3} "
+                  f"mean/fire ${r['mean_per_firing']:+.2f}  "
+                  f"best ${r['best']:+.0f}  worst ${r['worst']:+.0f}")
 
     # Anti-pattern: trades constantly, loses
     constant_losers = sorted(
