@@ -96,22 +96,39 @@ function reloadNewEngines(existing: BaseEngine[]): number {
 function loadEngines(): BaseEngine[] {
   const engines: BaseEngine[] = [];
 
-  // Built-in engines
-  const builtinDir = path.resolve(__dirname, "engines");
-  if (fs.existsSync(builtinDir)) {
-    const files = fs.readdirSync(builtinDir).filter(f =>
-      (f.endsWith(".ts") || f.endsWith(".js")) && !f.startsWith("Base")
+  // Per-coin allow/disable filters. ENGINE_ALLOW is a whitelist (only these
+  // load); ENGINE_DISABLE is a blacklist. ENGINE_ALLOW wins when both are set.
+  // Set per PM2 process via ecosystem.config.js so you can, e.g., run
+  // dca-deep on SOL only without editing code.
+  const allowCsv = CONFIG.ENGINE_ALLOW.trim();
+  const disableCsv = CONFIG.ENGINE_DISABLE.trim();
+  const allow = allowCsv ? new Set(allowCsv.split(",").map(s => s.trim()).filter(Boolean)) : null;
+  const disable = new Set(disableCsv.split(",").map(s => s.trim()).filter(Boolean));
+
+  const shouldLoad = (engineId: string): boolean => {
+    if (allow) return allow.has(engineId);
+    return !disable.has(engineId);
+  };
+
+  const loadFromDir = (dir: string, kind: "built-in" | "user") => {
+    if (!fs.existsSync(dir)) return;
+    const files = fs.readdirSync(dir).filter(f =>
+      (f.endsWith(".ts") || f.endsWith(".js")) &&
+      (kind === "user" || !f.startsWith("Base"))
     );
     for (const file of files) {
       try {
-        const mod = require(path.join(builtinDir, file));
-        // Find the exported class (first export that has onTick)
+        const mod = require(path.join(dir, file));
         for (const key of Object.keys(mod)) {
           if (typeof mod[key] === "function") {
             const instance = new mod[key]();
             if (typeof instance.onTick === "function") {
-              engines.push(instance);
-              console.log(`[arena] Loaded built-in engine: ${instance.name} (${instance.id})`);
+              if (!shouldLoad(instance.id)) {
+                console.log(`[arena] Skipped ${kind} engine: ${instance.id} (env filter)`);
+              } else {
+                engines.push(instance);
+                console.log(`[arena] Loaded ${kind} engine: ${instance.name} (${instance.id})`);
+              }
               break;
             }
           }
@@ -120,32 +137,13 @@ function loadEngines(): BaseEngine[] {
         console.error(`[arena] Failed to load engine ${file}:`, err.message);
       }
     }
-  }
+  };
 
-  // User engines from configurable directory
+  const builtinDir = path.resolve(__dirname, "engines");
+  loadFromDir(builtinDir, "built-in");
+
   const userDir = path.resolve(CONFIG.ENGINES_DIR);
-  if (fs.existsSync(userDir) && userDir !== builtinDir) {
-    const files = fs.readdirSync(userDir).filter(f =>
-      f.endsWith(".ts") || f.endsWith(".js")
-    );
-    for (const file of files) {
-      try {
-        const mod = require(path.join(userDir, file));
-        for (const key of Object.keys(mod)) {
-          if (typeof mod[key] === "function") {
-            const instance = new mod[key]();
-            if (typeof instance.onTick === "function") {
-              engines.push(instance);
-              console.log(`[arena] Loaded user engine: ${instance.name} (${instance.id})`);
-              break;
-            }
-          }
-        }
-      } catch (err: any) {
-        console.error(`[arena] Failed to load user engine ${file}:`, err.message);
-      }
-    }
-  }
+  if (userDir !== builtinDir) loadFromDir(userDir, "user");
 
   return engines;
 }

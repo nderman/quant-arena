@@ -34,6 +34,8 @@ export const CONFIG = {
   DRY_RUN:                bool("DRY_RUN", false),
   MAX_ROUNDS:             num("MAX_ROUNDS", 0),                          // 0 = infinite
   ENGINES_DIR:            str("ENGINES_DIR", "./engines"),
+  ENGINE_ALLOW:           str("ENGINE_ALLOW", ""),                        // csv of engine ids; if set, only these load
+  ENGINE_DISABLE:         str("ENGINE_DISABLE", ""),                      // csv of engine ids to exclude
 
   // ── Referee ────────────────────────────────────────────────────────────────
   PEAK_FEE_RATE:          num("PEAK_FEE_RATE", 0.015625),               // 1.5625% max (quartic formula, Apr 2026)
