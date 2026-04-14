@@ -213,16 +213,24 @@ export abstract class AbstractEngine implements IBaseEngine {
 
   /**
    * Coarse regime label based on the last `lookbackSec` of Binance.
+   *   - "UNKNOWN": insufficient data (buffer < lookback seconds)
    *   - "SPIKE"  : realizedVol >= 15 bps
    *   - "TREND"  : abs momentum >= 10 bps
    *   - "CHOP"   : vol >= 2 bps
    *   - "QUIET"  : below all of the above
-   * Returns "QUIET" when insufficient data.
+   *
+   * Callers should treat UNKNOWN as "can't judge yet" — usually means
+   * block entries until the buffer fills. This is distinct from QUIET
+   * (low vol, low momentum, confirmed from full data).
    *
    * Computed fresh per call — sensitive to the most recent window. For
    * stability against whipsaw, use `currentRegimeStable()` instead.
    */
-  protected currentRegime(lookbackSec: number = 60): "QUIET" | "CHOP" | "TREND" | "SPIKE" {
+  protected currentRegime(lookbackSec: number = 60): "UNKNOWN" | "QUIET" | "CHOP" | "TREND" | "SPIKE" {
+    // Insufficient data: not enough Binance samples to cover the lookback
+    // window. Need at least `lookbackSec` samples (~1/sec).
+    if (this._binancePrices.length < lookbackSec) return "UNKNOWN";
+
     const vol = this.realizedVol(lookbackSec);
     const mom = this.absMomentum(lookbackSec);
     if (vol >= 0.0015) return "SPIKE";
@@ -233,7 +241,7 @@ export abstract class AbstractEngine implements IBaseEngine {
 
   // Rolling regime history for stability tracking
   private _regimeHistory: { label: string; time: number }[] = [];
-  private _stableRegime: "QUIET" | "CHOP" | "TREND" | "SPIKE" = "QUIET";
+  private _stableRegime: "UNKNOWN" | "QUIET" | "CHOP" | "TREND" | "SPIKE" = "UNKNOWN";
   private _stableSince = 0;
 
   /**
@@ -247,7 +255,7 @@ export abstract class AbstractEngine implements IBaseEngine {
   protected currentRegimeStable(
     holdMs: number = 30_000,
     lookbackSec: number = 60,
-  ): "QUIET" | "CHOP" | "TREND" | "SPIKE" {
+  ): "UNKNOWN" | "QUIET" | "CHOP" | "TREND" | "SPIKE" {
     const now = Date.now();
     const raw = this.currentRegime(lookbackSec);
 
@@ -282,14 +290,15 @@ export abstract class AbstractEngine implements IBaseEngine {
 
   /**
    * Multi-window regime agreement: only returns the label if both the short
-   * (60s) and long (300s) windows agree. Otherwise returns "QUIET" as a
-   * conservative no-trade signal. Useful for engines that want maximum
+   * (60s) and long (300s) windows agree. Otherwise returns "UNKNOWN" as
+   * a conservative no-trade signal. Useful for engines that want maximum
    * regime confidence at the cost of trading frequency.
    */
-  protected currentRegimeConfirmed(): "QUIET" | "CHOP" | "TREND" | "SPIKE" {
+  protected currentRegimeConfirmed(): "UNKNOWN" | "QUIET" | "CHOP" | "TREND" | "SPIKE" {
     const short = this.currentRegime(60);
     const long = this.currentRegime(300);
-    return short === long ? short : "QUIET";
+    if (short === "UNKNOWN" || long === "UNKNOWN") return "UNKNOWN";
+    return short === long ? short : "UNKNOWN";
   }
 
   // ── Token Helpers ────────────────────────────────────────────────────────

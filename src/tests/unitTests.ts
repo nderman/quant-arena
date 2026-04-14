@@ -603,16 +603,24 @@ console.log("\n=== Regime Signals ===");
   assert(am === Math.abs(m), "abs equals |mom|");
 }
 
-// 6. currentRegime: QUIET when flat
+// 6. currentRegime: QUIET when flat (needs 60+ samples or UNKNOWN)
 {
   const e = new RegimeTestEngine();
   e.init(mkState({}));
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 80; i++) {
     e.testTrack(mkBinanceTick(80000 + (i % 2 === 0 ? 1 : -1))); // tiny chop
   }
-  // Under 2bps vol, abs momentum ~0 → QUIET
+  // Under 2bps vol, abs momentum ~0 → QUIET (with 80 samples for default 60s lookback)
   const reg = e.testRegime();
   assert(reg === "QUIET" || reg === "CHOP", `expected QUIET/CHOP, got ${reg}`);
+}
+
+// 6b. currentRegime: UNKNOWN when insufficient data
+{
+  const e = new RegimeTestEngine();
+  e.init(mkState({}));
+  for (let i = 0; i < 10; i++) e.testTrack(mkBinanceTick(80000 + i));
+  assert(e.testRegime() === "UNKNOWN", "expected UNKNOWN with only 10 samples");
 }
 
 // 7. currentRegime: TREND when large monotonic move
@@ -646,12 +654,16 @@ class StableRegimeEngine extends AbstractEngine {
   const e = new StableRegimeEngine();
   e.init(mkState({}));
 
-  // Seed with QUIET (flat prices)
-  for (let i = 0; i < 10; i++) {
+  // Seed with QUIET (flat prices) — need >=60 samples for 60s lookback
+  for (let i = 0; i < 80; i++) {
     e.testTrack(mkBinanceTick(80000 + (i % 2 === 0 ? 1 : -1)));
   }
   const initial = e.testStable(5_000, 60);
-  assert(initial === "QUIET" || initial === "CHOP", `initial QUIET/CHOP, got ${initial}`);
+  // Stable starts at UNKNOWN until holdMs has elapsed with a consistent label
+  assert(
+    initial === "UNKNOWN" || initial === "QUIET" || initial === "CHOP",
+    `initial UNKNOWN/QUIET/CHOP, got ${initial}`,
+  );
 
   // Now feed a sudden trending burst — but the stable should NOT flip yet
   // because we just started seeing the new label
@@ -666,14 +678,13 @@ class StableRegimeEngine extends AbstractEngine {
   );
 }
 
-// 9. currentRegimeConfirmed: returns QUIET on disagreement
+// 9. currentRegimeConfirmed: returns UNKNOWN on insufficient data
 {
   const e = new StableRegimeEngine();
   e.init(mkState({}));
-  // Empty buffer → both windows return QUIET (insufficient data)
-  // → they agree, returns QUIET
+  // Empty buffer → both windows return UNKNOWN → returns UNKNOWN
   const r = e.testConfirmed();
-  assert(r === "QUIET", `empty → QUIET, got ${r}`);
+  assert(r === "UNKNOWN", `empty → UNKNOWN, got ${r}`);
 }
 
 // ── LiveSizingWrapper ──────────────────────────────────────────────────────

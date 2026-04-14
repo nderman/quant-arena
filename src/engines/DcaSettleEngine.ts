@@ -49,6 +49,7 @@ export class DcaSettleEngine extends AbstractEngine {
     // +$103/round on SOL TREND specifically) and loses in CHOP (-$38/round).
     // Lookback 600s (10 min) to catch slow macro trends. 30s hysteresis
     // keeps reactivity quick enough to catch trends as they form.
+    // UNKNOWN blocks entries until the buffer fills (~10 min round start).
     const regime = this.currentRegimeStable(30_000, 600);
     if (regime !== "TREND" && regime !== "SPIKE") return [];
 
