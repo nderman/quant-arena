@@ -19,34 +19,20 @@ export class CroissantV2Engine extends AbstractEngine {
   private readonly entryMax = 0.40;
   private readonly entryWindowStartSec = 60;
   private readonly entryWindowEndSec = 90;
-  private readonly velocityLookbackMs = 10_000;
+  private readonly velocityLookbackSec = 10;
   private readonly maxCashPct = 0.25;
 
-  // Binance price tracking
-  private binanceSamples: { price: number; time: number }[] = [];
-  private readonly maxSamples = 30;
   private candleOpenPrice = 0;
-  private candleOpenTime = 0;
 
   onTick(tick: MarketTick, state: EngineState, _signals?: SignalSnapshot): EngineAction[] {
-    if (tick.source === "binance") {
-      const now = Date.now();
-      this.binanceSamples.push({ price: tick.midPrice, time: now });
-      if (this.binanceSamples.length > this.maxSamples) this.binanceSamples.shift();
-      return [];
-    }
-
+    this.trackBinance(tick);
     if (tick.source !== "polymarket") return [];
 
     const rotated = this.updatePendingOrders();
     if (this.hasPendingOrder()) return [];
 
     if (rotated) {
-      const latest = this.binanceSamples[this.binanceSamples.length - 1];
-      if (latest) {
-        this.candleOpenPrice = latest.price;
-        this.candleOpenTime = latest.time;
-      }
+      this.candleOpenPrice = this.lastBinancePrice();
     }
 
     if (this.candleOpenPrice <= 0) return [];
@@ -66,19 +52,14 @@ export class CroissantV2Engine extends AbstractEngine {
     if (elapsed < this.entryWindowStartSec || elapsed > this.entryWindowEndSec) return [];
 
     // Momentum: Binance move from candle open
-    const latest = this.binanceSamples[this.binanceSamples.length - 1];
-    if (!latest) return [];
-    const momentum = (latest.price - this.candleOpenPrice) / this.candleOpenPrice;
-    const absMomentum = Math.abs(momentum);
-    if (absMomentum < this.momentumThreshold) return [];
+    const latestPrice = this.lastBinancePrice();
+    if (latestPrice <= 0) return [];
+    const momentum = (latestPrice - this.candleOpenPrice) / this.candleOpenPrice;
+    const absMom = Math.abs(momentum);
+    if (absMom < this.momentumThreshold) return [];
 
     // Velocity: still accelerating? (optional — log but don't gate)
-    const velocitySample = this.binanceSamples.find(
-      s => Math.abs(s.time - (Date.now() - this.velocityLookbackMs)) < 3000
-    );
-    const velocity = velocitySample
-      ? (latest.price - velocitySample.price) / velocitySample.price
-      : 0;
+    const velocity = this.recentMomentum(this.velocityLookbackSec);
 
     // Buy the side Binance says is winning
     const buyUp = momentum > 0;
@@ -106,8 +87,6 @@ export class CroissantV2Engine extends AbstractEngine {
 
   onRoundEnd(_state: EngineState): void {
     this.clearPendingOrders();
-    this.binanceSamples = [];
     this.candleOpenPrice = 0;
-    this.candleOpenTime = 0;
   }
 }

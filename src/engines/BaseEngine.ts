@@ -151,6 +151,14 @@ export abstract class AbstractEngine implements IBaseEngine {
    */
   protected trackBinance(tick: MarketTick): void {
     if (tick.source !== "binance") return;
+    // Defense in depth: the arena already filters out foreign symbols before
+    // dispatch, but if someone ever bypasses that path (unit test, new runner,
+    // accidental refactor) we still want per-engine buffers to stay coherent
+    // to the configured coin. Without this, a BTC price would corrupt an
+    // ETH-arena engine's vol/momentum calc. The arena filter is faster (one
+    // check vs N engines) — this is the backstop, not the primary defense.
+    const { CONFIG } = require("../config");
+    if (tick.symbol && tick.symbol !== CONFIG.ARENA_BINANCE_SYMBOL) return;
     this._binancePrices.push({ price: tick.midPrice, time: Date.now() });
     if (this._binancePrices.length > this._binanceMaxSamples) {
       this._binancePrices.shift();
