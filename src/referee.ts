@@ -21,6 +21,7 @@ import type {
   OrderBook,
   MarketTick,
   OrderType,
+  RejectionReason,
 } from "./types";
 
 // ── Binance momentum tracking (for correlated toxic flow) ────────────────────
@@ -151,12 +152,31 @@ export function shouldRejectCompetingTaker(
 }
 
 /** Build a "not filled" FillResult for the rejection paths. */
-function makeRejectedFill(action: EngineAction, latencyMs: number, orderType: "maker" | "taker" = "taker"): FillResult {
+function makeRejectedFill(
+  action: EngineAction,
+  latencyMs: number,
+  reason: RejectionReason,
+  orderType: "maker" | "taker" = "taker",
+): FillResult {
   return {
     action, filled: false, fillPrice: 0, fillSize: 0,
     fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs,
-    toxicFlowHit: false, orderType,
+    toxicFlowHit: false, orderType, rejectionReason: reason,
   };
+}
+
+/**
+ * Increment `state.rejectionCounts[reason]` for every unfilled result in
+ * `results`. Call from processActions after producing a batch so arena-side
+ * consumers don't each need to re-walk the results for bookkeeping.
+ */
+function tallyRejections(results: FillResult[], state: EngineState): void {
+  for (const r of results) {
+    if (!r.filled && r.rejectionReason) {
+      state.rejectionCounts[r.rejectionReason] =
+        (state.rejectionCounts[r.rejectionReason] ?? 0) + 1;
+    }
+  }
 }
 
 // ── Maker Rebate Pool ───────────────────────────────────────────────────────
@@ -527,6 +547,7 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: 0,
         toxicFlowHit: false, orderType: action.orderType ?? "taker",
+        rejectionReason: "invalid_token",
       };
     }
   }
@@ -538,11 +559,12 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: 0,
         toxicFlowHit: false, orderType: action.orderType ?? "taker",
+        rejectionReason: "fill_price_out_of_range",
       };
     }
   }
 
-  // HOLD — no-op
+  // HOLD — no-op (not a rejection; filled=false is the expected response)
   if (action.side === "HOLD") {
     return {
       action, filled: false, fillPrice: 0, fillSize: 0,
@@ -568,6 +590,7 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: false, orderType: "taker",
+        rejectionReason: "merge_window_closed",
       };
     }
 
@@ -578,6 +601,7 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: false, orderType: "taker",
+        rejectionReason: "no_position",
       };
     }
 
@@ -588,6 +612,7 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: false, orderType: "taker",
+        rejectionReason: "size_below_min",
       };
     }
 
@@ -602,6 +627,7 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: false, orderType: "taker",
+        rejectionReason: "invalid_token",
       };
     }
 
@@ -629,6 +655,7 @@ async function processActionNoLatency(
             action, filled: false, fillPrice: 0, fillSize: 0,
             fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
             toxicFlowHit: false, orderType: "taker",
+            rejectionReason: "insufficient_cash",
           };
         }
 
@@ -665,6 +692,7 @@ async function processActionNoLatency(
       action, filled: false, fillPrice: 0, fillSize: 0,
       fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
       toxicFlowHit: false, orderType: "taker",
+      rejectionReason: "no_position",
     };
   }
 
@@ -674,6 +702,7 @@ async function processActionNoLatency(
       action, filled: false, fillPrice: 0, fillSize: 0,
       fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
       toxicFlowHit: false, orderType: action.orderType ?? "taker",
+      rejectionReason: "size_below_min",
     };
   }
 
@@ -695,6 +724,7 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: false, orderType: "maker",
+        rejectionReason: "maker_not_filled",
       };
     }
   }
@@ -732,6 +762,7 @@ async function processActionNoLatency(
           action, filled: false, fillPrice: 0, fillSize: 0,
           fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
           toxicFlowHit: false, orderType: action.orderType ?? "taker",
+          rejectionReason: "dual_book_inconsistent",
         };
       }
 
@@ -746,6 +777,7 @@ async function processActionNoLatency(
           action, filled: false, fillPrice: 0, fillSize: 0,
           fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
           toxicFlowHit: false, orderType: action.orderType ?? "taker",
+          rejectionReason: "dual_book_inconsistent",
         };
       }
     }
@@ -762,7 +794,7 @@ async function processActionNoLatency(
     // approximates: if Binance has moved meaningfully recently AND the book
     // hasn't been refreshed since, reject the taker fill (modeling MM cancel).
     if (shouldRejectStaleSnipe(tokenBook, isMaker)) {
-      return makeRejectedFill(action, actualLatency);
+      return makeRejectedFill(action, actualLatency, "stale_snipe");
     }
 
     // Competing-taker guard. When the price is visibly cheap, real-world
@@ -771,7 +803,7 @@ async function processActionNoLatency(
     // more competition. Fires in calm markets — complements stale-snipe.
     const takerRefPrice = action.price > 0 ? action.price : (tokenBook.asks[0]?.price ?? 0);
     if (shouldRejectCompetingTaker(takerRefPrice, action.size, isMaker)) {
-      return makeRejectedFill(action, actualLatency);
+      return makeRejectedFill(action, actualLatency, "competing_taker");
     }
 
     // Post-Only enforcement: maker BUY must NOT cross the spread. If the
@@ -784,8 +816,20 @@ async function processActionNoLatency(
           action, filled: false, fillPrice: 0, fillSize: 0,
           fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
           toxicFlowHit: toxicHit, orderType: "maker",
+          rejectionReason: "post_only_cross",
         };
       }
+    }
+
+    // Pre-check book tradability so walkBook==null below unambiguously means
+    // "enough depth was there but limit or size constraint failed".
+    if (!isBookTradeable(tokenBook)) {
+      return {
+        action, filled: false, fillPrice: 0, fillSize: 0,
+        fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
+        toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+        rejectionReason: "book_not_tradeable",
+      };
     }
 
     // Limit price enforcement: action.price (when > 0) is the engine's max
@@ -793,12 +837,16 @@ async function processActionNoLatency(
     const limit = action.price > 0 ? action.price : undefined;
     const walked = walkBook(action.size, "BUY", tokenBook, CONFIG.MIN_ORDER_SIZE, !!tickBooks, limit);
 
-    // Reject if no book or insufficient liquidity or limit price violated
+    // After the isBookTradeable pre-check, walked==null means either the
+    // limit was breached OR the walked fill fell below MIN_ORDER_SIZE (thin
+    // depth). Prefer limit_violated when a limit was given; otherwise the
+    // walk ran out of liquidity before MIN_ORDER_SIZE.
     if (!walked) {
       return {
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+        rejectionReason: limit !== undefined ? "limit_violated" : "size_below_min",
       };
     }
 
@@ -816,6 +864,7 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+        rejectionReason: "fill_price_out_of_range",
       };
     }
 
@@ -839,6 +888,7 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+        rejectionReason: "insufficient_cash",
       };
     }
 
@@ -897,6 +947,7 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+        rejectionReason: pos ? "insufficient_shares" : "no_position",
       };
     }
 
@@ -907,6 +958,7 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+        rejectionReason: "size_below_min",
       };
     }
 
@@ -916,7 +968,7 @@ async function processActionNoLatency(
     // Stale-book guard: same as BUY path. Sniping stale bid liquidity during
     // Binance moves models real MM cancellation latency.
     if (shouldRejectStaleSnipe(tokenBook, isMaker)) {
-      return makeRejectedFill(action, actualLatency);
+      return makeRejectedFill(action, actualLatency, "stale_snipe");
     }
 
     // Post-Only enforcement for maker SELL: limit price must be ABOVE bestBid
@@ -928,8 +980,19 @@ async function processActionNoLatency(
           action, filled: false, fillPrice: 0, fillSize: 0,
           fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
           toxicFlowHit: toxicHit, orderType: "maker",
+          rejectionReason: "post_only_cross",
         };
       }
+    }
+
+    // Pre-check book tradability — same reasoning as BUY path.
+    if (!isBookTradeable(tokenBook)) {
+      return {
+        action, filled: false, fillPrice: 0, fillSize: 0,
+        fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
+        toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+        rejectionReason: "book_not_tradeable",
+      };
     }
 
     // Limit price enforcement: action.price is the engine's MIN acceptable
@@ -941,6 +1004,7 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+        rejectionReason: limit !== undefined ? "limit_violated" : "size_below_min",
       };
     }
 
@@ -958,6 +1022,7 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+        rejectionReason: "fill_price_out_of_range",
       };
     }
 
@@ -1019,6 +1084,7 @@ async function processActionNoLatency(
     action, filled: false, fillPrice: 0, fillSize: 0,
     fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
     toxicFlowHit: false, orderType: "taker",
+    rejectionReason: "other",
   };
 }
 
@@ -1046,6 +1112,7 @@ export async function processActions(
     results.push(await processActionNoLatency(action, state, tickBooks));
   }
 
+  tallyRejections(results, state);
   return { results, pendingMerges: merges };
 }
 
@@ -1059,6 +1126,7 @@ export async function processMergeActions(
   for (const action of actions) {
     results.push(await processActionNoLatency(action, state, tickBooks));
   }
+  tallyRejections(results, state);
   return results;
 }
 

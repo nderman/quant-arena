@@ -69,6 +69,11 @@ export interface EngineState {
   marketSymbol: string;      // e.g. "BTCUSDT", "ETHUSDT"
   marketWindowEnd: number;   // epoch ms when 5-min window closes
   marketWindowStart: number; // epoch ms when 5-min window opened
+  // Rejection accounting (task #24): maps RejectionReason → count for this
+  // round. Incremented by referee.processAction on every filled=false result.
+  // Exposed in round_history.allResults so post-hoc analysis can answer
+  // "why isn't dca-maker-v1 trading?" without re-running the sim.
+  rejectionCounts: Record<string, number>;
 }
 
 export interface PositionState {
@@ -105,6 +110,28 @@ export interface BaseEngine {
 
 // ── Referee Types ───────────────────────────────────────────────────────────
 
+/**
+ * Why a fill was rejected. Populated on `FillResult.rejectionReason` whenever
+ * `filled` is false. Helps diagnose why orders don't land — e.g. "dca-maker
+ * has 0 trades" becomes "100% rejected with reason=post_only_cross".
+ */
+export type RejectionReason =
+  | "book_not_tradeable"      // crossed/one-sided/stale/out-of-range book
+  | "size_below_min"          // walkBook filled < MIN_ORDER_SIZE (or order size below min)
+  | "limit_violated"          // walked price exceeds BUY limit or undershoots SELL limit
+  | "post_only_cross"         // maker order would cross the spread
+  | "stale_snipe"             // MM cancellation: Binance moved, book stale
+  | "competing_taker"         // visible-cheap-price model: real takers raced us
+  | "dual_book_inconsistent"  // UP_ask + DOWN_ask < DUAL_BOOK_MIN_SUM
+  | "fill_price_out_of_range" // fillPrice outside [0.001, 1.0]
+  | "no_position"             // SELL/MERGE against a position that doesn't exist
+  | "insufficient_shares"     // SELL/MERGE for more shares than held
+  | "invalid_token"           // tokenId not in current market
+  | "insufficient_cash"       // BUY cost exceeds cash balance
+  | "maker_not_filled"        // maker lottery lost (directional fill probability)
+  | "merge_window_closed"     // merge tx wouldn't mine before settlement
+  | "other";                  // catch-all — fix the call site
+
 export interface FillResult {
   action: EngineAction;
   filled: boolean;
@@ -117,6 +144,7 @@ export interface FillResult {
   latencyMs: number;
   toxicFlowHit: boolean;   // price moved against us during latency window
   orderType: OrderType;    // maker or taker
+  rejectionReason?: RejectionReason; // populated iff filled=false
 }
 
 export interface RefereeConfig {
@@ -167,6 +195,7 @@ export interface EngineRoundResult {
   slippageCost: number;
   winRate: number;
   sharpeRatio: number;    // annualized
+  rejectionCounts: Record<string, number>; // task #24: per-reason rejection histogram for this round (may be empty)
 }
 
 export interface RoundIntel {

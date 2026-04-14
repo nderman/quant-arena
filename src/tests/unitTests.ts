@@ -362,6 +362,66 @@ console.log("\n=== Competing Taker Guard ===");
   console.log(`  cheap+small: ~${(rate * 100).toFixed(1)}% rejection (target 3.75%) ✓`);
 }
 
+// ── Rejection reason codes (task #24) — async, awaited from orchestrator ──
+
+async function runRejectionReasonTests(): Promise<void> {
+  console.log("\n=== Rejection Reason Codes ===");
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { processActions } = require("../referee");
+
+  const mkState2 = (): EngineState => ({
+    engineId: "reason-test",
+    positions: new Map(),
+    cashBalance: 100,
+    roundPnl: 0, tradeCount: 0, feePaid: 0, feeRebate: 0, slippageCost: 0,
+    activeTokenId: "UP_TOK", activeDownTokenId: "DOWN_TOK",
+    marketSymbol: "BTCUSDT",
+    marketWindowEnd: Date.now() + 300_000,
+    marketWindowStart: Date.now(),
+    rejectionCounts: {},
+  });
+
+  // invalid_token — action.tokenId not in the active market
+  {
+    const state = mkState2();
+    const action: EngineAction = {
+      side: "BUY", tokenId: "UNKNOWN_TOK", price: 0.5, size: 10, orderType: "taker",
+    };
+    const r = await processActions([action], state);
+    const fill = r.results[0];
+    assert(fill.filled === false, "invalid token should not fill");
+    assert(fill.rejectionReason === "invalid_token",
+      `expected invalid_token, got ${fill.rejectionReason}`);
+    console.log("  invalid_token ✓");
+  }
+
+  // size_below_min — order smaller than MIN_ORDER_SIZE
+  {
+    const state = mkState2();
+    const action: EngineAction = {
+      side: "BUY", tokenId: "UP_TOK", price: 0.5, size: 2, orderType: "taker",
+    };
+    const r = await processActions([action], state);
+    const fill = r.results[0];
+    assert(fill.filled === false, "size below min should not fill");
+    assert(fill.rejectionReason === "size_below_min",
+      `expected size_below_min, got ${fill.rejectionReason}`);
+    console.log("  size_below_min ✓");
+  }
+
+  // Verify referee increments state.rejectionCounts directly (post-simplify fix)
+  {
+    const state = mkState2();
+    const action: EngineAction = {
+      side: "BUY", tokenId: "UNKNOWN_TOK", price: 0.5, size: 10, orderType: "taker",
+    };
+    await processActions([action], state);
+    assert(state.rejectionCounts["invalid_token"] === 1,
+      `referee should tally the reason, got ${JSON.stringify(state.rejectionCounts)}`);
+    console.log("  referee tallies state.rejectionCounts ✓");
+  }
+}
+
 // ── parsePmL2: validate + filter PM book quotes ─────────────────────────────
 
 console.log("\n=== parsePmL2 Validation ===");
@@ -512,6 +572,7 @@ function mkState(opts: { upToken?: string; downToken?: string; positions?: Map<s
     activeDownTokenId: opts.downToken ?? "DOWN1",
     marketSymbol: "BTCUSDT",
     marketWindowStart: 0,
+    rejectionCounts: {},
     marketWindowEnd: 0,
   };
 }
@@ -1114,7 +1175,7 @@ for (const p of [0.01, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.9
 
 // ── Summary ──────────────────────────────────────────────────────────────────
 
-runLiveExecutorTests()
+Promise.all([runLiveExecutorTests(), runRejectionReasonTests()])
   .then(() => {
     console.log(`\n${"=".repeat(40)}`);
     console.log(`Tests: ${passed} passed, ${failed} failed`);

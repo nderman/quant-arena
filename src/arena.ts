@@ -171,6 +171,7 @@ function createEngineState(engineId: string): EngineState {
     marketSymbol: currentMarketSymbol,
     marketWindowEnd: currentWindowEnd,
     marketWindowStart: currentWindowStart,
+    rejectionCounts: {},
   };
 }
 
@@ -262,7 +263,7 @@ async function runRound(
         // Process CLOB actions — share tickBooks across engines so liquidity depletes
         const { results: fills, pendingMerges } = await processActions(actions, state, tickBooks);
 
-        // Record CLOB fills to ledger
+        // Record CLOB fills to ledger; rejection counts are tallied by referee.
         for (const fill of fills) {
           if (fill.filled) {
             recordFill(roundId, engine.id, fill, state, fill.pnl);
@@ -366,6 +367,7 @@ async function runRound(
       slippageCost: state.slippageCost,
       winRate,
       sharpeRatio: sharpe,
+      rejectionCounts: { ...state.rejectionCounts },
     };
     results.push(result);
 
@@ -373,6 +375,13 @@ async function runRound(
     console.log(`    Cash: $${state.cashBalance.toFixed(2)} | Positions: $${posValue.toFixed(2)}`);
     console.log(`    P&L: ${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)} | Trades: ${state.tradeCount}`);
     console.log(`    Fees: $${state.feePaid.toFixed(4)} | Slippage: $${state.slippageCost.toFixed(4)}`);
+    const rejEntries = Object.entries(state.rejectionCounts);
+    if (rejEntries.length > 0) {
+      const totalRej = rejEntries.reduce((s, [, n]) => s + n, 0);
+      const topReasons = rejEntries.sort((a, b) => b[1] - a[1]).slice(0, 3)
+        .map(([r, n]) => `${r}=${n}`).join(" ");
+      console.log(`    Rejections: ${totalRej} total (${topReasons})`);
+    }
   }
 
   // Sort by P&L
