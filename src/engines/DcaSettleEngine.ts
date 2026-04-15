@@ -45,13 +45,20 @@ export class DcaSettleEngine extends AbstractEngine {
     if (this.hasPendingOrder()) return [];
     if (this.entriesThisCandle >= this.maxEntries) return [];
 
-    // Regime gate (Apr 13 analysis): dca-settle wins in TREND (+$28/round,
-    // +$103/round on SOL TREND specifically) and loses in CHOP (-$38/round).
-    // Lookback 600s (10 min) to catch slow macro trends. 30s hysteresis
-    // keeps reactivity quick enough to catch trends as they form.
-    // UNKNOWN blocks entries until the buffer fills (~10 min round start).
-    const regime = this.currentRegimeStable(30_000, 600);
+    // Regime gate (Apr 15 tightened): dca-settle's original gate fired on
+    // runtime TREND labels (10+ bps over 600s) but the regime report still
+    // showed 6 rounds where the full 6h regime was CHOP and dca-settle took
+    // -$33/round. The subperiod TREND was real but didn't persist — the
+    // engine was catching fake mini-trends inside larger CHOP rounds.
+    //
+    // Tightened gate:
+    //  1. Hysteresis 30s → 90s — require trend to hold for 1.5 min before firing
+    //  2. Explicit absMomentum > 15 bps threshold (1.5x the TREND label cutoff)
+    //  3. Direction log for post-hoc analysis of which trends we caught
+    const regime = this.currentRegimeStable(90_000, 600);
     if (regime !== "TREND" && regime !== "SPIKE") return [];
+    const absMom = this.absMomentum(600);
+    if (absMom < 0.0015) return [];
 
     const secsRemaining = this.getSecondsRemaining();
     if (secsRemaining >= 0 && secsRemaining < this.entryWindowEndSec) return [];
