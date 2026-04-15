@@ -77,9 +77,18 @@ export class DcaExtremeEngine extends AbstractEngine {
     const askPrice = buyUp ? upAsk : downAsk;
     const book = buyUp ? upBook : downBook;
 
-    // Don't pyramid: if we already hold this side, skip
-    const existing = this.getPosition(tokenId);
-    if (existing && existing.shares > 0) return [];
+    // PYRAMIDING ALLOWED WITHIN A CANDLE (Apr 15 fix):
+    // The previous "don't pyramid" block was the exact bug that made this
+    // engine lose vs bred-4h85. bred's lifetime edge comes from adding
+    // entries at progressively better prices within the same candle —
+    // the original meaning of DCA. When the cheap side keeps dropping
+    // from 0.18 → 0.10 → 0.05, we want 3 entries with a lowered basis,
+    // not 1 entry stuck at 0.18.
+    //
+    // The maxEntriesPerCandle=4 cap + pendingOrder guard + dcaStepSize
+    // together bound per-candle exposure to $20 regardless of pyramiding.
+    // Cross-candle pyramiding doesn't happen because candleEntries resets
+    // on rotation.
 
     // Model prob: implied by price + small edge reflecting settlement payoff
     // asymmetry at extremes (winner pays $1, loser pays $0)
