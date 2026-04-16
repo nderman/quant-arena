@@ -23,7 +23,7 @@ export class DcaExtremeEngine extends AbstractEngine {
   private readonly minEntryPrice = 0.05;
   private readonly maxEntryPrice = 0.18;
   private readonly dcaStepSize = 5;
-  private readonly maxEntriesPerCandle = 4;
+  private readonly maxEntriesPerCandle = 2; // was 4 — bred-4h85 averages 1.6 entries/candle
   private readonly settlementBufferSec = 15;
 
   private candleEntries = 0;
@@ -32,11 +32,15 @@ export class DcaExtremeEngine extends AbstractEngine {
   onTick(tick: MarketTick, state: EngineState, _signals?: SignalSnapshot): EngineAction[] {
     this.trackBinance(tick);
     if (tick.source !== "polymarket") return [];
-    // No tokenSide filter: we read BOTH books via getBookForToken regardless
-    // of which token the tick came from. Filtering to UP only halved our
-    // opportunity for no benefit — bred-4h85's tokenSide bug was in a
-    // DIFFERENT engine that used tick.midPrice directly; dca-extreme reads
-    // the books per-token-id so every tick is a valid trigger.
+
+    // Warm-up gate: don't fire until the Binance buffer has 300+ samples
+    // (~5 min). Round 8 forensic showed dca-extreme-v1 bust in 3 candles
+    // at round start (-$49 in 30 min) while bred-4h85 waited 34 min then
+    // caught 5/11 wins (+$125). bred's delay is accidental (tick.midPrice
+    // gate needs specific book conditions that don't exist at round start);
+    // we replicate with an explicit buffer check. currentRegime(300) returns
+    // UNKNOWN when the buffer has fewer than 300 samples.
+    if (this.currentRegime(300) === "UNKNOWN") return [];
 
     const upTokenId = this.getUpTokenId();
     const downTokenId = this.getDownTokenId();
