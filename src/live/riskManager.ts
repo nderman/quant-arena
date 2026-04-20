@@ -16,7 +16,7 @@ import type { EngineAction } from "../types";
 import type { LiveEngineState } from "./liveState";
 
 export const RISK_CONFIG = {
-  MAX_POSITION_PCT: 0.30,        // 30% of bankroll per order (was 5% — too restrictive at $25 bankroll)
+  MAX_POSITION_PCT: 0.60,        // 60% of bankroll per order (pre-size check uses sim-scale cost against live cap — needs headroom)
   MAX_DAILY_LOSS_USD: 50,        // pause for the day if hit
   MAX_OPEN_POSITIONS: 5,         // limit concurrent exposure
   MAX_PENDING_ORDERS: 10,        // unfilled orders cap
