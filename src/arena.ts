@@ -635,7 +635,12 @@ async function main(): Promise<void> {
   } else {
     startPmChannel();
     startBinanceChannel();
-    startChainlinkPoller([CONFIG.ARENA_BINANCE_SYMBOL], 2000);
+    // Chainlink poller disabled: free-tier Polygon RPC (polygon-rpc.com)
+    // now requires an API key (403). The poller blocks the event loop for
+    // seconds per failed call, slowing ALL engine ticks. No winning engine
+    // (bred-4h85, stingo43-late-v1) uses Chainlink prices. Re-enable with
+    // a paid RPC if chainlink-based engines are ever needed again.
+    // startChainlinkPoller([CONFIG.ARENA_BINANCE_SYMBOL], 2000);
 
     // For 5M markets: rotate subscription every 2 min as markets expire
     startMarketRotation(async () => {
