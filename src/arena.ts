@@ -514,8 +514,10 @@ function writeRoundIntel(roundId: string, results: EngineRoundResult[]): void {
   let history: any[] = [];
   try { history = JSON.parse(fs.readFileSync(historyPath, "utf-8")); } catch {}
   history.push({ ...intel, timestamp: new Date().toISOString() });
-  // Keep last 20 rounds
-  if (history.length > 20) history = history.slice(-20);
+  // Keep last 100 rounds (~200KB). Was 20, which caused the breeder to
+  // never breed again: the marker said "20 rounds at last breed" and the
+  // file always had exactly 20, so new-rounds count was permanently 0.
+  if (history.length > 100) history = history.slice(-100);
   fs.writeFileSync(historyPath, JSON.stringify(history, null, 2));
 
   // Flag graduation candidates AFTER history is updated. Read-only on
