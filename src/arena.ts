@@ -706,10 +706,13 @@ async function main(): Promise<void> {
           console.error("[arena] LIVE_ENABLED but PRIVATE_KEY or FUNDER not set. Disabling live.");
           CONFIG.LIVE_ENABLED = false;
         } else {
-          console.log("[arena] LIVE mode — real CLOB orders enabled");
+          console.log("[arena] LIVE mode — initializing CLOB client...");
+          const { initClobClient } = require("./live/clobClient");
           const { buildClobSubmitter, buildClobLookup } = require("./live/clobSubmitter");
-          submit = buildClobSubmitter({ privateKey, funder });
-          getOrder = buildClobLookup({ privateKey, funder });
+          const client = await initClobClient();
+          submit = buildClobSubmitter({ client });
+          getOrder = buildClobLookup({ client });
+          console.log("[arena] LIVE mode — real CLOB orders enabled");
         }
       }
       if (CONFIG.LIVE_ENABLED) {

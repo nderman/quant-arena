@@ -121,3 +121,26 @@ export function buildClobSubmitter(cfg: ClobSubmitterConfig): OrderSubmitter {
     }
   };
 }
+
+/**
+ * Build an OrderLookup backed by a real CLOB client.
+ * Polls the CLOB API for order status by clientOrderId.
+ */
+export function buildClobLookup(cfg: { client: ClobClientType }): (clientOrderId: string) => Promise<{ status: "FILLED" | "OPEN" | "CANCELLED"; filledSize: number; avgFillPrice: number } | null> {
+  return async (clientOrderId: string) => {
+    try {
+      const order = await cfg.client.getOrder(clientOrderId);
+      if (!order) return null;
+      const status = order.status === "MATCHED" ? "FILLED" as const
+        : order.status === "LIVE" ? "OPEN" as const
+        : "CANCELLED" as const;
+      return {
+        status,
+        filledSize: Number(order.size_matched ?? 0),
+        avgFillPrice: Number(order.price ?? 0),
+      };
+    } catch {
+      return null;
+    }
+  };
+}
