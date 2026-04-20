@@ -332,7 +332,15 @@ async function runRound(
             // Mirror filled sim actions to live arena (if enabled + engine graduated)
             if (liveArenaHandle) {
               const positionSide = state.activeDownTokenId === fill.action.tokenId ? "NO" as const : "YES" as const;
-              liveArenaHandle.onSimAction(engine.id, fill.action, positionSide).catch(err => {
+              liveArenaHandle.onSimAction(engine.id, fill.action, positionSide).then(result => {
+                if (result) {
+                  if (result.accepted) {
+                    console.log(`[live] ${engine.id} ${fill.action.side} ${result.sizedAction?.size ?? 0}@${(result.sizedAction?.price ?? 0).toFixed(3)} → accepted`);
+                  } else {
+                    console.log(`[live] ${engine.id} ${fill.action.side} rejected: ${result.reason}`);
+                  }
+                }
+              }).catch(err => {
                 console.warn(`[live-arena] ${engine.id} action failed: ${err.message}`);
               });
             }
