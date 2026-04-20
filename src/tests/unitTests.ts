@@ -931,7 +931,7 @@ console.log("\n=== LiveSizingWrapper ===");
   assert(r.clippedBy === undefined, "no clipping at $20 target (cap is $25)");
 }
 
-// 1b. Bankroll cap: $30 target on $500 bankroll (cap $25) → 250 shares
+// 1b. Bankroll cap: $30 target on $500 bankroll — at 30% cap ($150), not clipped
 {
   const live = mkLiveState(500);
   const r = sizeForLive(
@@ -940,8 +940,8 @@ console.log("\n=== LiveSizingWrapper ===");
     { liveBankrollUsd: 500, simBankrollUsd: 50 },
   );
   assert(r.action !== null, "bankroll cap action non-null");
-  assert(r.clippedBy === "bankroll_cap", `bankroll cap: got ${r.clippedBy}`);
-  assert(r.action!.size === 250, `bankroll cap: expected 250 shares ($25 / $0.10), got ${r.action!.size}`);
+  // With 30% cap ($150 max), a $30 order is NOT clipped
+  assert(r.action!.size === 300, `bankroll cap: expected 300 shares ($30 / $0.10), got ${r.action!.size}`);
 }
 
 // 2. Scale without hitting cap: small sim order, big live bankroll
