@@ -24,6 +24,8 @@ import { discoverCryptoMarkets, discoverUpDownMarkets, discover5mMarkets } from 
 import { pollAndSettle } from "./settlement";
 import { startChainlinkPoller } from "./chainlink";
 import { seedRng, random } from "./rng";
+import { startLiveArena, type LiveArenaHandle } from "./live/liveArena";
+import { buildDryRunAdapter } from "./live/dryRunAdapter";
 import type {
   BaseEngine,
   EngineAction,
@@ -37,6 +39,7 @@ import type {
 
 // ── Active engine states (shared with market rotation for token ID updates) ──
 let activeStates: Map<string, EngineState> | null = null;
+let liveArenaHandle: LiveArenaHandle | null = null;
 let currentActiveTokenId = "";
 let currentActiveDownTokenId = "";
 let currentMarketSymbol = "";
@@ -325,6 +328,13 @@ async function runRound(
             recordFill(roundId, engine.id, fill, state, fill.pnl);
             if (fill.toxicFlowHit) {
               console.log(`[arena] ${engine.id} TOXIC FLOW: ${fill.action.side} ${fill.fillSize}@${fill.fillPrice.toFixed(4)} (slippage: ${fill.slippage.toFixed(4)})`);
+            }
+            // Mirror filled sim actions to live arena (if enabled + engine graduated)
+            if (liveArenaHandle) {
+              const positionSide = state.activeDownTokenId === fill.action.tokenId ? "NO" as const : "YES" as const;
+              liveArenaHandle.onSimAction(engine.id, fill.action, positionSide).catch(err => {
+                console.warn(`[live-arena] ${engine.id} action failed: ${err.message}`);
+              });
             }
           }
         }
@@ -664,6 +674,46 @@ async function main(): Promise<void> {
     }, 120_000);
   }
 
+  // ── Live Trading ───────────────────────────────────────────────────────
+  if (CONFIG.LIVE_ENABLED) {
+    try {
+      let submit: any;
+      let getOrder: any;
+      if (CONFIG.LIVE_DRY_RUN) {
+        console.log("[arena] LIVE_DRY_RUN — using mock fills (no real CLOB)");
+        const adapter = buildDryRunAdapter();
+        submit = adapter.submit;
+        getOrder = adapter.getOrder;
+      } else {
+        const privateKey = process.env.PRIVATE_KEY;
+        const funder = process.env.FUNDER;
+        if (!privateKey || !funder) {
+          console.error("[arena] LIVE_ENABLED but PRIVATE_KEY or FUNDER not set. Disabling live.");
+          CONFIG.LIVE_ENABLED = false;
+        } else {
+          console.log("[arena] LIVE mode — real CLOB orders enabled");
+          const { buildClobSubmitter, buildClobLookup } = require("./live/clobSubmitter");
+          submit = buildClobSubmitter({ privateKey, funder });
+          getOrder = buildClobLookup({ privateKey, funder });
+        }
+      }
+      if (CONFIG.LIVE_ENABLED) {
+        liveArenaHandle = startLiveArena({
+          coin: CONFIG.ARENA_COIN as "btc" | "eth" | "sol" | "xrp",
+          simBankrollUsd: CONFIG.STARTING_CASH,
+          submit,
+          getOrder,
+        });
+        const engineCount = liveArenaHandle.states.size;
+        console.log(`[arena] Live arena started: ${engineCount} graduated engine(s)\n`);
+      }
+    } catch (err: any) {
+      console.error("[arena] Live arena init failed:", err.message);
+      console.error("[arena] Continuing with sim-only mode");
+      liveArenaHandle = null;
+    }
+  }
+
   // Wait for first tick
   await new Promise<void>(resolve => {
     pulseEvents.once("tick", () => resolve());
@@ -698,6 +748,17 @@ async function main(): Promise<void> {
         const medal = i === 0 ? "👑" : i === 1 ? "🥈" : i === 2 ? "🥉" : "  ";
         console.log(`  ${medal} #${i + 1} ${r.engineId}: ${r.totalPnl >= 0 ? "+" : ""}$${r.totalPnl.toFixed(2)} (${r.tradeCount} trades, $${r.feePaid.toFixed(4)} fees)`);
       }
+
+      // Live arena round-end snapshot
+      if (liveArenaHandle) {
+        const snap = liveArenaHandle.snapshot();
+        if (snap.engines.length > 0) {
+          console.log(`\n[live-arena] Round ${roundNum} live snapshot:`);
+          for (const e of snap.engines) {
+            console.log(`  ${e.engineId}: cash=$${e.cashBalance.toFixed(2)} positions=${e.positionCount} pending=${e.pendingCount} dailyLoss=$${e.dailyLossUsd.toFixed(2)}${e.paused ? " PAUSED" : ""}`);
+          }
+        }
+      }
     } catch (err: any) {
       console.error(`[arena] Round ${roundNum} failed:`, err.message);
     }
@@ -715,6 +776,10 @@ async function main(): Promise<void> {
 // ── Graceful shutdown ────────────────────────────────────────────────────────
 
 function gracefulShutdown(code = 0): void {
+  if (liveArenaHandle) {
+    console.log("[arena] Stopping live arena...");
+    liveArenaHandle.stop();
+  }
   flushLedger(); // commit buffered trades before closing
   shutdownPulse();
   closeDb();

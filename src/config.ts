@@ -95,6 +95,11 @@ export const CONFIG = {
   // ── Sanity / phantom alpha ────────────────────────────────────────────────
   PHANTOM_PNL_MULTIPLIER: num("PHANTOM_PNL_MULTIPLIER", 10),  // round PnL > STARTING_CASH × this is flagged as likely sim bug
 
+  // ── Live Trading ─────────────────────────────────────────────────────────
+  LIVE_ENABLED:               bool("LIVE_ENABLED", false),           // enable live CLOB trading alongside sim
+  LIVE_DRY_RUN:               bool("LIVE_DRY_RUN", true),            // mock fills (default safe)
+  LIVE_BANKROLL_PER_ENGINE:   num("LIVE_BANKROLL_PER_ENGINE", 25),    // USDC per graduated engine
+
   // ── Determinism ──────────────────────────────────────────────────────────
   // Seed for the referee + sim-pulse RNG. 0 (default) keeps non-deterministic
   // Math.random behavior. Set a non-zero integer to replay a run exactly —

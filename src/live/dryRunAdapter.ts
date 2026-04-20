@@ -84,3 +84,38 @@ export function dryRunStats(): { total: number; filled: number; cancelled: numbe
   }
   return { total: orders.size, filled, cancelled };
 }
+
+/**
+ * Build a complete { submit, getOrder } adapter for LiveArena's
+ * dependency injection. Wraps the raw dryRun functions into the
+ * async OrderSubmitter / OrderLookup interfaces that liveArena expects.
+ */
+export function buildDryRunAdapter(): {
+  submit: (action: EngineAction) => Promise<{ ok: true; clientOrderId: string; filledSize: number; avgFillPrice: number } | { ok: false; reason: string }>;
+  getOrder: (clientOrderId: string) => Promise<{ status: "FILLED" | "OPEN" | "CANCELLED"; filledSize: number; avgFillPrice: number } | null>;
+} {
+  return {
+    submit: async (action) => {
+      try {
+        const order = dryRunPlaceOrder(action);
+        return {
+          ok: true as const,
+          clientOrderId: order.clientOrderId,
+          filledSize: order.filledSize,
+          avgFillPrice: order.price,
+        };
+      } catch (err) {
+        return { ok: false as const, reason: err instanceof Error ? err.message : String(err) };
+      }
+    },
+    getOrder: async (clientOrderId) => {
+      const order = dryRunGetOrder(clientOrderId);
+      if (!order) return null;
+      return {
+        status: order.status,
+        filledSize: order.filledSize,
+        avgFillPrice: order.price,
+      };
+    },
+  };
+}
