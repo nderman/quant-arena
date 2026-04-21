@@ -733,6 +733,7 @@ async function processActionNoLatency(
           side: action.side as "BUY" | "SELL",
           limitPrice: action.price,
           size: action.size,
+          queueAttempts: 0,
         });
       }
       return {
@@ -1119,6 +1120,7 @@ export interface GtcOrder {
   side: "BUY" | "SELL";
   limitPrice: number;
   size: number;
+  queueAttempts: number;
 }
 
 const pendingGtc: GtcOrder[] = [];
@@ -1183,14 +1185,21 @@ export function processGtcOrders(tickBooks?: TickBooks): FillResult[] {
 
     // Queue position rejection: at extreme prices, HFT bots are ahead of us
     // in the maker queue. The further from 50¢, the more bots competing for
-    // the same asymmetric payoff. Models the live reality where your 5¢ bid
-    // sits behind faster bots and only fills when informed sellers hit it
-    // (adverse selection). At mid-prices (40-60¢), queue is fair.
+    // the same asymmetric payoff. Each failed attempt pushes us further back
+    // in the queue (bots re-posting ahead of us). After many attempts, the
+    // order is effectively stuck at the back permanently.
+    //
+    // At 5¢:  base 85%, after 5 attempts → 96%, after 10 → 99%
+    // At 25¢: base 53%, after 5 attempts → 77%, after 10 → 89%
+    // At 50¢: base  0%, always fills (fair queue at mid-prices)
     if (CONFIG.GTC_QUEUE_REJECT_MAX > 0 && order.limitPrice > 0) {
       const distFromMid = Math.abs(order.limitPrice - 0.50);
-      const queueRejectProb = CONFIG.GTC_QUEUE_REJECT_MAX * Math.min(1, distFromMid / 0.40);
-      if (random() < queueRejectProb) {
-        continue; // skip fill this tick, order stays posted for next attempt
+      const baseReject = CONFIG.GTC_QUEUE_REJECT_MAX * Math.min(1, distFromMid / 0.40);
+      const attempts = order.queueAttempts || 0;
+      const decay = Math.min(0.99, baseReject + (1 - baseReject) * (1 - Math.exp(-attempts * 0.30)));
+      if (random() < decay) {
+        order.queueAttempts = attempts + 1;
+        continue; // skip fill this tick, order stays posted but deeper in queue
       }
     }
 
