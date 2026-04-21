@@ -17,7 +17,7 @@ import json, sys, subprocess
 from collections import defaultdict
 
 LOCAL = "--local" in sys.argv
-VPS = "root@165.22.29.245"
+VPS = "root@165.232.84.91"
 REMOTE_DIR = "~/quant-arena/data"
 LOCAL_DIR = "data"
 COINS = ["btc", "eth", "sol"]

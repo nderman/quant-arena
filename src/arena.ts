@@ -46,6 +46,13 @@ let currentMarketSymbol = "";
 let currentWindowEnd = 0;
 let currentWindowStart = 0;
 
+const COIN_SLUG_PREFIXES: Record<string, string[]> = {
+  btc: ["btc-", "bitcoin-"],
+  eth: ["eth-", "ethereum-"],
+  sol: ["sol-", "solana-"],
+  xrp: ["xrp-"],
+};
+
 // ── Engine Loading ───────────────────────────────────────────────────────────
 
 /**
@@ -607,12 +614,6 @@ async function main(): Promise<void> {
       // wrong subscription. Slug check matches the per-coin discovery
       // output format: "{coin}-updown-5m-..." or "{coin}-up-down-...".
       // 5M slugs: "btc-updown-5m-...", 1H slugs: "bitcoin-up-or-down-..."
-      const COIN_SLUG_PREFIXES: Record<string, string[]> = {
-        btc: ["btc-", "bitcoin-"],
-        eth: ["eth-", "ethereum-"],
-        sol: ["sol-", "solana-"],
-        xrp: ["xrp-"],
-      };
       const prefixes = COIN_SLUG_PREFIXES[CONFIG.ARENA_COIN] || [`${CONFIG.ARENA_COIN}-`];
       const coinFilter = (m: { slug?: string }) =>
         !!m.slug && prefixes.some(p => m.slug!.toLowerCase().startsWith(p));
@@ -653,7 +654,7 @@ async function main(): Promise<void> {
       const epochMatch = pick.slug.match(/(\d{10,})$/);
       if (epochMatch) currentWindowEnd = parseInt(epochMatch[1]) * 1000 + 300_000;
     }
-    currentWindowStart = currentWindowEnd - 300_000;
+    currentWindowStart = currentWindowEnd - CONFIG.ARENA_INTERVAL_MS;
     currentMarketSymbol = slugToBinanceSymbol(pick.slug ?? "");
     setPmSubscriptionTokens([pick.yesTokenId, pick.noTokenId]);
     console.log(`\n[arena] Auto-selected: "${pick.title}"`);
@@ -680,13 +681,21 @@ async function main(): Promise<void> {
     // a paid RPC if chainlink-based engines are ever needed again.
     // startChainlinkPoller([CONFIG.ARENA_BINANCE_SYMBOL], 2000);
 
-    // For 5M markets: rotate subscription every 2 min as markets expire
+    // Rotate subscription as markets expire (interval-aware discovery)
     startMarketRotation(async () => {
-      const markets = await discover5mMarkets({ tokens: [CONFIG.ARENA_COIN] });
+      const is5m = CONFIG.ARENA_MARKET_INTERVAL === "5m";
+      let markets: Awaited<ReturnType<typeof discover5mMarkets>>;
+      if (is5m) {
+        markets = await discover5mMarkets({ tokens: [CONFIG.ARENA_COIN] });
+      } else {
+        const intervalTag = CONFIG.ARENA_MARKET_INTERVAL === "15m" ? "15M" : CONFIG.ARENA_MARKET_INTERVAL.toUpperCase();
+        markets = await discoverUpDownMarkets({ intervals: [intervalTag], limit: 10 });
+        const prefixes = COIN_SLUG_PREFIXES[CONFIG.ARENA_COIN] || [`${CONFIG.ARENA_COIN}-`];
+        markets = markets.filter(m => m.slug && prefixes.some(p => m.slug.toLowerCase().startsWith(p)));
+      }
       if (markets.length === 0) return null;
 
       // Pick the ACTIVE candle: soonest endDate that's still in the future
-      // (Not the latest — that's a future candle whose book is empty/stale)
       const now = Date.now();
       const active = markets
         .filter(m => new Date(m.endDate).getTime() > now)
@@ -706,7 +715,7 @@ async function main(): Promise<void> {
       currentActiveDownTokenId = picked.noTokenId;
       currentMarketSymbol = slugToBinanceSymbol(picked.slug);
       currentWindowEnd = new Date(picked.endDate).getTime();
-      currentWindowStart = currentWindowEnd - 300_000;
+      currentWindowStart = currentWindowEnd - CONFIG.ARENA_INTERVAL_MS;
       if (activeStates) {
         for (const [, state] of activeStates) {
           state.activeTokenId = picked.yesTokenId;

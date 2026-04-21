@@ -9,7 +9,7 @@ Evolutionary arena for Polymarket 5M crypto binary markets. AI-bred engines comp
 - `npm run arena:dry` — simulated data, no APIs
 - `npm run arena:live` — live PM + Binance data (auto-discovers markets)
 - `npm run arena:1round:dry` — quick test (1 min round)
-- `npm run test:unit` — 200 tests, must all pass
+- `npm run test:unit` — 199 tests, must all pass
 - `npm run build` — TypeScript compile
 - `npm run discover` — list active crypto markets
 - `npm run signals` — test all signal sources
@@ -74,7 +74,7 @@ bash scripts/deploy.sh           # full deploy: rsync, rebuild, PM2 restart (kil
 bash scripts/deploy-engines.sh   # surgical: rsync only src/engines/, no PM2 restart
 bash scripts/deploy-engines.sh btc  # only one coin
 ```
-- VPS: 165.22.29.245 (DigitalOcean)
+- VPS: 165.232.84.91 (DigitalOcean)
 - PM2 processes (7 total): `quant-arena-{btc,eth,sol}`, `quant-breeder-{btc,eth,sol}`, `quant-telegram`
 - Deploy excludes BredEngine_* files and `data/` (preserved on VPS)
 - **Use deploy-engines.sh for hand-built engine adds/edits/deletes** — it touches a per-coin reload flag that arena.ts picks up at the next round boundary, swapping the engine roster without disrupting the round. Position state lives per-round in EngineState so swapping instances is safe.

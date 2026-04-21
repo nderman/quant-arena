@@ -19,14 +19,25 @@ const COIN_TO_BINANCE: Record<string, string> = {
 
 const _coin = str("ARENA_COIN", "btc").toLowerCase();
 const _binanceSymbol = COIN_TO_BINANCE[_coin] || "BTCUSDT";
+const _interval = str("ARENA_MARKET_INTERVAL", "5m");
+
+// 1H slugs use long-form coin names ("bitcoin-up-or-down-..."), others use short ("btc-updown-15m-...")
+const COIN_LONG_NAMES: Record<string, string> = { btc: "bitcoin", eth: "ethereum", sol: "solana", xrp: "xrp" };
+const _slugPrefix = _interval === "1h"
+  ? `${COIN_LONG_NAMES[_coin] || _coin}-up-or-down`
+  : `${_coin}-updown-${_interval}`;
+
+// Interval duration in ms
+const INTERVAL_DURATION_MS: Record<string, number> = { "5m": 300_000, "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000 };
 
 export const CONFIG = {
   // ── Multi-coin ─────────────────────────────────────────────────────────────
   ARENA_COIN:             _coin,                                         // btc/eth/sol/xrp
   ARENA_INSTANCE_ID:      str("ARENA_INSTANCE_ID", _coin),                // ledger/intel file suffix
   ARENA_BINANCE_SYMBOL:   _binanceSymbol,                                  // BTCUSDT/ETHUSDT/etc
-  ARENA_MARKET_INTERVAL:  str("ARENA_MARKET_INTERVAL", "5m"),               // 5m/1h/4h — which PM up-down markets to trade
-  ARENA_SLUG_PREFIX:      `${_coin}-updown-${str("ARENA_MARKET_INTERVAL", "5m")}`, // for settlement filter
+  ARENA_MARKET_INTERVAL:  _interval,                                        // 5m/15m/1h/4h
+  ARENA_INTERVAL_MS:      INTERVAL_DURATION_MS[_interval] || 300_000,       // candle duration in ms
+  ARENA_SLUG_PREFIX:      _slugPrefix,                                      // for settlement filter
 
   // ── Arena ──────────────────────────────────────────────────────────────────
   ROUND_DURATION_MS:      num("ROUND_DURATION_MS", 6 * 3600_000),       // 6 hours

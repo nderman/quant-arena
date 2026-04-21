@@ -60,17 +60,25 @@ export class MakerMomentumEngine extends AbstractEngine {
     // Already posted this candle — one order per candle
     if (this.enteredThisCandle) return [];
 
-    // Don't double-post: check both pending-order guard AND GTC queue
-    if (this.hasPendingOrder() || this.hasGtcOrder()) return [];
+    if (this.hasPendingOrder()) return [];
 
     // Timing gate: wait for direction confirmation but don't wait too long
     const secsRemaining = this.getSecondsRemaining();
     if (secsRemaining < 0) return [];
-    const elapsed = 300 - secsRemaining;
-    if (elapsed < this.entryWindowStartSec || elapsed > this.entryWindowEndSec) return [];
+    const windowStart = this.getWindowStart();
+    const windowEnd = this.state.marketWindowEnd || 0;
+    const candleSec = Math.round((windowEnd - windowStart) / 1000);
+    if (candleSec <= 0) return [];
+    const elapsed = candleSec - secsRemaining;
+    // Scale entry window proportionally for non-5M candles (60-180s for 300s candle)
+    const scale = candleSec / 300;
+    const windowStartSec = this.entryWindowStartSec * scale;
+    const windowEndSec = this.entryWindowEndSec * scale;
+    if (elapsed < windowStartSec || elapsed > windowEndSec) return [];
 
     // Momentum gate: need a clear directional signal
-    const momentum = this.recentMomentum(Math.min(elapsed, this.momentumLookbackSec));
+    const lookback = Math.min(elapsed, this.momentumLookbackSec * scale);
+    const momentum = this.recentMomentum(lookback);
     if (Math.abs(momentum) < this.momentumThreshold) return [];
 
     // Pick side: momentum > 0 → price rising → UP is winning → buy UP

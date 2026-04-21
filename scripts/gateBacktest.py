@@ -22,7 +22,7 @@ Usage:
 import json, sys, os, subprocess, argparse
 from collections import defaultdict
 
-VPS = "root@165.22.29.245"
+VPS = "root@165.232.84.91"
 REMOTE_DIR = "~/quant-arena/data"
 LOCAL_DIR = "data"
 COINS = ["btc", "eth", "sol"]

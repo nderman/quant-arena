@@ -10,7 +10,11 @@ import {
   ClobClient,
 } from "@polymarket/clob-client";
 
-const CLOB_HOST = "https://clob.polymarket.com";
+// Route CLOB through AMS proxy to avoid Frankfurt geoblock.
+// PM's CLOB API blocks DE (FRA1) but the WS data feed works there.
+// AMS3 can trade but PM WS delivers no data from there.
+// Solution: arena runs on FRA1 (WS works), CLOB calls proxy through AMS.
+const CLOB_HOST = process.env.CLOB_PROXY_HOST || "https://clob.polymarket.com";
 const CHAIN_ID = 137;
 
 /**
