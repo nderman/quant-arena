@@ -605,9 +605,16 @@ async function main(): Promise<void> {
       // fallback when no SOL 5M markets are available, which causes the
       // wrong subscription. Slug check matches the per-coin discovery
       // output format: "{coin}-updown-5m-..." or "{coin}-up-down-...".
-      const coinPrefix = `${CONFIG.ARENA_COIN}-`;
+      // 5M slugs: "btc-updown-5m-...", 1H slugs: "bitcoin-up-or-down-..."
+      const COIN_SLUG_PREFIXES: Record<string, string[]> = {
+        btc: ["btc-", "bitcoin-"],
+        eth: ["eth-", "ethereum-"],
+        sol: ["sol-", "solana-"],
+        xrp: ["xrp-"],
+      };
+      const prefixes = COIN_SLUG_PREFIXES[CONFIG.ARENA_COIN] || [`${CONFIG.ARENA_COIN}-`];
       const coinFilter = (m: { slug?: string }) =>
-        !!m.slug && m.slug.toLowerCase().startsWith(coinPrefix);
+        !!m.slug && prefixes.some(p => m.slug!.toLowerCase().startsWith(p));
 
       const filteredUpdown = updown.filter(coinFilter);
       const filteredCrypto = crypto.filter(coinFilter);
