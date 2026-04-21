@@ -74,20 +74,11 @@ export function canTrade(action: EngineAction, state: LiveEngineState): RiskChec
     return { ok: false, reason: `${state.pendingOrders.size} pending orders >= ${RISK_CONFIG.MAX_PENDING_ORDERS}` };
   }
 
-  // Order size: must be ≥ MIN_ORDER_USD and ≤ MAX_POSITION_PCT of bankroll
-  const orderUsd = action.size * action.price;
-  if (orderUsd < RISK_CONFIG.MIN_ORDER_USD) {
-    return { ok: false, reason: `order $${orderUsd.toFixed(2)} below min $${RISK_CONFIG.MIN_ORDER_USD}` };
-  }
-  const maxOrderUsd = state.bankrollUsd * RISK_CONFIG.MAX_POSITION_PCT;
-  if (orderUsd > maxOrderUsd) {
-    return { ok: false, reason: `order $${orderUsd.toFixed(2)} exceeds max $${maxOrderUsd.toFixed(2)} (${RISK_CONFIG.MAX_POSITION_PCT * 100}% of $${state.bankrollUsd})` };
-  }
-
-  // BUY: must have cash
-  if (action.side === "BUY" && orderUsd > state.cashBalance) {
-    return { ok: false, reason: `insufficient cash: need $${orderUsd.toFixed(2)}, have $${state.cashBalance.toFixed(2)}` };
-  }
+  // Order size checks REMOVED from pre-sizing canTrade (Apr 21):
+  // This function runs on the SIM-SCALE action before liveSizing scales
+  // it down. Comparing sim costs ($15-50) against live bankroll caps ($7-15)
+  // blocked every stingo43-late order. sizeForLive handles all sizing
+  // constraints post-scale. Cash check also deferred to post-sizing.
 
   // SELL: must have shares
   if (action.side === "SELL") {
