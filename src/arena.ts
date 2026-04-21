@@ -17,7 +17,7 @@ import * as dotenv from "dotenv";
 dotenv.config({ path: path.resolve(__dirname, "..", ".env") });
 import { CONFIG } from "./config";
 import { pulseEvents, startSimulatedPulse, startPmChannel, startBinanceChannel, startMarketRotation, setPmSubscriptionTokens, shutdown as shutdownPulse } from "./pulse";
-import { processActions, processMergeActions, markToMarket, clearFeePool, clearFeePoolForMarket, snapshotTickBooks } from "./referee";
+import { processActions, processMergeActions, markToMarket, clearFeePool, clearFeePoolForMarket, snapshotTickBooks, processGtcOrders, expireGtcOrders, clearGtcOrders } from "./referee";
 import { recordFill, recordRoundStart, recordRoundEnd, getRoundSummary, closeDb, flushLedger } from "./ledger";
 import { fetchSignalSnapshot } from "./signals";
 import { discoverCryptoMarkets, discoverUpDownMarkets, discover5mMarkets } from "./discovery";
@@ -266,6 +266,7 @@ async function runRound(
     engine.init(state);
   }
   clearFeePool();
+  clearGtcOrders();
   activeStates = states;
 
   // Track last tick for mark-to-market (PM only — Binance prices are in a different range)
@@ -353,6 +354,21 @@ async function runRound(
         }
       } catch (err: any) {
         console.error(`[arena] Engine ${engine.id} error on tick:`, err.message);
+      }
+    }
+
+    // ── Process GTC limit orders against current book ──
+    if (tickBooks) {
+      const gtcFills = processGtcOrders(tickBooks);
+      for (const fill of gtcFills) {
+        const engineId = fill.action.signalSource ? fill.action.signalSource.split("_")[0] : "unknown";
+        // Find the engine state for recording
+        for (const [, st] of states) {
+          if (st.engineId === engineId || st.positions.has(fill.action.tokenId)) {
+            recordFill(roundId, engineId, fill, st, fill.pnl);
+            break;
+          }
+        }
       }
     }
 
@@ -668,6 +684,10 @@ async function main(): Promise<void> {
       // Clean up fee pool for rotated-out markets
       if (currentActiveTokenId) clearFeePoolForMarket(currentActiveTokenId);
       if (currentActiveDownTokenId) clearFeePoolForMarket(currentActiveDownTokenId);
+      // Expire GTC orders for the old candle's tokens
+      const activeTokens = new Set([picked.yesTokenId, picked.noTokenId]);
+      const expired = expireGtcOrders(activeTokens);
+      if (expired > 0) console.log(`[arena] Expired ${expired} GTC orders on candle rotation`);
 
       // Update to new market — old positions settle via settlement.ts ($1 or $0)
       currentActiveTokenId = picked.yesTokenId;

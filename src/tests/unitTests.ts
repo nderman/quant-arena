@@ -344,9 +344,10 @@ console.log("\n=== Competing Taker Guard ===");
     if (shouldRejectCompetingTaker(0.05, 50, false)) rejects++;
   }
   const rate = rejects / n;
-  const expected = 0.375;
-  assert(Math.abs(rate - expected) < 0.02, `expected ~37.5%, got ${(rate * 100).toFixed(1)}%`);
-  console.log(`  cheap+large: ~${(rate * 100).toFixed(1)}% rejection (target 37.5%) ✓`);
+  // With COMPETE_PROB_MAX=0.90: 0.75 × 1.0 × 0.90 = 0.675
+  const expected = 0.675;
+  assert(Math.abs(rate - expected) < 0.02, `expected ~67.5%, got ${(rate * 100).toFixed(1)}%`);
+  console.log(`  cheap+large: ~${(rate * 100).toFixed(1)}% rejection (target 67.5%) ✓`);
 }
 
 // Small orders at cheap prices face much less competition
@@ -357,9 +358,9 @@ console.log("\n=== Competing Taker Guard ===");
     if (shouldRejectCompetingTaker(0.05, 5, false)) rejects++;
   }
   const rate = rejects / n;
-  // 0.75 × 0.10 × 0.50 = 0.0375
-  assert(rate < 0.06, `small orders should be rarely rejected, got ${(rate * 100).toFixed(1)}%`);
-  console.log(`  cheap+small: ~${(rate * 100).toFixed(1)}% rejection (target 3.75%) ✓`);
+  // 0.75 × 0.10 × 0.90 = 0.0675
+  assert(rate < 0.09, `small orders should be rarely rejected, got ${(rate * 100).toFixed(1)}%`);
+  console.log(`  cheap+small: ~${(rate * 100).toFixed(1)}% rejection (target 6.75%) ✓`);
 }
 
 // ── Engine reload mechanism (surgical deploy) ──────────────────────────────

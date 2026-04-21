@@ -721,6 +721,20 @@ async function processActionNoLatency(
       fillProb = Math.max(0.05, Math.min(0.95, fillProb + adjustment)); // price up → asks more likely
     }
     if (random() > fillProb) {
+      // GTC: instead of rejecting, store the order for future fill attempts.
+      // The order sits on the book and fills when the market crosses the limit.
+      if (action.price > 0 && action.size >= CONFIG.MIN_ORDER_SIZE) {
+        addGtcOrder({
+          engineId: state.engineId,
+          action,
+          state,
+          postedAt: Date.now(),
+          tokenId: action.tokenId,
+          side: action.side as "BUY" | "SELL",
+          limitPrice: action.price,
+          size: action.size,
+        });
+      }
       return {
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
@@ -1087,6 +1101,148 @@ async function processActionNoLatency(
     toxicFlowHit: false, orderType: "taker",
     rejectionReason: "other",
   };
+}
+
+// ── GTC Limit Order Subsystem ────────────────────────────────────────────────
+// Persistent maker orders that sit on the book until filled or expired.
+// When an engine posts a maker order that doesn't fill immediately (the
+// 12% fill lottery), it's stored here and re-checked on every subsequent
+// tick. Fills when the book crosses the limit price. Expires on market
+// rotation (candle change).
+
+export interface GtcOrder {
+  engineId: string;
+  action: EngineAction;
+  state: EngineState;
+  postedAt: number;
+  tokenId: string;
+  side: "BUY" | "SELL";
+  limitPrice: number;
+  size: number;
+}
+
+const pendingGtc: GtcOrder[] = [];
+
+/** Store a maker order for future fill attempts. */
+function addGtcOrder(order: GtcOrder): void {
+  pendingGtc.push(order);
+}
+
+/** Remove all GTC orders for tokens no longer in the active market. */
+export function expireGtcOrders(activeTokenIds: Set<string>): number {
+  const before = pendingGtc.length;
+  for (let i = pendingGtc.length - 1; i >= 0; i--) {
+    if (!activeTokenIds.has(pendingGtc[i].tokenId)) {
+      pendingGtc.splice(i, 1);
+    }
+  }
+  return before - pendingGtc.length;
+}
+
+/** Clear all GTC orders (round end). */
+export function clearGtcOrders(): void {
+  pendingGtc.length = 0;
+}
+
+/** Get count of pending GTC orders. */
+export function gtcOrderCount(): number {
+  return pendingGtc.length;
+}
+
+/**
+ * Check all pending GTC orders against current book state. Fill any
+ * that now cross. Returns FillResults for filled orders (both
+ * successful fills and expired/failed).
+ *
+ * Called by arena.ts on every tick AFTER engine actions are processed.
+ */
+export function processGtcOrders(tickBooks?: TickBooks): FillResult[] {
+  const results: FillResult[] = [];
+  for (let i = pendingGtc.length - 1; i >= 0; i--) {
+    const order = pendingGtc[i];
+    const book = bookFromTick(order.tokenId, tickBooks);
+    if (!isBookTradeable(book)) continue;
+
+    let shouldFill = false;
+    if (order.side === "BUY") {
+      // BUY limit: fills when bestAsk drops to or below our limit
+      const bestAsk = book.asks[0]?.price ?? 999;
+      shouldFill = bestAsk <= order.limitPrice;
+    } else {
+      // SELL limit: fills when bestBid rises to or above our limit
+      const bestBid = book.bids[0]?.price ?? 0;
+      shouldFill = bestBid >= order.limitPrice;
+    }
+
+    if (!shouldFill) continue;
+
+    // Fill the GTC order against the current book
+    const walked = walkBook(
+      order.size, order.side, book,
+      CONFIG.MIN_ORDER_SIZE, !!tickBooks, order.limitPrice,
+    );
+
+    if (!walked) continue; // book doesn't have enough depth at limit
+
+    const fillSize = walked.filledSize;
+    const fillPrice = walked.effectivePrice * (order.side === "BUY" ? MAKER_ADVERSE_BUY : MAKER_ADVERSE_SELL);
+    const roundedPrice = tickRound(fillPrice);
+
+    // Maker: 0% fee + rebate
+    const rebate = calculateMakerRebate(order.tokenId, fillSize);
+    const totalCost = roundedPrice * fillSize;
+
+    if (order.side === "BUY") {
+      if (order.state.cashBalance < totalCost) continue; // can't afford
+
+      order.state.cashBalance -= totalCost;
+      order.state.cashBalance += rebate;
+      order.state.feePaid += 0;
+      order.state.feeRebate += rebate;
+      order.state.tradeCount++;
+
+      const isDownToken = !!(order.state.activeDownTokenId && order.tokenId === order.state.activeDownTokenId);
+      const positionSide = isDownToken ? "NO" : "YES";
+      const existing = order.state.positions.get(order.tokenId);
+      if (existing) {
+        const newShares = existing.shares + fillSize;
+        const newCost = existing.costBasis + totalCost;
+        existing.shares = newShares;
+        existing.costBasis = newCost;
+        existing.avgEntry = newCost / newShares;
+      } else {
+        order.state.positions.set(order.tokenId, {
+          tokenId: order.tokenId,
+          side: positionSide as "YES" | "NO",
+          shares: fillSize,
+          avgEntry: roundedPrice,
+          costBasis: totalCost,
+        });
+      }
+    }
+
+    // Remove from pending
+    pendingGtc.splice(i, 1);
+
+    results.push({
+      action: order.action,
+      filled: true,
+      fillPrice: roundedPrice,
+      fillSize,
+      fee: 0,
+      rebate,
+      slippage: 0,
+      pnl: 0,
+      latencyMs: 0,
+      toxicFlowHit: false,
+      orderType: "maker",
+    });
+
+    console.log(
+      `[gtc] FILLED: ${order.engineId} ${order.side} ${fillSize}@${roundedPrice.toFixed(3)} (limit ${order.limitPrice.toFixed(3)}, waited ${((Date.now() - order.postedAt) / 1000).toFixed(0)}s)`,
+    );
+  }
+  return results;
 }
 
 // ── Batch Processing ─────────────────────────────────────────────────────────
