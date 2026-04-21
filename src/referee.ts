@@ -724,6 +724,11 @@ async function processActionNoLatency(
       // GTC: instead of rejecting, store the order for future fill attempts.
       // The order sits on the book and fills when the market crosses the limit.
       if (action.price > 0 && action.size >= CONFIG.MIN_ORDER_SIZE) {
+        // Snapshot queue depth: total shares ahead of us at our price level or better.
+        // For BUY: sum all bid sizes at prices >= our limit (they posted before us).
+        // For SELL: sum all ask sizes at prices <= our limit.
+        const gtcBook = bookFromTick(action.tokenId, tickBooks);
+        const initialDepth = bookDepthAtPrice(gtcBook, action.side as "BUY" | "SELL", action.price);
         addGtcOrder({
           engineId: state.engineId,
           action,
@@ -734,6 +739,8 @@ async function processActionNoLatency(
           limitPrice: action.price,
           size: action.size,
           queueAttempts: 0,
+          sharesAhead: initialDepth,
+          lastBookDepth: initialDepth,
         });
       }
       return {
@@ -1105,6 +1112,23 @@ async function processActionNoLatency(
 }
 
 // ── GTC Limit Order Subsystem ────────────────────────────────────────────────
+/** Sum shares at or better than limitPrice on the given side of the book. */
+function bookDepthAtPrice(book: OrderBook, side: "BUY" | "SELL", limitPrice: number): number {
+  let depth = 0;
+  if (side === "BUY") {
+    for (const lvl of book.bids) {
+      if (lvl.price >= limitPrice) depth += lvl.size;
+      else break;
+    }
+  } else {
+    for (const lvl of book.asks) {
+      if (lvl.price <= limitPrice) depth += lvl.size;
+      else break;
+    }
+  }
+  return depth;
+}
+
 // Persistent maker orders that sit on the book until filled or expired.
 // When an engine posts a maker order that doesn't fill immediately (the
 // 12% fill lottery), it's stored here and re-checked on every subsequent
@@ -1121,6 +1145,8 @@ export interface GtcOrder {
   limitPrice: number;
   size: number;
   queueAttempts: number;
+  sharesAhead: number;
+  lastBookDepth: number;
 }
 
 const pendingGtc: GtcOrder[] = [];
@@ -1181,27 +1207,18 @@ export function processGtcOrders(tickBooks?: TickBooks): FillResult[] {
       shouldFill = bestBid >= order.limitPrice;
     }
 
+    // Track queue consumption: when book depth at our level shrinks,
+    // shares ahead of us were taken or cancelled, improving our position.
+    const currentDepth = bookDepthAtPrice(book, order.side, order.limitPrice);
+    if (currentDepth < order.lastBookDepth) {
+      order.sharesAhead = Math.max(0, order.sharesAhead - (order.lastBookDepth - currentDepth));
+    }
+    order.lastBookDepth = currentDepth;
+
     if (!shouldFill) continue;
 
-    // Queue position rejection: at extreme prices, HFT bots are ahead of us
-    // in the maker queue. The further from 50¢, the more bots competing for
-    // the same asymmetric payoff. Each failed attempt pushes us further back
-    // in the queue (bots re-posting ahead of us). After many attempts, the
-    // order is effectively stuck at the back permanently.
-    //
-    // At 5¢:  base 85%, after 5 attempts → 96%, after 10 → 99%
-    // At 25¢: base 53%, after 5 attempts → 77%, after 10 → 89%
-    // At 50¢: base  0%, always fills (fair queue at mid-prices)
-    if (CONFIG.GTC_QUEUE_REJECT_MAX > 0 && order.limitPrice > 0) {
-      const distFromMid = Math.abs(order.limitPrice - 0.50);
-      const baseReject = CONFIG.GTC_QUEUE_REJECT_MAX * Math.min(1, distFromMid / 0.40);
-      const attempts = order.queueAttempts || 0;
-      const decay = Math.min(0.99, baseReject + (1 - baseReject) * (1 - Math.exp(-attempts * 0.30)));
-      if (random() < decay) {
-        order.queueAttempts = attempts + 1;
-        continue; // skip fill this tick, order stays posted but deeper in queue
-      }
-    }
+    // FIFO: only fill when all shares ahead of us have been consumed
+    if (order.sharesAhead > 0) continue;
 
     // Fill the GTC order against the current book
     const walked = walkBook(
