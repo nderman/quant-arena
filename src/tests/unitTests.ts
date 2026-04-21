@@ -313,11 +313,11 @@ console.log("\n=== Stale-Book Snipe Guard ===");
 
 console.log("\n=== Competing Taker Guard ===");
 
-// Prices at or above MAX_PRICE (0.20) → never rejected (no visible asymmetric payoff)
+// Prices at or above MAX_PRICE (0.35) → never rejected (no visible asymmetric payoff)
 {
   let rejects = 0;
   for (let i = 0; i < 1000; i++) {
-    if (shouldRejectCompetingTaker(0.20, 50, false)) rejects++;
+    if (shouldRejectCompetingTaker(0.35, 50, false)) rejects++;
     if (shouldRejectCompetingTaker(0.50, 50, false)) rejects++;
     if (shouldRejectCompetingTaker(0.95, 50, false)) rejects++;
   }
@@ -344,10 +344,10 @@ console.log("\n=== Competing Taker Guard ===");
     if (shouldRejectCompetingTaker(0.05, 50, false)) rejects++;
   }
   const rate = rejects / n;
-  // With COMPETE_PROB_MAX=0.90: 0.75 × 1.0 × 0.90 = 0.675
-  const expected = 0.675;
-  assert(Math.abs(rate - expected) < 0.02, `expected ~67.5%, got ${(rate * 100).toFixed(1)}%`);
-  console.log(`  cheap+large: ~${(rate * 100).toFixed(1)}% rejection (target 67.5%) ✓`);
+  // With COMPETE_MAX_PRICE=0.35, COMPETE_PROB_MAX=0.90: (0.35-0.05)/0.35 × 1.0 × 0.90 = 0.771
+  const expected = 0.771;
+  assert(Math.abs(rate - expected) < 0.02, `expected ~77.1%, got ${(rate * 100).toFixed(1)}%`);
+  console.log(`  cheap+large: ~${(rate * 100).toFixed(1)}% rejection (target 77.1%) ✓`);
 }
 
 // Small orders at cheap prices face much less competition

@@ -1181,6 +1181,19 @@ export function processGtcOrders(tickBooks?: TickBooks): FillResult[] {
 
     if (!shouldFill) continue;
 
+    // Queue position rejection: at extreme prices, HFT bots are ahead of us
+    // in the maker queue. The further from 50¢, the more bots competing for
+    // the same asymmetric payoff. Models the live reality where your 5¢ bid
+    // sits behind faster bots and only fills when informed sellers hit it
+    // (adverse selection). At mid-prices (40-60¢), queue is fair.
+    if (CONFIG.GTC_QUEUE_REJECT_MAX > 0 && order.limitPrice > 0) {
+      const distFromMid = Math.abs(order.limitPrice - 0.50);
+      const queueRejectProb = CONFIG.GTC_QUEUE_REJECT_MAX * Math.min(1, distFromMid / 0.40);
+      if (random() < queueRejectProb) {
+        continue; // skip fill this tick, order stays posted for next attempt
+      }
+    }
+
     // Fill the GTC order against the current book
     const walked = walkBook(
       order.size, order.side, book,

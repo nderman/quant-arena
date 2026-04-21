@@ -28,7 +28,7 @@ ARENAS = [
     ("btc", "4h"),
 ]
 
-BROKEN_INTERVALS = {"15m", "1h", "4h"}
+BROKEN_INTERVALS: set[str] = set()  # Fixed Apr 21: endDate + slug prefix + rotation discovery
 
 def parse_args():
     p = argparse.ArgumentParser()

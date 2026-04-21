@@ -69,6 +69,7 @@ export const CONFIG = {
 
   // ── Maker / Taker ──────────────────────────────────────────────────────────
   MAKER_FILL_PROBABILITY: num("MAKER_FILL_PROBABILITY", 0.12),          // 12% — realistic queue priority vs HFT (was 60%, way too generous)
+  GTC_QUEUE_REJECT_MAX:   num("GTC_QUEUE_REJECT_MAX", 0.85),            // GTC fills at extreme prices face queue rejection (HFT ahead of us)
   MAKER_REBATE_RATE:      num("MAKER_REBATE_RATE", 0.20),               // makers get 20% of taker fees collected
   MAKER_ADVERSE_BPS:      num("MAKER_ADVERSE_BPS", 5),                  // 5bps adverse selection on maker fills
   MIN_ORDER_SIZE:          num("MIN_ORDER_SIZE", 5),                     // CLOB rejects < 5 shares
@@ -135,7 +136,7 @@ export const CONFIG = {
   // asymmetric the payoff is, and is independent of toxic flow (which models
   // HFT front-running post-fill, not pre-fill competition).
   COMPETE_ENABLED:           bool("COMPETE_ENABLED", true),
-  COMPETE_MAX_PRICE:         num("COMPETE_MAX_PRICE", 0.20),          // only prices below this attract taker competition
+  COMPETE_MAX_PRICE:         num("COMPETE_MAX_PRICE", 0.35),          // prices below this attract taker competition (raised from 0.20)
   COMPETE_PROB_MAX:          num("COMPETE_PROB_MAX", 0.90),           // hard cap on rejection probability — calibrated from live: 5¢ entries fill on losers but get front-run on winners
   COMPETE_SIZE_CAP:          num("COMPETE_SIZE_CAP", 50),             // orders >= this size face full size-penalty
 
