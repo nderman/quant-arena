@@ -586,12 +586,13 @@ async function main(): Promise<void> {
     for (let attempt = 1; attempt <= maxAttempts && !pick; attempt++) {
       // Discovery strategy depends on ARENA_MARKET_INTERVAL:
       // "5m" → slug-based 5M discovery (primary) + updown/crypto (fallback)
-      // "1h"/"4h" → updown discovery with the specific interval
+      // "15m"/"1h"/"4h" → updown discovery with the specific interval tag
       const interval = CONFIG.ARENA_MARKET_INTERVAL;
       const is5m = interval === "5m";
+      const intervalTag = interval === "15m" ? "15M" : interval.toUpperCase();
       const [fiveMinR, updownR, cryptoR] = await Promise.allSettled([
         is5m ? discover5mMarkets({ tokens: [CONFIG.ARENA_COIN] }) : Promise.resolve([]),
-        discoverUpDownMarkets({ intervals: is5m ? ["1H", "4H"] : [interval.toUpperCase()], limit: 10 }),
+        discoverUpDownMarkets({ intervals: is5m ? ["1H", "4H"] : [intervalTag], limit: 10 }),
         is5m ? discoverCryptoMarkets({ limit: 5 }) : Promise.resolve([]),
       ]);
       const fiveMin = fiveMinR.status === "fulfilled" ? fiveMinR.value : [];
@@ -718,6 +719,7 @@ async function main(): Promise<void> {
 
       return { yesTokenId: picked.yesTokenId, noTokenId: picked.noTokenId };
     }, CONFIG.ARENA_MARKET_INTERVAL === "5m" ? 120_000
+       : CONFIG.ARENA_MARKET_INTERVAL === "15m" ? 300_000   // check every 5 min for 15M
        : CONFIG.ARENA_MARKET_INTERVAL === "1h" ? 600_000    // check every 10 min for 1H
        : 1_800_000);                                        // every 30 min for 4H
   }
