@@ -1149,6 +1149,11 @@ export function gtcOrderCount(): number {
   return pendingGtc.length;
 }
 
+/** Get GTC orders for a specific engine. */
+export function getGtcOrdersForEngine(engineId: string): GtcOrder[] {
+  return pendingGtc.filter(o => o.engineId === engineId);
+}
+
 /**
  * Check all pending GTC orders against current book state. Fill any
  * that now cross. Returns FillResults for filled orders (both

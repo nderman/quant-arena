@@ -112,6 +112,16 @@ export abstract class AbstractEngine implements IBaseEngine {
     return _isBookTradeable(book);
   }
 
+  // ── GTC Order Awareness ─────────────────────────────────────────────────
+  // Engines can check if they have pending GTC (limit) orders sitting on
+  // the book. Prevents double-posting when a maker order is awaiting fill.
+
+  /** Check if this engine has any GTC orders pending in the referee. */
+  protected hasGtcOrder(): boolean {
+    const { getGtcOrdersForEngine } = require("../referee");
+    return getGtcOrdersForEngine(this.state.engineId).length > 0;
+  }
+
   protected portfolioValue(currentPrice: number): number {
     return this.state.cashBalance + this.totalPositionValue(currentPrice);
   }
