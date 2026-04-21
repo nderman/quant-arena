@@ -25,7 +25,8 @@ export const CONFIG = {
   ARENA_COIN:             _coin,                                         // btc/eth/sol/xrp
   ARENA_INSTANCE_ID:      str("ARENA_INSTANCE_ID", _coin),                // ledger/intel file suffix
   ARENA_BINANCE_SYMBOL:   _binanceSymbol,                                  // BTCUSDT/ETHUSDT/etc
-  ARENA_SLUG_PREFIX:      `${_coin}-updown-5m`,                            // for settlement filter
+  ARENA_MARKET_INTERVAL:  str("ARENA_MARKET_INTERVAL", "5m"),               // 5m/1h/4h — which PM up-down markets to trade
+  ARENA_SLUG_PREFIX:      `${_coin}-updown-${str("ARENA_MARKET_INTERVAL", "5m")}`, // for settlement filter
 
   // ── Arena ──────────────────────────────────────────────────────────────────
   ROUND_DURATION_MS:      num("ROUND_DURATION_MS", 6 * 3600_000),       // 6 hours

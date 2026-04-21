@@ -584,11 +584,15 @@ async function main(): Promise<void> {
     const maxAttempts = 10;
     let pick: { title?: string; slug?: string; endDate?: string; yesTokenId: string; noTokenId: string; liquidity: number } | null = null;
     for (let attempt = 1; attempt <= maxAttempts && !pick; attempt++) {
-      // Each call is independent — one timeout shouldn't kill the others.
+      // Discovery strategy depends on ARENA_MARKET_INTERVAL:
+      // "5m" → slug-based 5M discovery (primary) + updown/crypto (fallback)
+      // "1h"/"4h" → updown discovery with the specific interval
+      const interval = CONFIG.ARENA_MARKET_INTERVAL;
+      const is5m = interval === "5m";
       const [fiveMinR, updownR, cryptoR] = await Promise.allSettled([
-        discover5mMarkets({ tokens: [CONFIG.ARENA_COIN] }),
-        discoverUpDownMarkets({ intervals: ["1H", "4H"], limit: 5 }),
-        discoverCryptoMarkets({ limit: 5 }),
+        is5m ? discover5mMarkets({ tokens: [CONFIG.ARENA_COIN] }) : Promise.resolve([]),
+        discoverUpDownMarkets({ intervals: is5m ? ["1H", "4H"] : [interval.toUpperCase()], limit: 10 }),
+        is5m ? discoverCryptoMarkets({ limit: 5 }) : Promise.resolve([]),
       ]);
       const fiveMin = fiveMinR.status === "fulfilled" ? fiveMinR.value : [];
       const updown = updownR.status === "fulfilled" ? updownR.value : [];
@@ -706,7 +710,9 @@ async function main(): Promise<void> {
       }
 
       return { yesTokenId: picked.yesTokenId, noTokenId: picked.noTokenId };
-    }, 120_000);
+    }, CONFIG.ARENA_MARKET_INTERVAL === "5m" ? 120_000
+       : CONFIG.ARENA_MARKET_INTERVAL === "1h" ? 600_000    // check every 10 min for 1H
+       : 1_800_000);                                        // every 30 min for 4H
   }
 
   // ── Live Trading ───────────────────────────────────────────────────────
