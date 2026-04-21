@@ -124,7 +124,7 @@ export const CONFIG = {
   // HFT front-running post-fill, not pre-fill competition).
   COMPETE_ENABLED:           bool("COMPETE_ENABLED", true),
   COMPETE_MAX_PRICE:         num("COMPETE_MAX_PRICE", 0.20),          // only prices below this attract taker competition
-  COMPETE_PROB_MAX:          num("COMPETE_PROB_MAX", 0.50),           // hard cap on rejection probability (50%)
+  COMPETE_PROB_MAX:          num("COMPETE_PROB_MAX", 0.90),           // hard cap on rejection probability — calibrated from live: 5¢ entries fill on losers but get front-run on winners
   COMPETE_SIZE_CAP:          num("COMPETE_SIZE_CAP", 50),             // orders >= this size face full size-penalty
 
   // ── PM book validation ────────────────────────────────────────────────────
