@@ -707,49 +707,35 @@ async function processActionNoLatency(
     };
   }
 
-  // ── Directional maker fill probability ──
-  // In a trending market, asks fill instantly (takers snipe them), bids never fill.
+  // ── Maker orders go straight to FIFO GTC queue ──
+  // No lottery bypass — with the virtual queue model, all maker orders
+  // join the back of the queue and fill only when sharesAhead reaches 0.
+  // The old 12% lottery gave free instant fills that bypassed queue depth.
   const isMakerOrder = action.orderType === "maker";
   if (isMakerOrder) {
-    const delta = getBinanceDelta();
-    const sensitivity = 50.0; // 10bps move = 50% adjustment
-    const adjustment = delta * sensitivity;
-    let fillProb = CONFIG.MAKER_FILL_PROBABILITY;
-    if (action.side === "BUY") {
-      fillProb = Math.max(0.05, Math.min(0.95, fillProb - adjustment)); // price up → bids less likely
-    } else {
-      fillProb = Math.max(0.05, Math.min(0.95, fillProb + adjustment)); // price up → asks more likely
+    if (action.price > 0 && action.size >= CONFIG.MIN_ORDER_SIZE) {
+      const gtcBook = bookFromTick(action.tokenId, tickBooks);
+      const initialDepth = bookDepthAtPrice(gtcBook, action.side as "BUY" | "SELL", action.price);
+      addGtcOrder({
+        engineId: state.engineId,
+        action,
+        state,
+        postedAt: Date.now(),
+        tokenId: action.tokenId,
+        side: action.side as "BUY" | "SELL",
+        limitPrice: action.price,
+        size: action.size,
+        queueAttempts: 0,
+        sharesAhead: initialDepth,
+        lastBookDepth: initialDepth,
+      });
     }
-    if (random() > fillProb) {
-      // GTC: instead of rejecting, store the order for future fill attempts.
-      // The order sits on the book and fills when the market crosses the limit.
-      if (action.price > 0 && action.size >= CONFIG.MIN_ORDER_SIZE) {
-        // Snapshot queue depth: total shares ahead of us at our price level or better.
-        // For BUY: sum all bid sizes at prices >= our limit (they posted before us).
-        // For SELL: sum all ask sizes at prices <= our limit.
-        const gtcBook = bookFromTick(action.tokenId, tickBooks);
-        const initialDepth = bookDepthAtPrice(gtcBook, action.side as "BUY" | "SELL", action.price);
-        addGtcOrder({
-          engineId: state.engineId,
-          action,
-          state,
-          postedAt: Date.now(),
-          tokenId: action.tokenId,
-          side: action.side as "BUY" | "SELL",
-          limitPrice: action.price,
-          size: action.size,
-          queueAttempts: 0,
-          sharesAhead: initialDepth,
-          lastBookDepth: initialDepth,
-        });
-      }
-      return {
-        action, filled: false, fillPrice: 0, fillSize: 0,
-        fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
-        toxicFlowHit: false, orderType: "maker",
-        rejectionReason: "maker_not_filled",
-      };
-    }
+    return {
+      action, filled: false, fillPrice: 0, fillSize: 0,
+      fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
+      toxicFlowHit: false, orderType: "maker",
+      rejectionReason: "maker_not_filled",
+    };
   }
 
   // ── Toxic flow check (re-check book after latency) ──
@@ -1207,11 +1193,19 @@ export function processGtcOrders(tickBooks?: TickBooks): FillResult[] {
       shouldFill = bestBid >= order.limitPrice;
     }
 
-    // Track queue consumption: when book depth at our level shrinks,
-    // shares ahead of us were taken or cancelled, improving our position.
+    // Track queue position from real book changes.
     const currentDepth = bookDepthAtPrice(book, order.side, order.limitPrice);
+
     if (currentDepth < order.lastBookDepth) {
-      order.sharesAhead = Math.max(0, order.sharesAhead - (order.lastBookDepth - currentDepth));
+      // Depth decreased — could be fills (ahead of us) or cancellations (behind us).
+      // Conservative: only credit 50% as queue advancement since we can't
+      // distinguish fills from cancellations without a trade tape.
+      const decrease = order.lastBookDepth - currentDepth;
+      order.sharesAhead = Math.max(0, order.sharesAhead - decrease * 0.5);
+    } else if (currentDepth > order.lastBookDepth) {
+      // Depth increased — new makers posted at our price or better.
+      // They jump ahead of us in price-time priority.
+      order.sharesAhead += (currentDepth - order.lastBookDepth);
     }
     order.lastBookDepth = currentDepth;
 

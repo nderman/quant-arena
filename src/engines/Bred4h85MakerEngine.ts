@@ -66,11 +66,16 @@ export class Bred4h85MakerEngine extends AbstractEngine {
     const holdingBoth = (upPos && upPos.shares > 0) && (downPos && downPos.shares > 0);
     if (holdingBoth) return [];
 
-    const upPrice = tick.midPrice;
-    const downPrice = 1 - upPrice;
+    // Use REAL book prices for both sides (not single-book inversion)
+    const upBook = this.getBookForToken(upTokenId);
+    const downBook = this.getBookForToken(downTokenId);
+    const upMid = upBook.bids[0]?.price && upBook.asks[0]?.price
+      ? (upBook.bids[0].price + upBook.asks[0].price) / 2 : 0;
+    const downMid = downBook.bids[0]?.price && downBook.asks[0]?.price
+      ? (downBook.bids[0].price + downBook.asks[0].price) / 2 : 0;
 
-    const extremeUp = upPrice >= this.minEntryPrice && upPrice <= this.maxEntryPrice;
-    const extremeDown = downPrice >= this.minEntryPrice && downPrice <= this.maxEntryPrice;
+    const extremeUp = upMid >= this.minEntryPrice && upMid <= this.maxEntryPrice;
+    const extremeDown = downMid >= this.minEntryPrice && downMid <= this.maxEntryPrice;
 
     if (!extremeUp && !extremeDown) return [];
 
@@ -81,13 +86,12 @@ export class Bred4h85MakerEngine extends AbstractEngine {
     if (this.candleEntries >= entryLimit) return [];
 
     if (extremeUp && !(upPos && upPos.shares > 0)) {
-      const modelProb = upPrice + 0.03;
-      const edge = this.feeAdjustedEdge(modelProb, upPrice);
+      const modelProb = upMid + 0.03;
+      const edge = this.feeAdjustedEdge(modelProb, upMid);
 
       if (edge.profitable) {
         this.candleEntries++;
-        const book = this.getBookForToken(upTokenId);
-        const bestAsk = book.asks[0]?.price ?? 0;
+        const bestAsk = upBook.asks[0]?.price ?? 0;
         if (bestAsk <= 0) return [];
         const limitPrice = bestAsk - this.spreadTicks * 0.001;
         if (limitPrice <= 0.01 || limitPrice >= bestAsk) return [];
@@ -95,7 +99,7 @@ export class Bred4h85MakerEngine extends AbstractEngine {
         if (size >= 5) {
           return [this.buy(upTokenId, limitPrice, size, {
             orderType: "maker",
-            note: `DCA-M UP ${(upPrice * 100).toFixed(1)}% (entry #${this.candleEntries}): maker limit ${limitPrice.toFixed(3)}`,
+            note: `DCA-M UP ${(upMid * 100).toFixed(1)}% (entry #${this.candleEntries}): maker limit ${limitPrice.toFixed(3)}`,
             signalSource: "bred_4h85_maker",
           })];
         }
@@ -103,13 +107,12 @@ export class Bred4h85MakerEngine extends AbstractEngine {
     }
 
     if (extremeDown && !(downPos && downPos.shares > 0)) {
-      const modelProb = downPrice + 0.03;
-      const edge = this.feeAdjustedEdge(modelProb, downPrice);
+      const modelProb = downMid + 0.03;
+      const edge = this.feeAdjustedEdge(modelProb, downMid);
 
       if (edge.profitable) {
         this.candleEntries++;
-        const book = this.getBookForToken(downTokenId);
-        const bestAsk = book.asks[0]?.price ?? 0;
+        const bestAsk = downBook.asks[0]?.price ?? 0;
         if (bestAsk <= 0) return [];
         const limitPrice = bestAsk - this.spreadTicks * 0.001;
         if (limitPrice <= 0.01 || limitPrice >= bestAsk) return [];
@@ -117,7 +120,7 @@ export class Bred4h85MakerEngine extends AbstractEngine {
         if (size >= 5) {
           return [this.buy(downTokenId, limitPrice, size, {
             orderType: "maker",
-            note: `DCA-M DOWN ${(downPrice * 100).toFixed(1)}% (entry #${this.candleEntries}): maker limit ${limitPrice.toFixed(3)}`,
+            note: `DCA-M DOWN ${(downMid * 100).toFixed(1)}% (entry #${this.candleEntries}): maker limit ${limitPrice.toFixed(3)}`,
             signalSource: "bred_4h85_maker",
           })];
         }
