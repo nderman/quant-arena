@@ -726,7 +726,7 @@ async function processActionNoLatency(
         limitPrice: action.price,
         size: action.size,
         queueAttempts: 0,
-        sharesAhead: Math.max(initialDepth, CONFIG.GTC_MIN_QUEUE_DEPTH),
+        sharesAhead: Math.max(initialDepth, hiddenQueueFloor(action.price)),
         lastBookDepth: initialDepth,
       });
     }
@@ -1114,6 +1114,29 @@ async function processActionNoLatency(
 
 // ── GTC Limit Order Subsystem ────────────────────────────────────────────────
 /** Sum shares at or better than limitPrice on the given side of the book. */
+/**
+ * Price-dependent hidden HFT queue floor for new GTC orders.
+ * HFT concentrates where the asymmetric payoff lives (extreme prices).
+ * Mid-prices have no hidden queue — visible book is the real queue.
+ *
+ *   ≤0.15 or ≥0.85:  floor = GTC_MIN_QUEUE_DEPTH (~500) — deep HFT zone
+ *   0.20–0.80:       floor = 0 — trust the visible book
+ *   gradient in the 0.15-0.20 and 0.80-0.85 bands
+ */
+function hiddenQueueFloor(price: number): number {
+  const maxFloor = CONFIG.GTC_MIN_QUEUE_DEPTH;
+  const extremeCut = 0.15;
+  const midCut = 0.20;
+  const distFromCenter = Math.abs(price - 0.50);  // 0 at mid, 0.50 at extremes
+  const extremeness = 0.50 - extremeCut;  // 0.35 = fully extreme
+  const midStart = 0.50 - midCut;          // 0.30 = where floor hits zero
+  if (distFromCenter >= extremeness) return maxFloor;
+  if (distFromCenter <= midStart) return 0;
+  // Linear ramp in the transition band
+  const t = (distFromCenter - midStart) / (extremeness - midStart);
+  return Math.round(maxFloor * t);
+}
+
 function bookDepthAtPrice(book: OrderBook, side: "BUY" | "SELL", limitPrice: number): number {
   let depth = 0;
   if (side === "BUY") {
