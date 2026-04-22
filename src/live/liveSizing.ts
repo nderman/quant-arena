@@ -76,7 +76,7 @@ export function sizeForLive(
   }
 
   // 3. Per-candle exposure cap (shared budget across DCA entries)
-  const exposureCap = cfg.liveBankrollUsd * (cfg.maxCandleExposurePct ?? 0.60);
+  const exposureCap = cfg.liveBankrollUsd * (cfg.maxCandleExposurePct ?? RISK_CONFIG.MAX_CANDLE_EXPOSURE_PCT);
   const currentExposure = cfg.currentCandleExposureUsd ?? 0;
   const remainingExposure = Math.max(0, exposureCap - currentExposure);
   if (simAction.side === "BUY" && targetUsd > remainingExposure) {
