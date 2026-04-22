@@ -298,7 +298,7 @@ async function runRound(
     const lookback = CONFIG.ARENA_MARKET_INTERVAL === "4h" ? 360
                    : CONFIG.ARENA_MARKET_INTERVAL === "1h" ? 120
                    : 60;
-    pollAndSettle(statesForSettlement, { tokenSlugPrefix: CONFIG.ARENA_SLUG_PREFIX, roundId, lookbackMinutes: lookback }).catch(err =>
+    pollAndSettle(statesForSettlement, { tokenSlugPrefix: CONFIG.ARENA_SLUG_PREFIX, roundId, lookbackMinutes: lookback, intervalTag: CONFIG.ARENA_MARKET_INTERVAL }).catch(err =>
       console.error("[arena] settlement error:", err.message)
     );
   }, 30_000);
