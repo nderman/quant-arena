@@ -726,7 +726,7 @@ async function processActionNoLatency(
         limitPrice: action.price,
         size: action.size,
         queueAttempts: 0,
-        sharesAhead: initialDepth,
+        sharesAhead: Math.max(initialDepth, CONFIG.GTC_MIN_QUEUE_DEPTH),
         lastBookDepth: initialDepth,
       });
     }
