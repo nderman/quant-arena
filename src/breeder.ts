@@ -183,9 +183,9 @@ ${history}
 ${trades}
 
 ## Market Rules
-- Polymarket 5M binary markets: BTC/ETH/XRP go UP or DOWN in a 5-minute window
+- Polymarket binary markets: BTC/ETH/SOL go UP or DOWN in a fixed window (5m/15m/1h/4h per arena)
 - Quartic taker fee: 0.25 × (P×(1-P))² — max 1.56% at P=0.50, only 0.20% at P=0.90, near 0% at P=0.99
-- Maker fee: 0% + 20% rebate of taker fees (but 60% fill probability, 5bps adverse selection)
+- Maker fee: 0% + 20% rebate of taker fees
 - UP and DOWN tokens have independent orderbooks (UP + DOWN ≠ $1 — the gap is merge arb)
 - Settlement: $1 per share if correct, $0 if wrong
 - Merge: buy opposite side at real book price + dynamic gas (on-chain, 3s finality)
@@ -262,9 +262,9 @@ fee = amount × 0.25 × (P × (1-P))²
   P=0.01: 0.0025%   P=0.10: 0.20%   P=0.30: 1.10%
   P=0.50: 1.56% ←MAX  P=0.70: 1.10%   P=0.90: 0.20%   P=0.99: 0.003%
 
-The fee CRUSHES edges at mid-prices. Engines that trade at P=0.40-0.60
-without massive raw edge will bleed. Profitable strategies live at the
-EXTREMES (P<0.20 or P>0.80) where fees are negligible.
+The fee CRUSHES edges at mid-prices for taker orders. Makers pay 0%
+(+20% rebate) regardless of price. Look at the data to see where
+ACTUAL fills are happening and which strategies survive after fees.
 
 ALWAYS call this.feeAdjustedEdge(modelProb, marketPrice) before trading.
 If !edge.profitable, return [].
@@ -307,19 +307,20 @@ The cheaperExit() helper recommends MERGE only when holdsOpposite is
 true; trust its result.
 
 ═══════════════════════════════════════════════════════════════════
-MAKER ORDERS — POST-ONLY ENFORCED, 12% FILL PROB
+MAKER ORDERS — POST-ONLY ENFORCED
 ═══════════════════════════════════════════════════════════════════
 Pass { orderType: "maker" } for 0% fee + 20% rebate of taker fees.
 
 CONSTRAINTS:
 - Maker BUY: action.price MUST be < bestAsk (otherwise crosses spread, rejected)
 - Maker SELL: action.price MUST be > bestBid
-- Fill probability is only 12% (real HFT queue priority is brutal)
-- Even when filled, expect 5bps adverse selection
+- Orders that don't fill immediately wait in a queue, expire on candle rotation.
+- Fill rates vary with price, book depth, and market conditions. Look at
+  the trade data to see what actually fills for similar strategies.
 
-action.price IS A LIMIT. The fill MUST be at or better than action.price.
-If you submit BUY at $0.15 and the book has only asks at $0.20, your
-order is REJECTED — it does NOT fill at $0.20.
+action.price IS A LIMIT. The fill price will be at or better than action.price.
+If the book hasn't crossed your limit yet, the order waits in the queue.
+If the book crosses WAY past your limit, you fill at the book price.
 
 ═══════════════════════════════════════════════════════════════════
 BOOK VALIDITY GUARDS (your action may silently reject)
