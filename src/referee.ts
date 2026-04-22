@@ -815,6 +815,21 @@ async function processActionNoLatency(
       return makeRejectedFill(action, actualLatency, "competing_taker");
     }
 
+    // Adverse-selection gate for extreme-price takers. Live PM (Apr 20-21)
+    // proved taker BUYs at <15¢ fill ONLY on losing candles (informed takers
+    // eat winners). Model this: if Binance momentum favors our trade
+    // direction (we'd win), reject the fill — HFTs got there first.
+    // Only fires below 15¢ where the asymmetric-payoff race is intense.
+    if (!isMaker && action.side === "BUY" && takerRefPrice > 0 && takerRefPrice < 0.15) {
+      const delta = getBinanceDelta();  // positive = price rising
+      const isDown = !!(state.activeDownTokenId && action.tokenId === state.activeDownTokenId);
+      // UP wins when price rises (delta > 0); DOWN wins when price falls (delta < 0)
+      const tradeWinning = isDown ? delta < -0.0002 : delta > 0.0002;
+      if (tradeWinning) {
+        return makeRejectedFill(action, actualLatency, "competing_taker");
+      }
+    }
+
     // Post-Only enforcement: maker BUY must NOT cross the spread. If the
     // engine's limit price is at or above bestAsk, the order would execute
     // immediately as a taker. Reject (matches real PM Post-Only behavior).

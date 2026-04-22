@@ -35,6 +35,9 @@ export interface LiveArenaConfig {
   simBankrollUsd: number;        // what engines were designed for ($50 default)
   submit: OrderSubmitter;
   getOrder: OrderLookup;
+  /** Cancel a batch of pending orders by clientOrderId. Optional — if
+   *  omitted, candle rotation leaves stale makers on the book. */
+  cancelOrders?: (clientOrderIds: string[]) => Promise<number>;
   /** Override default intervals for testing */
   reconcileIntervalMs?: number;
   settlementIntervalMs?: number;
@@ -43,6 +46,9 @@ export interface LiveArenaConfig {
 export interface LiveArenaHandle {
   states: Map<string, LiveEngineState>;
   onSimAction: (engineId: string, action: EngineAction, positionSide: "YES" | "NO") => Promise<ExecuteResult | null>;
+  /** Called by arena when candle rotates. Cancels all pending orders on
+   *  expired tokens and arms fast-reconcile for approach-to-settlement. */
+  onCandleRotate: (expiredTokenIds: Set<string>, newWindowEndMs: number) => Promise<void>;
   stop: () => void;
   snapshot: () => LiveSnapshot;
 }
@@ -104,7 +110,12 @@ export function startLiveArena(cfg: LiveArenaConfig): LiveArenaHandle {
   }
 
   const reconcileMs = cfg.reconcileIntervalMs ?? 5_000;
+  const reconcileFastMs = 1_000;  // last 30s before settlement
   const settlementMs = cfg.settlementIntervalMs ?? 30_000;
+
+  // Track candle window end so reconcile can switch to fast mode in the
+  // last 30s — captures fills that happen right before settlement.
+  let currentWindowEndMs = 0;
 
   // Use recursive setTimeout instead of setInterval so a slow poll can't
   // stack up behind itself. Each loop waits for its previous run to finish
@@ -128,7 +139,13 @@ export function startLiveArena(cfg: LiveArenaConfig): LiveArenaHandle {
         }
       }
     } finally {
-      if (running) reconcileTimer = setTimeout(runReconcile, reconcileMs);
+      if (running) {
+        // Fast-poll in the last 30s before candle settlement — critical window
+        // for catching last-second maker fills before the $1/$0 resolution.
+        const secsToSettle = currentWindowEndMs > 0 ? (currentWindowEndMs - Date.now()) / 1000 : Infinity;
+        const nextMs = (secsToSettle > 0 && secsToSettle < 30) ? reconcileFastMs : reconcileMs;
+        reconcileTimer = setTimeout(runReconcile, nextMs);
+      }
     }
   };
 
@@ -169,6 +186,30 @@ export function startLiveArena(cfg: LiveArenaConfig): LiveArenaHandle {
     });
   };
 
+  const onCandleRotate = async (expiredTokenIds: Set<string>, newWindowEndMs: number): Promise<void> => {
+    currentWindowEndMs = newWindowEndMs;
+    if (!cfg.cancelOrders) return;
+
+    // Collect clientOrderIds for pending orders on expired tokens
+    const toCancel: string[] = [];
+    for (const [, state] of states) {
+      for (const [clientOrderId, order] of state.pendingOrders) {
+        if (expiredTokenIds.has(order.tokenId)) {
+          toCancel.push(clientOrderId);
+        }
+      }
+    }
+    if (toCancel.length === 0) return;
+
+    try {
+      const cancelled = await cfg.cancelOrders(toCancel);
+      console.log(`[live-cancel:${cfg.coin}] cancelled ${cancelled}/${toCancel.length} orders on rotation`);
+      // Reconcile loop will pick up CANCELLED status and release the cash.
+    } catch (err) {
+      console.warn(`[live-cancel:${cfg.coin}] error: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
   const stop = (): void => {
     running = false;
     if (reconcileTimer) clearTimeout(reconcileTimer);
@@ -188,7 +229,7 @@ export function startLiveArena(cfg: LiveArenaConfig): LiveArenaHandle {
     })),
   });
 
-  return { states, onSimAction, stop, snapshot };
+  return { states, onSimAction, onCandleRotate, stop, snapshot };
 }
 
 /**

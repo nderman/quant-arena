@@ -705,6 +705,15 @@ async function main(): Promise<void> {
         .sort((a, b) => new Date(a.endDate).getTime() - new Date(b.endDate).getTime());
       const picked = active[0] || markets[0];
 
+      // Capture the tokens we're rotating AWAY from for live cancellation
+      const expiredLiveTokens = new Set<string>();
+      if (currentActiveTokenId && currentActiveTokenId !== picked.yesTokenId) {
+        expiredLiveTokens.add(currentActiveTokenId);
+      }
+      if (currentActiveDownTokenId && currentActiveDownTokenId !== picked.noTokenId) {
+        expiredLiveTokens.add(currentActiveDownTokenId);
+      }
+
       // Clean up fee pool for rotated-out markets
       if (currentActiveTokenId) clearFeePoolForMarket(currentActiveTokenId);
       if (currentActiveDownTokenId) clearFeePoolForMarket(currentActiveDownTokenId);
@@ -719,6 +728,14 @@ async function main(): Promise<void> {
       currentMarketSymbol = slugToBinanceSymbol(picked.slug);
       currentWindowEnd = new Date(picked.endDate).getTime();
       currentWindowStart = currentWindowEnd - CONFIG.ARENA_INTERVAL_MS;
+
+      // Notify live arena: cancel stale makers on expired tokens, arm
+      // fast-reconcile for approach-to-settlement of the new candle.
+      if (liveArenaHandle && expiredLiveTokens.size > 0) {
+        liveArenaHandle.onCandleRotate(expiredLiveTokens, currentWindowEnd).catch(err =>
+          console.warn(`[arena] live onCandleRotate error: ${err?.message ?? err}`)
+        );
+      }
       if (activeStates) {
         for (const [, state] of activeStates) {
           state.activeTokenId = picked.yesTokenId;
@@ -741,6 +758,7 @@ async function main(): Promise<void> {
     try {
       let submit: any;
       let getOrder: any;
+      let cancelOrders: any = undefined;
       if (CONFIG.LIVE_DRY_RUN) {
         console.log("[arena] LIVE_DRY_RUN — using mock fills (no real CLOB)");
         const adapter = buildDryRunAdapter();
@@ -755,10 +773,11 @@ async function main(): Promise<void> {
         } else {
           console.log("[arena] LIVE mode — initializing CLOB client...");
           const { initClobClient } = require("./live/clobClient");
-          const { buildClobSubmitter, buildClobLookup } = require("./live/clobSubmitter");
+          const { buildClobSubmitter, buildClobLookup, buildClobCanceller } = require("./live/clobSubmitter");
           const client = await initClobClient();
           submit = buildClobSubmitter({ client });
           getOrder = buildClobLookup({ client });
+          cancelOrders = buildClobCanceller({ client });
           console.log("[arena] LIVE mode — real CLOB orders enabled");
         }
       }
@@ -768,6 +787,7 @@ async function main(): Promise<void> {
           simBankrollUsd: CONFIG.STARTING_CASH,
           submit,
           getOrder,
+          cancelOrders,
         });
         const engineCount = liveArenaHandle.states.size;
         console.log(`[arena] Live arena started: ${engineCount} graduated engine(s)\n`);

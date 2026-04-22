@@ -123,6 +123,26 @@ export function buildClobSubmitter(cfg: ClobSubmitterConfig): OrderSubmitter {
 }
 
 /**
+ * Cancel a batch of orders by clientOrderId. Returns count successfully
+ * cancelled. Used by liveArena on candle rotation to clear stale makers
+ * that would otherwise sit on the book after their token expires.
+ */
+export function buildClobCanceller(cfg: { client: ClobClientType }): (clientOrderIds: string[]) => Promise<number> {
+  return async (clientOrderIds: string[]) => {
+    if (clientOrderIds.length === 0) return 0;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const r = await (cfg.client as any).cancelOrders(clientOrderIds);
+      // Response shape varies; return input count as best-effort
+      return r ? clientOrderIds.length : 0;
+    } catch (err) {
+      console.warn(`[clob-cancel] error: ${err instanceof Error ? err.message : String(err)}`);
+      return 0;
+    }
+  };
+}
+
+/**
  * Build an OrderLookup backed by a real CLOB client.
  * Polls the CLOB API for order status by clientOrderId.
  */

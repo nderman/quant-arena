@@ -70,7 +70,7 @@ export const CONFIG = {
   // ── Maker / Taker ──────────────────────────────────────────────────────────
   MAKER_FILL_PROBABILITY: num("MAKER_FILL_PROBABILITY", 0.12),          // 12% — realistic queue priority vs HFT (was 60%, way too generous)
   GTC_QUEUE_REJECT_MAX:   num("GTC_QUEUE_REJECT_MAX", 0.85),            // GTC fills at extreme prices face queue rejection (HFT ahead of us)
-  GTC_MIN_QUEUE_DEPTH:    num("GTC_MIN_QUEUE_DEPTH", 500),              // minimum sharesAhead for new GTC orders (hidden HFT liquidity we can't see)
+  GTC_MIN_QUEUE_DEPTH:    num("GTC_MIN_QUEUE_DEPTH", 200),              // minimum sharesAhead for new GTC orders (hidden HFT liquidity we can't see)
   MAKER_REBATE_RATE:      num("MAKER_REBATE_RATE", 0.20),               // makers get 20% of taker fees collected
   MAKER_ADVERSE_BPS:      num("MAKER_ADVERSE_BPS", 5),                  // 5bps adverse selection on maker fills
   MIN_ORDER_SIZE:          num("MIN_ORDER_SIZE", 5),                     // CLOB rejects < 5 shares
