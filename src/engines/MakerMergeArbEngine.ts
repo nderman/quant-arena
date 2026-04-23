@@ -126,7 +126,7 @@ export class MakerMergeArbEngine extends AbstractEngine {
     if (secsRemaining < this.killswitchSec * scale) return []; // killswitch
 
     // Need a clear hard side from Binance momentum
-    const momentum = this.recentMomentum(this.momentumLookback);
+    const momentum = this.recentMomentum(this.arenaScaledSec(this.momentumLookback));
     if (Math.abs(momentum) < this.momentumThresh) return [];
 
     const hard: "UP" | "DOWN" = momentum > 0 ? "UP" : "DOWN";

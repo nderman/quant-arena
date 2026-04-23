@@ -48,13 +48,15 @@ export class Stingo43Engine extends AbstractEngine {
 
     const secsRemaining = this.getSecondsRemaining();
     if (secsRemaining < 0) return [];
-    const elapsed = 300 - secsRemaining;
-    if (elapsed < this.entryWindowStartSec || elapsed > this.entryWindowEndSec) return [];
+    const candleSec = this.candleSeconds() || 300;
+    const scale = candleSec / 300;
+    const elapsed = candleSec - secsRemaining;
+    if (elapsed < this.entryWindowStartSec * scale || elapsed > this.entryWindowEndSec * scale) return [];
 
     // Momentum from candle open (T+0) to now. Lookback = elapsed so we
     // capture the full candle move without pulling samples from the
     // previous candle.
-    const momentum = this.recentMomentum(Math.min(elapsed, 240));
+    const momentum = this.recentMomentum(Math.min(elapsed, 240 * scale));
     if (Math.abs(momentum) < this.momentumThreshold) return [];
 
     const buyUp = momentum > 0;

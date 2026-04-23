@@ -61,7 +61,8 @@ export class ChopFaderEngine extends AbstractEngine {
     if (elapsedFrac < this.entryStartFrac || elapsedFrac > this.entryEndFrac) return [];
 
     // Regime gate: only chop or quiet
-    const regime = this.currentRegimeStable(this.regimeLookbackSec);
+    const scaledLookback = this.arenaScaledSec(this.regimeLookbackSec);
+    const regime = this.currentRegimeStable(scaledLookback);
     if (regime !== "CHOP" && regime !== "QUIET") return [];
 
     const upBook = this.getBookForToken(upTokenId);
@@ -92,7 +93,7 @@ export class ChopFaderEngine extends AbstractEngine {
     if (fadePrice < this.underdogMinPrice || fadePrice > this.underdogMaxPrice) return [];
 
     // Reject if Binance momentum confirms the extreme (= real trend, not chop)
-    const momentum = this.recentMomentum(this.regimeLookbackSec);
+    const momentum = this.recentMomentum(scaledLookback);
     const momentumBps = momentum * 10000;
     if (extremeSide === "UP" && momentumBps > this.trendRejectBps) return [];
     if (extremeSide === "DOWN" && momentumBps < -this.trendRejectBps) return [];

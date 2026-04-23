@@ -66,7 +66,7 @@ export class BaguetteDriftEngine extends AbstractEngine {
     if (elapsed > this.entryEndSec * scale) return [];
 
     // Momentum picks leading side — we buy the one already winning
-    const momentum = this.recentMomentum(this.momentumLookback);
+    const momentum = this.recentMomentum(this.arenaScaledSec(this.momentumLookback));
     if (Math.abs(momentum) < this.momentumThresh) return [];
 
     const buyUp = momentum > 0;

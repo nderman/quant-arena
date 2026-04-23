@@ -171,9 +171,10 @@ export abstract class AbstractEngine implements IBaseEngine {
   // the start of onTick() (before the source filter) to enable.
 
   private _binancePrices: { price: number; time: number }[] = [];
-  private readonly _binanceMaxSamples = 900; // ~15 minutes @ 1 sample/sec
-  // Rationale: the regime gates use lookbacks up to 600s (10 min) to catch
-  // slow drifts that 60s windows miss. 900 samples gives headroom.
+  private readonly _binanceMaxSamples = 3600; // ~60 minutes @ 1 sample/sec
+  // Rationale: longer-interval arenas (1h/4h) need lookbacks up to ~40min
+  // (4h × 15% = 36min) to have meaningful momentum signal. 3600 samples
+  // gives headroom. Memory cost: ~60KB/engine which is negligible.
 
   /**
    * Call from onTick() before your source filter. Records Binance ticks
@@ -248,6 +249,29 @@ export abstract class AbstractEngine implements IBaseEngine {
    */
   protected absMomentum(lookbackSec: number = 60): number {
     return Math.abs(this.recentMomentum(lookbackSec));
+  }
+
+  /**
+   * Scale a momentum lookback by the current arena's candle duration.
+   * An engine written for 5M that wants a 60s momentum window can use
+   * `this.arenaScaledSec(60)` to get the equivalent scaled window on
+   * 15m/1h/4h arenas (180s, 720s, 2880s respectively). Capped so we
+   * never request a lookback longer than the available Binance buffer.
+   */
+  protected arenaScaledSec(baseSec: number): number {
+    const candleSec = this.candleSeconds();
+    if (candleSec <= 0) return baseSec;
+    const scale = candleSec / 300;
+    const scaled = Math.round(baseSec * scale);
+    // Cap at buffer size (seconds) — can't look back further than we've tracked.
+    return Math.min(scaled, this._binanceMaxSamples);
+  }
+
+  /** Candle duration in seconds. 0 if window not set yet. */
+  protected candleSeconds(): number {
+    const end = this.state.marketWindowEnd || 0;
+    const start = this.state.marketWindowStart || 0;
+    return Math.max(0, Math.round((end - start) / 1000));
   }
 
   /**
