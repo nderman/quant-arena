@@ -20,12 +20,10 @@ VPS = "root@165.232.84.91"
 ARENA_DIR = "/root/quant-arena/logs"
 
 ARENAS = [
-    ("btc", "5m"),
-    ("eth", "5m"),
-    ("sol", "5m"),
-    ("btc", "15m"),
-    ("btc", "1h"),
-    ("btc", "4h"),
+    ("btc", "5m"),  ("eth", "5m"),  ("sol", "5m"),
+    ("btc", "15m"), ("eth", "15m"), ("sol", "15m"),
+    ("btc", "1h"),  ("eth", "1h"),  ("sol", "1h"),
+    ("btc", "4h"),  ("eth", "4h"),  ("sol", "4h"),
 ]
 
 BROKEN_INTERVALS: set[str] = set()  # Fixed Apr 21: endDate + slug prefix + rotation discovery

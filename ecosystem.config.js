@@ -47,9 +47,16 @@ const breederApp = (coin) => ({
 module.exports = {
   apps: [
     ...COINS.map(c => arenaApp(c)),           // 5M arenas (existing)
-    arenaApp("btc", "15m"),                    // BTC 15M arena
-    arenaApp("btc", "1h"),                     // BTC 1H arena ($420k liquidity)
-    arenaApp("btc", "4h"),                     // BTC 4H arena
+    // 15M / 1H / 4H across all 3 coins (full cross-section for regime/interval analysis)
+    arenaApp("btc", "15m"),
+    arenaApp("btc", "1h"),
+    arenaApp("btc", "4h"),
+    arenaApp("eth", "15m"),
+    arenaApp("eth", "1h"),
+    arenaApp("eth", "4h"),
+    arenaApp("sol", "15m"),
+    arenaApp("sol", "1h"),
+    arenaApp("sol", "4h"),
     ...COINS.map(breederApp),
     {
       name: "quant-telegram",
