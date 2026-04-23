@@ -76,7 +76,13 @@ def main():
             if rt < start or rt > end:
                 continue
             total_rounds[coin] += 1
-            regime = r.get("regime", "UNKNOWN")
+            regime_field = r.get("regime")
+            if isinstance(regime_field, dict):
+                regime = regime_field.get("label", "UNKNOWN")
+            elif isinstance(regime_field, str):
+                regime = regime_field
+            else:
+                regime = "UNKNOWN"
             regime_counts[coin][regime] += 1
             for eng in r.get("allResults", []):
                 eid = eng.get("engineId") or eng.get("id")
