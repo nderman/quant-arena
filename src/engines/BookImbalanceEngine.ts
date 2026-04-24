@@ -25,7 +25,10 @@ export class BookImbalanceEngine extends AbstractEngine {
   version = "1.0.0";
 
   private readonly threshold = 0.4;
-  private readonly persistenceTicks = 10;
+  // Loosened from 10→5 ticks Apr 24 — 10 was too strict, never saw signal
+  // in 30min after deploy. 5 ticks ≈ 1s persistence at PM's ~5Hz update
+  // rate, still filters flicker but catches real imbalance events.
+  private readonly persistenceTicks = 5;
   private readonly entryMin = 0.35;
   private readonly entryMax = 0.75;
   private readonly maxCashPct = 0.20;

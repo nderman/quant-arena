@@ -1437,51 +1437,51 @@ console.log("\n── Signal Contrarian gate logic ───────");
   assert(!b.fngFired && !b.fundingFired, "neither gate should fire");
 }
 
-// 2. F&G extreme greed alone → DOWN (single-gate, not confirmed)
+// 2. F&G greed alone → DOWN (single-gate, not confirmed)
 {
-  const b = computeSignalBias(80, 0);
+  const b = computeSignalBias(70, 0);
   assert(b.side === "DOWN", `greed: expected DOWN, got ${b.side}`);
   assert(b.fngFired && !b.fundingFired, "fng fired, funding didn't");
   assert(!b.confirmed, "single gate is not confirmed");
 }
 
-// 3. F&G extreme fear alone → UP
+// 3. F&G fear alone → UP
 {
-  const b = computeSignalBias(20, 0);
+  const b = computeSignalBias(30, 0);
   assert(b.side === "UP", `fear: expected UP, got ${b.side}`);
   assert(b.fngFired && !b.fundingFired, "fng fired, funding didn't");
 }
 
 // 4. Positive funding alone → DOWN (longs paying = crowded)
 {
-  const b = computeSignalBias(50, 0.0003);
+  const b = computeSignalBias(50, 0.00015);
   assert(b.side === "DOWN", `pos funding: expected DOWN, got ${b.side}`);
   assert(!b.fngFired && b.fundingFired, "funding fired, fng didn't");
 }
 
 // 5. Negative funding alone → UP
 {
-  const b = computeSignalBias(50, -0.0005);
+  const b = computeSignalBias(50, -0.00025);
   assert(b.side === "UP", `neg funding: expected UP, got ${b.side}`);
 }
 
 // 6. Both agree: greed + positive funding → DOWN confirmed
 {
-  const b = computeSignalBias(85, 0.0004);
+  const b = computeSignalBias(70, 0.0002);
   assert(b.side === "DOWN", `both agree greed+pos: expected DOWN, got ${b.side}`);
   assert(b.confirmed, "both-agree should be confirmed");
 }
 
 // 7. Both agree: fear + negative funding → UP confirmed
 {
-  const b = computeSignalBias(15, -0.0003);
+  const b = computeSignalBias(30, -0.0002);
   assert(b.side === "UP", `both agree fear+neg: expected UP, got ${b.side}`);
   assert(b.confirmed, "both-agree should be confirmed");
 }
 
 // 8. Disagreement → null (ambiguous, skip)
 {
-  const b = computeSignalBias(80, -0.0005); // greed but shorts paying?
+  const b = computeSignalBias(70, -0.0003); // greed but shorts paying?
   assert(b.side === null, `disagreement: expected null, got ${b.side}`);
   assert(b.fngFired && b.fundingFired, "both fired but disagree");
 }
@@ -1490,20 +1490,22 @@ console.log("\n── Signal Contrarian gate logic ───────");
 {
   const b1 = computeSignalBias(null, 0.0003);
   assert(b1.side === "DOWN", `null fng + pos funding: expected DOWN, got ${b1.side}`);
-  const b2 = computeSignalBias(80, null);
+  const b2 = computeSignalBias(70, null);
   assert(b2.side === "DOWN", `greed + null funding: expected DOWN, got ${b2.side}`);
   const b3 = computeSignalBias(null, null);
   assert(b3.side === null, `both null: expected null, got ${b3.side}`);
 }
 
-// 10. Boundary: exactly 75/25 F&G → triggers (≥ / ≤)
+// 10. Boundary: exactly 65/35 F&G → triggers (≥ / ≤)
 {
-  const hi = computeSignalBias(75, 0);
-  assert(hi.side === "DOWN", `F&G=75 boundary: expected DOWN, got ${hi.side}`);
-  const lo = computeSignalBias(25, 0);
-  assert(lo.side === "UP", `F&G=25 boundary: expected UP, got ${lo.side}`);
-  const mid = computeSignalBias(74, 0);
-  assert(mid.side === null, `F&G=74 below threshold: expected null, got ${mid.side}`);
+  const hi = computeSignalBias(65, 0);
+  assert(hi.side === "DOWN", `F&G=65 boundary: expected DOWN, got ${hi.side}`);
+  const lo = computeSignalBias(35, 0);
+  assert(lo.side === "UP", `F&G=35 boundary: expected UP, got ${lo.side}`);
+  const mid = computeSignalBias(64, 0);
+  assert(mid.side === null, `F&G=64 below threshold: expected null, got ${mid.side}`);
+  const mid2 = computeSignalBias(50, 0);
+  assert(mid2.side === null, `F&G=50 neutral: expected null, got ${mid2.side}`);
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

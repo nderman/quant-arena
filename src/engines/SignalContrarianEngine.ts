@@ -13,11 +13,12 @@ export interface SignalBias {
  * Pure decision function: given F&G value (0-100) and funding rate (decimal),
  * return which side to fade and whether both signals confirm each other.
  *
- * Contrarian interpretation:
- *  - F&G ≥ 75 (extreme greed)  → fade DOWN
- *  - F&G ≤ 25 (extreme fear)   → buy UP
- *  - Funding > +0.02% (longs paying) → fade DOWN
- *  - Funding < -0.02% (shorts paying) → buy UP
+ * Contrarian interpretation (thresholds relaxed Apr 24 — original 25/75
+ * and 0.02% bounds meant the engine never fired at normal macro levels):
+ *  - F&G ≥ 65 (greed)  → fade DOWN
+ *  - F&G ≤ 35 (fear)   → buy UP
+ *  - Funding > +0.01% (longs paying) → fade DOWN
+ *  - Funding < -0.01% (shorts paying) → buy UP
  *
  * If both gates fire and disagree, return side=null (ambiguous, skip).
  * If neither fires, return side=null (no edge).
@@ -28,14 +29,14 @@ export function computeSignalBias(
 ): SignalBias {
   let fngBias: "UP" | "DOWN" | null = null;
   if (fng != null) {
-    if (fng >= 75) fngBias = "DOWN";
-    else if (fng <= 25) fngBias = "UP";
+    if (fng >= 65) fngBias = "DOWN";
+    else if (fng <= 35) fngBias = "UP";
   }
 
   let fundingBias: "UP" | "DOWN" | null = null;
   if (fundingRate != null) {
-    if (fundingRate > 0.0002) fundingBias = "DOWN";
-    else if (fundingRate < -0.0002) fundingBias = "UP";
+    if (fundingRate > 0.0001) fundingBias = "DOWN";
+    else if (fundingRate < -0.0001) fundingBias = "UP";
   }
 
   const fngFired = fngBias !== null;
