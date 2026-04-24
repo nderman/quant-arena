@@ -536,10 +536,18 @@ function writeRoundIntel(roundId: string, results: EngineRoundResult[]): void {
   console.log(`[arena] Leader: ${leader.engineId} with P&L ${leader.totalPnl >= 0 ? "+" : ""}$${leader.totalPnl.toFixed(2)}`);
 
   // Append to round history (breeder uses last N rounds for multi-round analysis)
-  const historyPath = path.join(path.dirname(CONFIG.ROUND_INTEL_PATH), `round_history_${CONFIG.ARENA_COIN}.json`);
+  // Uses INSTANCE_ID so each arena (5m/15m/1h/4h) has its own file — lets
+  // per-arena analysis work without inferring from trade counts.
+  const historyPath = path.join(path.dirname(CONFIG.ROUND_INTEL_PATH), `round_history_${CONFIG.ARENA_INSTANCE_ID}.json`);
   let history: any[] = [];
   try { history = JSON.parse(fs.readFileSync(historyPath, "utf-8")); } catch {}
-  history.push({ ...intel, timestamp: new Date().toISOString() });
+  history.push({
+    ...intel,
+    timestamp: new Date().toISOString(),
+    arenaInstanceId: CONFIG.ARENA_INSTANCE_ID,
+    coin: CONFIG.ARENA_COIN,
+    interval: CONFIG.ARENA_MARKET_INTERVAL,
+  });
   // Keep last 100 rounds (~200KB). Was 20, which caused the breeder to
   // never breed again: the marker said "20 rounds at last breed" and the
   // file always had exactly 20, so new-rounds count was permanently 0.
