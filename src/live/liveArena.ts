@@ -32,6 +32,10 @@ import type { LiveEnginesFile } from "./graduation";
 
 export interface LiveArenaConfig {
   coin: "btc" | "eth" | "sol" | "xrp";
+  /** Arena instance identifier (e.g. "eth", "eth-15m"). When set, live_engines.json
+   *  scopes by this key instead of coin — so different arenas for the same
+   *  coin can run different live engines. */
+  arenaInstanceId?: string;
   simBankrollUsd: number;        // what engines were designed for ($50 default)
   submit: OrderSubmitter;
   getOrder: OrderLookup;
@@ -67,21 +71,29 @@ export interface LiveSnapshot {
 }
 
 /**
- * Load graduated engine records for the given coin from live_engines.json.
- * Returns empty array if file missing or no engines graduated.
+ * Load graduated engine records for the given arena from live_engines.json.
+ *
+ * Keys are arena instance IDs (e.g. "btc", "btc-15m", "eth-1h"). Falls back
+ * to coin-level key for backward compat — if "eth" key exists and no
+ * "eth-15m" key, all ETH arenas load from "eth". Any engine record can
+ * optionally include `arenaInstanceId` to restrict to one arena only.
  */
-export function loadGraduatedEngines(coin: string): { engineId: string; bankrollUsd: number; graduationRoundId: string }[] {
+export function loadGraduatedEngines(coin: string, arenaInstanceId?: string): { engineId: string; bankrollUsd: number; graduationRoundId: string }[] {
   const p = path.join(DATA_DIR, "live_engines.json");
   if (!fs.existsSync(p)) return [];
   try {
     const raw = fs.readFileSync(p, "utf-8");
     const file = JSON.parse(raw) as LiveEnginesFile;
-    const records = file[coin] ?? [];
-    return records.map(r => ({
-      engineId: r.engineId,
-      bankrollUsd: r.bankrollUsd,
-      graduationRoundId: r.graduationRoundId,
-    }));
+    const iid = arenaInstanceId ?? coin;
+    // Prefer arena-specific key, fall back to coin-level key for backward compat
+    const records = file[iid] ?? (iid !== coin ? [] : (file[coin] ?? []));
+    return records
+      .filter(r => !r.arenaInstanceId || r.arenaInstanceId === iid)
+      .map(r => ({
+        engineId: r.engineId,
+        bankrollUsd: r.bankrollUsd,
+        graduationRoundId: r.graduationRoundId,
+      }));
   } catch {
     return [];
   }
@@ -100,13 +112,17 @@ export function loadGraduatedEngines(coin: string): { engineId: string; bankroll
  */
 export function startLiveArena(cfg: LiveArenaConfig): LiveArenaHandle {
   const states = new Map<string, LiveEngineState>();
-  const graduated = loadGraduatedEngines(cfg.coin);
+  // Pass the arena instance ID so live_engines.json can scope engines to
+  // specific arenas (e.g. "eth-15m") instead of loading on every arena for
+  // the coin. Falls back to coin-level key for backward compat.
+  const instanceId = (cfg as LiveArenaConfig & { arenaInstanceId?: string }).arenaInstanceId;
+  const graduated = loadGraduatedEngines(cfg.coin, instanceId);
 
   for (const g of graduated) {
     const walletAddr = process.env.FUNDER ?? "0x0";
     const state = createLiveState(g.engineId, walletAddr, g.bankrollUsd, g.graduationRoundId);
     states.set(g.engineId, state);
-    console.log(`[live-arena:${cfg.coin}] loaded ${g.engineId} — bankroll $${g.bankrollUsd}`);
+    console.log(`[live-arena:${instanceId ?? cfg.coin}] loaded ${g.engineId} — bankroll $${g.bankrollUsd}`);
   }
 
   const reconcileMs = cfg.reconcileIntervalMs ?? 5_000;

@@ -340,21 +340,25 @@ async function runRound(
             if (fill.toxicFlowHit) {
               console.log(`[arena] ${engine.id} TOXIC FLOW: ${fill.action.side} ${fill.fillSize}@${fill.fillPrice.toFixed(4)} (slippage: ${fill.slippage.toFixed(4)})`);
             }
-            // Mirror filled sim actions to live arena (if enabled + engine graduated)
-            if (liveArenaHandle) {
-              const positionSide = state.activeDownTokenId === fill.action.tokenId ? "NO" as const : "YES" as const;
-              liveArenaHandle.onSimAction(engine.id, fill.action, positionSide).then(result => {
-                if (result) {
-                  if (result.accepted) {
-                    console.log(`[live] ${engine.id} ${fill.action.side} ${result.sizedAction?.size ?? 0}@${(result.sizedAction?.price ?? 0).toFixed(3)} → accepted`);
-                  } else {
-                    console.log(`[live] ${engine.id} ${fill.action.side} rejected: ${result.reason}`);
-                  }
+          }
+          // Mirror to live for: (a) actual sim fills (takers) AND (b) maker
+          // orders that went to sim GTC queue (filled:false, reason=maker_not_filled).
+          // Live CLOB will post the maker as a limit order that sits on the
+          // real book and fills independently — tracked by the reconcile loop.
+          const shouldMirror = fill.filled || fill.rejectionReason === "maker_not_filled";
+          if (shouldMirror && liveArenaHandle) {
+            const positionSide = state.activeDownTokenId === fill.action.tokenId ? "NO" as const : "YES" as const;
+            liveArenaHandle.onSimAction(engine.id, fill.action, positionSide).then(result => {
+              if (result) {
+                if (result.accepted) {
+                  console.log(`[live] ${engine.id} ${fill.action.side} ${result.sizedAction?.size ?? 0}@${(result.sizedAction?.price ?? 0).toFixed(3)} → accepted`);
+                } else {
+                  console.log(`[live] ${engine.id} ${fill.action.side} rejected: ${result.reason}`);
                 }
-              }).catch(err => {
-                console.warn(`[live-arena] ${engine.id} action failed: ${err.message}`);
-              });
-            }
+              }
+            }).catch(err => {
+              console.warn(`[live-arena] ${engine.id} action failed: ${err.message}`);
+            });
           }
         }
 
@@ -792,6 +796,7 @@ async function main(): Promise<void> {
       if (CONFIG.LIVE_ENABLED) {
         liveArenaHandle = startLiveArena({
           coin: CONFIG.ARENA_COIN as "btc" | "eth" | "sol" | "xrp",
+          arenaInstanceId: CONFIG.ARENA_INSTANCE_ID,
           simBankrollUsd: CONFIG.STARTING_CASH,
           submit,
           getOrder,
