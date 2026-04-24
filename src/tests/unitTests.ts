@@ -971,7 +971,11 @@ console.log("\n=== LiveSizingWrapper ===");
   assert(r.action!.size === 100, `cash clip: $10 / $0.10 = 100 shares, got ${r.action!.size}`);
 }
 
-// 4. Min order floor: sized below $1 returns null
+// 4. Min order floor: sized to 0 shares after rounding returns null.
+// New ordering (Apr 25): share rounding + maker-min bump run BEFORE
+// min-notional check. A scaled-down target of $0.01 floors to 0 shares
+// and trips "rounding" (correct: would-be order is empty). The notional
+// floor only applies to non-zero orders that survived bump.
 {
   const live = mkLiveState(5); // tiny bankroll
   const r = sizeForLive(
@@ -979,9 +983,25 @@ console.log("\n=== LiveSizingWrapper ===");
     live,
     { liveBankrollUsd: 5, simBankrollUsd: 50 },
   );
-  // scale ratio 0.1, target $0.01 — way below $1 minimum
+  // scale ratio 0.1, target $0.01 → 0 shares → "rounding" rejection
   assert(r.action === null, "min order: action null");
-  assert(r.clippedBy === "min_order", `min order: got ${r.clippedBy}`);
+  assert(r.clippedBy === "rounding", `min order: got ${r.clippedBy}`);
+}
+
+// 4d. Min-notional rejection: 5-share bump succeeds but final notional
+// is still below $0.50 floor at very-cheap underdog price.
+// $5 bankroll, sim 18@$0.05 → scaled target $0.09 → 1 share → bump to 5
+// (cash + exposure allow) → final $0.25 < $0.50 → reject.
+{
+  const live = mkLiveState(5);
+  const r = sizeForLive(
+    { side: "BUY", tokenId: "UP1", price: 0.05, size: 18 },
+    live,
+    { liveBankrollUsd: 5, simBankrollUsd: 50 },
+  );
+  assert(r.action === null, `notional rej: expected null, got ${JSON.stringify(r.action)}`);
+  assert(r.clippedBy === "min_order", `notional rej: expected min_order, got ${r.clippedBy}`);
+  assert(!!r.reason && r.reason.includes("final"), `reason should mention final: ${r.reason}`);
 }
 
 // 4b. Maker-min floor: tiny bankroll ($12.50) at $0.66 sizes to <5 shares.
@@ -1162,7 +1182,8 @@ async function runLiveExecutorTests(): Promise<void> {
   assert(calls.length === 0, "exec HOLD: not submitted");
 }
 
-// 5. Min order floor rejects without submitting
+// 5. Min order floor rejects without submitting (Apr 25: with new ordering,
+// $5 bankroll × 0.1 sim → $0.01 target → 0 shares → "rounding" reject).
 {
   const live = mkLiveState(5); // tiny bankroll
   const { submit, calls } = instantFillSubmitter();
@@ -1175,7 +1196,8 @@ async function runLiveExecutorTests(): Promise<void> {
   );
   assert(r.accepted === false, "exec min order: rejected");
   assert(calls.length === 0, "exec min order: not submitted");
-  assert(r.reason?.includes("min") === true, `exec min order: reason mentions min, got ${r.reason}`);
+  assert(!!r.reason && (r.reason.includes("min") || r.reason.includes("rounding")),
+    `exec min order: reason mentions min/rounding, got ${r.reason}`);
 }
 
 // 6. applyFill: SELL reduces position and credits cash

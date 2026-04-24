@@ -90,18 +90,7 @@ export function sizeForLive(
     clippedBy = "cash";
   }
 
-  // 5. Minimum order floor — reject if target below PM minimum
-  if (targetUsd < RISK_CONFIG.MIN_ORDER_USD) {
-    return {
-      action: null,
-      reason: `sized to $${targetUsd.toFixed(2)} < min $${RISK_CONFIG.MIN_ORDER_USD}`,
-      originalUsd,
-      scaledUsd: targetUsd,
-      clippedBy: "min_order",
-    };
-  }
-
-  // 6. For SELL, we can't scale up beyond what we actually hold
+  // 5. For SELL, we can't scale up beyond what we actually hold
   if (simAction.side === "SELL") {
     const pos = liveState.positions.get(simAction.tokenId);
     if (!pos || pos.shares <= 0) {
@@ -126,18 +115,15 @@ export function sizeForLive(
     };
   }
 
-  // 7. Maker-minimum floor: PM rejects resting orders < MIN_ORDER_SHARES.
-  // Taker orders (crossing the book) bypass this rule, but we can't tell at
-  // sizing time whether the book will be crossed. Safe default: bump to min
-  // if cash + exposure allow. Otherwise reject — a sub-min order that
-  // doesn't instantly cross will be rejected by the CLOB.
+  // 6. Maker-minimum bump: PM rejects resting orders < MIN_ORDER_SHARES.
+  // Run BEFORE the notional floor so that a sub-min order that bumps to
+  // 5 shares satisfies both checks. Taker orders crossing the book bypass
+  // the share rule, but we can't tell at sizing time whether the book will
+  // be crossed — safe default is to bump if cash + exposure allow.
   if (newSize < RISK_CONFIG.MIN_ORDER_SHARES && simAction.side === "BUY") {
     const neededUsd = RISK_CONFIG.MIN_ORDER_SHARES * simAction.price;
     if (neededUsd <= liveState.cashBalance && neededUsd <= remainingExposure) {
       newSize = RISK_CONFIG.MIN_ORDER_SHARES;
-      // Tag that we breached bankroll_cap to satisfy the CLOB 5-share min.
-      // Keeps the audit trail — caller can log "size > 15% of bankroll" if it
-      // wants to surface the cap relaxation.
       clippedBy = "maker_min_bump";
     } else {
       return {
@@ -151,6 +137,19 @@ export function sizeForLive(
   }
 
   const finalUsd = newSize * simAction.price;
+  // 7. Minimum notional floor — only enforced on the FINAL sized order.
+  // Lowered to $0.50 Apr 25; PM's protocol minimum is share-count (see
+  // MIN_ORDER_SHARES), not notional. A 5-share × $0.10 fill = $0.50 is
+  // the realistic floor.
+  if (finalUsd < RISK_CONFIG.MIN_ORDER_USD) {
+    return {
+      action: null,
+      reason: `final $${finalUsd.toFixed(2)} < min $${RISK_CONFIG.MIN_ORDER_USD}`,
+      originalUsd,
+      scaledUsd: finalUsd,
+      clippedBy: "min_order",
+    };
+  }
   return {
     action: {
       ...simAction,
