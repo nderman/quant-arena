@@ -80,9 +80,12 @@ def main():
         per_eng = defaultdict(list)
         for r in rounds:
             for e in r.get("allResults", []):
-                p = e.get("totalPnl", 0)
-                if p != 0:
-                    per_eng[e["engineId"]].append(p)
+                # Honest filter: tradeCount, not pnl. An engine that traded and
+                # broke even (pnl == 0) is real data; an engine with tradeCount=0
+                # is a silent round and must be excluded. Using `pnl != 0`
+                # drops the "traded and broke even" case silently.
+                if e.get("tradeCount", 0) > 0:
+                    per_eng[e["engineId"]].append(e.get("totalPnl", 0))
         for eid, pnls in per_eng.items():
             if len(pnls) < 2: continue
             n = len(pnls)
