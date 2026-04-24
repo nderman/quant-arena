@@ -216,6 +216,23 @@ def main():
                 continue
 
             stats = label_regime(klines)
+
+            # Sub-window regime distribution: slice the round into 30-min
+            # buckets, label each, output a histogram. Catches intra-round
+            # regime changes (e.g. "2h CHOP then 4h TREND").
+            bucket_size_min = 30
+            regime_hist = {"QUIET": 0, "CHOP": 0, "TREND": 0, "SPIKE": 0}
+            if len(klines) >= bucket_size_min:
+                for i in range(0, len(klines), bucket_size_min):
+                    bucket = klines[i:i + bucket_size_min]
+                    if len(bucket) < 3:
+                        continue
+                    bucket_stats = label_regime(bucket)
+                    regime_hist[bucket_stats["label"]] += 1
+            total_buckets = sum(regime_hist.values()) or 1
+            stats["bucketHistogram"] = {k: round(v / total_buckets, 2) for k, v in regime_hist.items()}
+            stats["bucketCount"] = total_buckets
+
             round_entry["regime"] = stats
             regime_counts[stats["label"]] += 1
             new_tags += 1
