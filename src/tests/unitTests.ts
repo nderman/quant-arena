@@ -1353,6 +1353,159 @@ console.log("\n── CLOB tick alignment ────────────�
   assert(highSell <= 0.99, `extreme-high SELL clamped below 1, got ${highSell}`);
 }
 
+// ── Book microstructure signals (pulse.ts) ──────────────────────────────────
+
+console.log("\n── Book microstructure signals ────────");
+
+// parsePmL2 test to simulate book state, then compute imbalance/spread
+// against the known book shape. We bypass the book state machine by
+// constructing OrderBooks directly and computing signals inline.
+{
+  // Helper: local version of bookImbalance that operates on an OrderBook
+  // directly (we can't easily mutate pulse's module state from test).
+  function imb(book: { bids: { price: number; size: number }[]; asks: { price: number; size: number }[] }, topN = 3): number {
+    const bd = book.bids.slice(0, topN).reduce((s, l) => s + l.size, 0);
+    const ad = book.asks.slice(0, topN).reduce((s, l) => s + l.size, 0);
+    const total = bd + ad;
+    return total === 0 ? 0 : (bd - ad) / total;
+  }
+  // Balanced book → 0
+  const balanced = { bids: [{price: 0.59, size: 100}], asks: [{price: 0.61, size: 100}], timestamp: 0 };
+  assert(imb(balanced) === 0, `balanced: expected 0, got ${imb(balanced)}`);
+  // Bid-heavy → positive
+  const bidHeavy = {
+    bids: [{price:0.59,size:200},{price:0.58,size:150},{price:0.57,size:100}],
+    asks: [{price:0.61,size:50},{price:0.62,size:50},{price:0.63,size:50}],
+    timestamp: 0,
+  };
+  const bh = imb(bidHeavy);
+  // bid depth 450, ask depth 150 → (450-150)/600 = 0.5
+  assert(Math.abs(bh - 0.5) < 0.001, `bid-heavy: expected 0.5, got ${bh.toFixed(3)}`);
+  // Ask-heavy → negative
+  const askHeavy = {
+    bids: [{price:0.59,size:50}],
+    asks: [{price:0.61,size:200}],
+    timestamp: 0,
+  };
+  assert(imb(askHeavy) === -0.6, `ask-heavy: expected -0.6, got ${imb(askHeavy)}`);
+  // Empty book → 0 (not NaN)
+  const empty = { bids: [], asks: [], timestamp: 0 };
+  assert(imb(empty) === 0, `empty: expected 0, got ${imb(empty)}`);
+}
+
+// Spread BPS math test (mirrors getSpreadBps logic)
+{
+  function spread(bid: number, ask: number): number {
+    if (bid <= 0 || ask <= 0 || ask <= bid) return 0;
+    const mid = (bid + ask) / 2;
+    return ((ask - bid) / mid) * 10_000;
+  }
+  // 0.59 bid, 0.61 ask → spread 2¢, mid 0.60 → 333 bps
+  const s1 = spread(0.59, 0.61);
+  assert(Math.abs(s1 - 333.3) < 0.5, `spread 2¢: expected ~333bps, got ${s1.toFixed(1)}`);
+  // Tight spread 0.60-0.605 → 83 bps
+  const s2 = spread(0.60, 0.605);
+  assert(Math.abs(s2 - 83) < 1, `spread 0.5¢: expected ~83bps, got ${s2.toFixed(1)}`);
+  // Crossed book → 0 sentinel
+  assert(spread(0.61, 0.59) === 0, "crossed book returns 0");
+  // Empty → 0
+  assert(spread(0, 0) === 0, "empty book returns 0");
+}
+
+// parsePmL2 still works (regression for the ingestion path)
+{
+  const msg = {
+    event_type: "book",
+    asks: [{price: "0.61", size: "100"}],
+    bids: [{price: "0.59", size: "100"}],
+  };
+  const book = parsePmL2(msg);
+  assert(book !== null, "parsePmL2 returns a book");
+  assert(book!.asks[0].price === 0.61 && book!.bids[0].price === 0.59, "prices parsed");
+}
+
+// ── SignalContrarianEngine gate logic ────────────────────────────────────────
+
+import { computeSignalBias } from "../engines/SignalContrarianEngine";
+
+console.log("\n── Signal Contrarian gate logic ───────");
+
+// 1. Both gates neutral → no side
+{
+  const b = computeSignalBias(50, 0);
+  assert(b.side === null, `neutral both: expected null, got ${b.side}`);
+  assert(!b.fngFired && !b.fundingFired, "neither gate should fire");
+}
+
+// 2. F&G extreme greed alone → DOWN (single-gate, not confirmed)
+{
+  const b = computeSignalBias(80, 0);
+  assert(b.side === "DOWN", `greed: expected DOWN, got ${b.side}`);
+  assert(b.fngFired && !b.fundingFired, "fng fired, funding didn't");
+  assert(!b.confirmed, "single gate is not confirmed");
+}
+
+// 3. F&G extreme fear alone → UP
+{
+  const b = computeSignalBias(20, 0);
+  assert(b.side === "UP", `fear: expected UP, got ${b.side}`);
+  assert(b.fngFired && !b.fundingFired, "fng fired, funding didn't");
+}
+
+// 4. Positive funding alone → DOWN (longs paying = crowded)
+{
+  const b = computeSignalBias(50, 0.0003);
+  assert(b.side === "DOWN", `pos funding: expected DOWN, got ${b.side}`);
+  assert(!b.fngFired && b.fundingFired, "funding fired, fng didn't");
+}
+
+// 5. Negative funding alone → UP
+{
+  const b = computeSignalBias(50, -0.0005);
+  assert(b.side === "UP", `neg funding: expected UP, got ${b.side}`);
+}
+
+// 6. Both agree: greed + positive funding → DOWN confirmed
+{
+  const b = computeSignalBias(85, 0.0004);
+  assert(b.side === "DOWN", `both agree greed+pos: expected DOWN, got ${b.side}`);
+  assert(b.confirmed, "both-agree should be confirmed");
+}
+
+// 7. Both agree: fear + negative funding → UP confirmed
+{
+  const b = computeSignalBias(15, -0.0003);
+  assert(b.side === "UP", `both agree fear+neg: expected UP, got ${b.side}`);
+  assert(b.confirmed, "both-agree should be confirmed");
+}
+
+// 8. Disagreement → null (ambiguous, skip)
+{
+  const b = computeSignalBias(80, -0.0005); // greed but shorts paying?
+  assert(b.side === null, `disagreement: expected null, got ${b.side}`);
+  assert(b.fngFired && b.fundingFired, "both fired but disagree");
+}
+
+// 9. Null signals: tolerate missing data without crashing
+{
+  const b1 = computeSignalBias(null, 0.0003);
+  assert(b1.side === "DOWN", `null fng + pos funding: expected DOWN, got ${b1.side}`);
+  const b2 = computeSignalBias(80, null);
+  assert(b2.side === "DOWN", `greed + null funding: expected DOWN, got ${b2.side}`);
+  const b3 = computeSignalBias(null, null);
+  assert(b3.side === null, `both null: expected null, got ${b3.side}`);
+}
+
+// 10. Boundary: exactly 75/25 F&G → triggers (≥ / ≤)
+{
+  const hi = computeSignalBias(75, 0);
+  assert(hi.side === "DOWN", `F&G=75 boundary: expected DOWN, got ${hi.side}`);
+  const lo = computeSignalBias(25, 0);
+  assert(lo.side === "UP", `F&G=25 boundary: expected UP, got ${lo.side}`);
+  const mid = computeSignalBias(74, 0);
+  assert(mid.side === null, `F&G=74 below threshold: expected null, got ${mid.side}`);
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 
 Promise.all([runLiveExecutorTests(), runRejectionReasonTests()])

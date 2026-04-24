@@ -11,7 +11,13 @@
  */
 
 import { calculateFeeAdjustedEdge, cheaperExit, isBookTradeable as _isBookTradeable } from "../referee";
-import { getBookForToken as _getBookForToken } from "../pulse";
+import {
+  getBookForToken as _getBookForToken,
+  getBookImbalance as _getBookImbalance,
+  getSpreadBps as _getSpreadBps,
+  getQuoteVelocity as _getQuoteVelocity,
+  getDepthAtBestBid as _getDepthAtBestBid,
+} from "../pulse";
 import type {
   BaseEngine as IBaseEngine,
   EngineAction,
@@ -110,6 +116,38 @@ export abstract class AbstractEngine implements IBaseEngine {
    */
   protected isBookTradeable(book: OrderBook): boolean {
     return _isBookTradeable(book);
+  }
+
+  // ── Book Microstructure Signals ──────────────────────────────────────────
+  // Phase B signal wiring. Engines can use these to react to order flow
+  // (imbalance, spread, quote velocity) — alpha beyond Binance momentum.
+
+  /**
+   * Bid/ask imbalance on top N levels. Range [-1, +1].
+   * Positive = more bid depth (demand side heavier = bullish for that token).
+   * Negative = more ask depth (supply side heavier).
+   * Use: `Math.abs(imbalance) > 0.4` is a strong one-sided book.
+   */
+  protected bookImbalance(tokenId: string, topN: number = 3): number {
+    return _getBookImbalance(tokenId, topN);
+  }
+
+  /** Current spread in basis points. 0 if book empty or crossed. */
+  protected spreadBps(tokenId: string): number {
+    return _getSpreadBps(tokenId);
+  }
+
+  /**
+   * Book updates in the last 10s. High velocity = MMs churning quotes
+   * (often happens before a move). Low velocity = calm book.
+   */
+  protected quoteVelocity(tokenId: string): number {
+    return _getQuoteVelocity(tokenId);
+  }
+
+  /** Shares resting at the best bid — proxy for maker queue position. */
+  protected depthAtBestBid(tokenId: string): number {
+    return _getDepthAtBestBid(tokenId);
   }
 
   // ── GTC Order Awareness ─────────────────────────────────────────────────

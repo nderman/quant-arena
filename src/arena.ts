@@ -281,13 +281,16 @@ async function runRound(
   let tickCount = 0;
   const allPendingMerges: { engineId: string; state: EngineState; merges: EngineAction[] }[] = [];
 
-  // ── Fetch signals periodically (every 60s) ──
+  // ── Fetch signals periodically (every 15s) ──
+  // signals.ts has internal caching (F&G 1h, funding/DVOL by HTTP cache
+  // headers), so this polling rate doesn't hammer external APIs — mostly
+  // serves realized-vol freshness + funding drift within an 8h cycle.
   let latestSignals: SignalSnapshot | undefined;
   const signalInterval = setInterval(async () => {
     try {
       latestSignals = await fetchSignalSnapshot(CONFIG.BINANCE_SYMBOL.toUpperCase());
     } catch { /* non-critical */ }
-  }, 60_000);
+  }, 15_000);
   // Initial fetch
   fetchSignalSnapshot(CONFIG.BINANCE_SYMBOL.toUpperCase())
     .then(s => { latestSignals = s; })

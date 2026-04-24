@@ -72,12 +72,71 @@ export function getLatestPmBook(): OrderBook { return latestUpBook; }
 export function resetBooks(): void {
   latestUpBook = { bids: [], asks: [], timestamp: 0 };
   latestDownBook = { bids: [], asks: [], timestamp: 0 };
+  resetBookSignals();
 }
 
 /** Get the correct book for a specific token */
 export function getBookForToken(tokenId: string): OrderBook {
   if (tokenId === pmDownTokenId) return latestDownBook;
   return latestUpBook; // UP token or unknown → UP book
+}
+
+// ── Book microstructure signals ──────────────────────────────────────────────
+// Phase B of signal wiring. Engines can read these to trade on order flow
+// (bid/ask imbalance, spread dynamics, quote cancellation velocity) instead
+// of only Binance momentum. All reads are O(N) over the top of the book.
+
+const QUOTE_VELOCITY_WINDOW_MS = 10_000;
+const bookUpdateTimestamps: { up: number[]; down: number[] } = { up: [], down: [] };
+
+function recordBookUpdate(tokenId: string): void {
+  const now = Date.now();
+  const arr = tokenId === pmDownTokenId ? bookUpdateTimestamps.down : bookUpdateTimestamps.up;
+  arr.push(now);
+  // Trim old entries. Hot loop but O(k) amortized since push/shift balance.
+  const cutoff = now - QUOTE_VELOCITY_WINDOW_MS;
+  while (arr.length > 0 && arr[0] < cutoff) arr.shift();
+}
+
+/** Bid/ask imbalance on top N levels. Range [-1, +1]. Positive = bid-heavy. */
+export function getBookImbalance(tokenId: string, topN = 3): number {
+  const book = getBookForToken(tokenId);
+  const bidDepth = book.bids.slice(0, topN).reduce((s, l) => s + l.size, 0);
+  const askDepth = book.asks.slice(0, topN).reduce((s, l) => s + l.size, 0);
+  const total = bidDepth + askDepth;
+  if (total === 0) return 0;
+  return (bidDepth - askDepth) / total;
+}
+
+/** Current spread in basis points. Returns 0 if book is empty or crossed. */
+export function getSpreadBps(tokenId: string): number {
+  const book = getBookForToken(tokenId);
+  const bestBid = book.bids[0]?.price ?? 0;
+  const bestAsk = book.asks[0]?.price ?? 0;
+  if (bestBid <= 0 || bestAsk <= 0 || bestAsk <= bestBid) return 0;
+  const mid = (bestBid + bestAsk) / 2;
+  return ((bestAsk - bestBid) / mid) * 10_000;
+}
+
+/** Book updates in the last 10s. Proxy for MM cancellation/quote-churn rate. */
+export function getQuoteVelocity(tokenId: string): number {
+  const now = Date.now();
+  const cutoff = now - QUOTE_VELOCITY_WINDOW_MS;
+  const arr = tokenId === pmDownTokenId ? bookUpdateTimestamps.down : bookUpdateTimestamps.up;
+  while (arr.length > 0 && arr[0] < cutoff) arr.shift();
+  return arr.length;
+}
+
+/** Shares resting at the best bid (queue-depth proxy for maker fill ETA). */
+export function getDepthAtBestBid(tokenId: string): number {
+  const book = getBookForToken(tokenId);
+  return book.bids[0]?.size ?? 0;
+}
+
+/** Reset velocity counters on rotation so cross-candle velocity doesn't leak. */
+export function resetBookSignals(): void {
+  bookUpdateTimestamps.up.length = 0;
+  bookUpdateTimestamps.down.length = 0;
 }
 
 // Both token IDs for subscription (set by arena on discovery)
@@ -288,6 +347,7 @@ function startPmBookChannel(): void {
             } else {
               latestUpBook = book;
             }
+            recordBookUpdate(assetId);
             lastPmDataTs = Date.now();
             pulseEvents.emit("pm_book", book);
           }

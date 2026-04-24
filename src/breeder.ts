@@ -22,6 +22,8 @@ dotenv.config({ path: path.resolve(__dirname, "..", ".env") });
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
 const ANALYST_MODEL = process.env.ANALYST_MODEL || "google/gemini-2.0-flash-001";
 const CODER_MODEL = process.env.CODER_MODEL || "anthropic/claude-haiku-4-5";
+/** Bump this on prompt changes so we can filter pre/post-prompt bred engines in analytics. */
+const BREEDER_PROMPT_VERSION = "v2-signals-2026-04-24";
 const MAX_RETRIES = 2;
 const MIN_NEW_ROUNDS_TO_BREED = Number(process.env.MIN_NEW_ROUNDS_TO_BREED ?? 3);
 const PROJECT_ROOT = path.resolve(__dirname, "..");
@@ -351,6 +353,49 @@ POSITIONS, ROTATIONS, SETTLEMENT
   candle close, the SETTLE row will appear with $1/share if you won.
 
 ═══════════════════════════════════════════════════════════════════
+AVAILABLE SIGNALS — THE DATA YOU CAN READ
+═══════════════════════════════════════════════════════════════════
+Engines have been historically Binance-momentum-only. The arena ALSO
+provides (and no one reads) these signals. Novel engines should
+consider at least one non-Binance signal to widen the alpha surface.
+
+1) MACRO — via the \`signals\` parameter to onTick():
+
+   signals.fearGreed.value     // 0-100, crypto Fear&Greed (daily cadence)
+   signals.funding.rate        // Binance perp funding, e.g. 0.0001 = 0.01% (8h cycle)
+   signals.funding.direction   // "long" | "short" | "neutral"
+   signals.impliedVol.dvol     // Deribit DVOL, annualized % (minutes)
+   signals.realizedVol.vol5m   // rolling 5m Binance realized vol, annualized
+   signals.binancePrice        // current Binance spot (tracked separately too)
+
+   Contrarian readings at extremes usually beat momentum readings:
+     fearGreed >= 75 → crowd is greedy → fade UP entries
+     fearGreed <= 25 → crowd is fearful → fade DOWN entries
+     funding.rate > +0.0002 → longs crowded → fade UP
+     funding.rate < -0.0002 → shorts crowded → fade DOWN
+   All macro signals may be null if the fetch failed — handle that.
+
+2) MICROSTRUCTURE — via protected BaseEngine methods (this.*):
+
+   this.bookImbalance(tokenId, topN=3)  // [-1..+1], + = bid-heavy
+   this.spreadBps(tokenId)              // current spread, basis points
+   this.quoteVelocity(tokenId)          // book updates in last 10s
+   this.depthAtBestBid(tokenId)         // shares at best bid
+
+   Signals of what real MMs are doing. |imbalance| > 0.4 for ≥10 ticks
+   is directional pressure. Rising quoteVelocity before a move = MM
+   cancel-to-avoid-pick-off. Wide spreadBps late in candle = risk
+   premium as resolution approaches.
+
+3) BINANCE MOMENTUM — via this.trackBinance() / this.recentMomentum():
+   Still useful. Not exclusive.
+
+Example with mixed signals:
+   const imb = this.bookImbalance(upTokenId);
+   const fng = signals?.fearGreed?.value ?? 50;
+   if (imb > 0.4 && fng < 40) { /* book + sentiment both support UP */ }
+
+═══════════════════════════════════════════════════════════════════
 STRATEGY — YOU DECIDE
 ═══════════════════════════════════════════════════════════════════
 The user message contains a DATA REPORT from the analyst describing
@@ -402,7 +447,7 @@ ${exampleEngine}
 
 Write a NEW engine class named ${className}. Build the strategy the DATA REPORT most strongly supports — entry-price clusters where wins concentrate, time-of-candle patterns that recur, toxic-flow regimes, fee-zone gaps, recurring book imbalances. Don't think about "what's missing from the population" — think about "what mechanism does this data describe." Convergence with what other engines do is fine if the data warrants it. Ground your design in the data report above as facts to interpret, not as a recommendation to follow.`;
 
-  console.log(`[breeder] Generating engine with ${CODER_MODEL}...`);
+  console.log(`[breeder] Generating engine with ${CODER_MODEL} (prompt=${BREEDER_PROMPT_VERSION})...`);
   const code = await callCoder(systemPrompt, userPrompt);
 
   // Strip markdown code fences if Claude includes them despite instructions
