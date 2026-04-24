@@ -984,6 +984,38 @@ console.log("\n=== LiveSizingWrapper ===");
   assert(r.clippedBy === "min_order", `min order: got ${r.clippedBy}`);
 }
 
+// 4b. Maker-min floor: tiny bankroll ($12.50) at $0.66 sizes to <5 shares.
+// If cash + exposure allow, bump to 5 shares (even if it exceeds the
+// MAX_POSITION_PCT cap). Otherwise reject with min_order reason.
+{
+  const live = mkLiveState(12.5);
+  const r = sizeForLive(
+    { side: "BUY", tokenId: "UP1", price: 0.66, size: 18 }, // sim action scale
+    live,
+    { liveBankrollUsd: 12.5, simBankrollUsd: 50 },
+  );
+  // 15% cap = $1.875, /0.66 = 2 shares — but < 5. Should bump to 5 since
+  // 5 × $0.66 = $3.30 fits in $12.50 cash and 45% exposure ($5.625).
+  assert(r.action !== null, `maker-min floor: got null (reason=${r.reason})`);
+  assert(r.action!.size === 5, `maker-min floor: expected 5 shares, got ${r.action?.size}`);
+  assert(r.clippedBy === "maker_min_bump", `maker-min floor: expected maker_min_bump clipper, got ${r.clippedBy}`);
+}
+
+// 4c. Maker-min reject: bankroll allows the bankroll-cap sizing ($1.20 > $1
+// min notional) but cash starved below the 5-share threshold ($2 needed).
+// Sized to 3 shares, bump-to-5 fails, rejects with min_order reason.
+{
+  const live = mkLiveState(8, 1.5); // $8 bankroll but only $1.50 cash
+  const r = sizeForLive(
+    { side: "BUY", tokenId: "UP1", price: 0.40, size: 18 },
+    live,
+    { liveBankrollUsd: 8, simBankrollUsd: 50 },
+  );
+  assert(r.action === null, `maker-min reject: expected null (got action=${JSON.stringify(r.action)})`);
+  assert(r.clippedBy === "min_order", `maker-min reject: expected min_order, got ${r.clippedBy}`);
+  assert(!!r.reason && r.reason.includes("5-share maker min"), `reason should mention 5-share min: ${r.reason}`);
+}
+
 // 5. Candle exposure cap
 {
   const live = mkLiveState(1000);
@@ -1276,6 +1308,49 @@ for (const p of [0.01, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.9
   const f = calculateFee(p, 100);
   const pct = (f / 100 * 100).toFixed(4);
   console.log(`  ${p.toFixed(2)}  | ${pct.padStart(7)}% | $${f.toFixed(4)}`);
+}
+
+// ── Direction-aware CLOB tick alignment ──────────────────────────────────────
+
+import { alignTickForSide } from "../live/clobSubmitter";
+
+console.log("\n── CLOB tick alignment ────────────────");
+
+// The Apr 24 bug: 0.655 BUY at tick 0.01 was rounded UP to 0.66 and ate the ask
+{
+  const p = alignTickForSide(0.655, "BUY", "0.01");
+  assert(p === 0.65, `0.655 BUY @ tick 0.01 should floor to 0.65, got ${p}`);
+  console.log(`  0.655 BUY @ tick 0.01 → ${p} (was 0.66 before fix)`);
+}
+
+// Inverse: SELLs must round UP so a maker SELL stays above bid
+{
+  const p = alignTickForSide(0.655, "SELL", "0.01");
+  assert(p === 0.66, `0.655 SELL @ tick 0.01 should ceil to 0.66, got ${p}`);
+  console.log(`  0.655 SELL @ tick 0.01 → ${p}`);
+}
+
+// Already-aligned prices pass through unchanged either direction
+{
+  const buyP = alignTickForSide(0.42, "BUY", "0.01");
+  const sellP = alignTickForSide(0.42, "SELL", "0.01");
+  assert(buyP === 0.42 && sellP === 0.42, `0.42 should be idempotent, got BUY=${buyP} SELL=${sellP}`);
+}
+
+// Tick 0.001: 0.6554 BUY → 0.655, 0.6554 SELL → 0.656
+{
+  const buyP = alignTickForSide(0.6554, "BUY", "0.001");
+  const sellP = alignTickForSide(0.6554, "SELL", "0.001");
+  assert(buyP === 0.655, `0.6554 BUY @ tick 0.001 should floor to 0.655, got ${buyP}`);
+  assert(sellP === 0.656, `0.6554 SELL @ tick 0.001 should ceil to 0.656, got ${sellP}`);
+}
+
+// Clamp: extremes should not round to 0.00 or 1.00 (PM rejects)
+{
+  const lowBuy = alignTickForSide(0.005, "BUY", "0.01");
+  assert(lowBuy >= 0.01, `extreme-low BUY clamped above 0 tick, got ${lowBuy}`);
+  const highSell = alignTickForSide(0.999, "SELL", "0.01");
+  assert(highSell <= 0.99, `extreme-high SELL clamped below 1, got ${highSell}`);
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

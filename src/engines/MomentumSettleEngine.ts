@@ -50,8 +50,12 @@ export class MomentumSettleEngine extends AbstractEngine {
     const shares = Math.floor((state.cashBalance * this.maxCashPct) / askPrice);
     if (shares < 5) return [];
 
-    // Maker limit just below ask for 0% fee + 20% rebate
-    const makerPrice = Math.round((askPrice - 0.005) * 1000) / 1000;
+    // Maker limit 1.5¢ below ask: 1 tick on 0.01 markets leaves the order too
+    // close to the ask — any book drift makes us cross and fill as taker.
+    // 1.5¢ floor-aligned to the tick keeps us ≥1 tick under the ask even on
+    // tick-0.01 markets. Fix: Apr 24 live trades filled as takers because the
+    // 0.5¢ offset rounded to the same tick as the ask.
+    const makerPrice = Math.round((askPrice - 0.015) * 1000) / 1000;
     const makerBook = buyUp ? upBook : downBook;
     const bestAsk = makerBook.asks[0]?.price ?? 0;
 

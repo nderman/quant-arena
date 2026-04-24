@@ -30,6 +30,34 @@ export interface ClobSubmitterConfig {
 }
 
 /**
+ * Direction-aware tick alignment for PM CLOB.
+ *
+ * BUYs round DOWN, SELLs round UP. Rounding the wrong way pushes a maker
+ * limit across the book and it executes as a taker — observed Apr 24, where
+ * a 0.655 maker BUY got rounded UP to 0.66 and ate the ask.
+ *
+ * Also clamps to the PM-valid range (min tick .. 1 - min tick) to avoid
+ * submitting 0.00 or 1.00 prices.
+ */
+const TICK_META = {
+  "0.1":   { step: 0.1,   decimals: 1, maxAligned: 9 },
+  "0.01":  { step: 0.01,  decimals: 2, maxAligned: 99 },
+  "0.001": { step: 0.001, decimals: 3, maxAligned: 999 },
+} as const;
+
+export function alignTickForSide(
+  price: number,
+  side: "BUY" | "SELL",
+  tickSize: "0.001" | "0.01" | "0.1",
+): number {
+  const { step, decimals, maxAligned } = TICK_META[tickSize];
+  const raw = price / step;
+  const aligned = side === "BUY" ? Math.floor(raw) : Math.ceil(raw);
+  const clamped = Math.max(1, Math.min(maxAligned, aligned));
+  return Number((clamped * step).toFixed(decimals));
+}
+
+/**
  * Build an OrderSubmitter backed by a real CLOB client.
  * Returns a function that takes an EngineAction and returns a SubmitResult.
  */
@@ -56,10 +84,8 @@ export function buildClobSubmitter(cfg: ClobSubmitterConfig): OrderSubmitter {
         }
       }
 
-      // Round price to tick size — PM CLOB rejects unaligned prices
       const tickSize = cfg.tickSize ?? "0.01";
-      const tickDecimals = tickSize === "0.1" ? 1 : tickSize === "0.01" ? 2 : 3;
-      const roundedPrice = Number(action.price.toFixed(tickDecimals));
+      const roundedPrice = alignTickForSide(action.price, action.side, tickSize);
 
       // PM CLOB only supports GTC for createAndPostOrder. Taker behavior is
       // achieved by submitting a limit that crosses the current book (the

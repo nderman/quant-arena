@@ -26,7 +26,7 @@ export interface SizingResult {
   reason?: string;
   originalUsd: number;
   scaledUsd: number;
-  clippedBy?: "bankroll_cap" | "cash" | "exposure_cap" | "min_order" | "rounding";
+  clippedBy?: "bankroll_cap" | "cash" | "exposure_cap" | "min_order" | "rounding" | "maker_min_bump";
 }
 
 export interface SizingConfig {
@@ -115,7 +115,7 @@ export function sizeForLive(
   }
 
   // Round to whole shares — PM CLOB doesn't accept fractional
-  const newSize = Math.floor(targetUsd / simAction.price);
+  let newSize = Math.floor(targetUsd / simAction.price);
   if (newSize <= 0) {
     return {
       action: null,
@@ -124,6 +124,30 @@ export function sizeForLive(
       scaledUsd: targetUsd,
       clippedBy: "rounding",
     };
+  }
+
+  // 7. Maker-minimum floor: PM rejects resting orders < MIN_ORDER_SHARES.
+  // Taker orders (crossing the book) bypass this rule, but we can't tell at
+  // sizing time whether the book will be crossed. Safe default: bump to min
+  // if cash + exposure allow. Otherwise reject — a sub-min order that
+  // doesn't instantly cross will be rejected by the CLOB.
+  if (newSize < RISK_CONFIG.MIN_ORDER_SHARES && simAction.side === "BUY") {
+    const neededUsd = RISK_CONFIG.MIN_ORDER_SHARES * simAction.price;
+    if (neededUsd <= liveState.cashBalance && neededUsd <= remainingExposure) {
+      newSize = RISK_CONFIG.MIN_ORDER_SHARES;
+      // Tag that we breached bankroll_cap to satisfy the CLOB 5-share min.
+      // Keeps the audit trail — caller can log "size > 15% of bankroll" if it
+      // wants to surface the cap relaxation.
+      clippedBy = "maker_min_bump";
+    } else {
+      return {
+        action: null,
+        reason: `cannot meet ${RISK_CONFIG.MIN_ORDER_SHARES}-share maker min: need $${neededUsd.toFixed(2)}, cash=$${liveState.cashBalance.toFixed(2)}, exposure_remaining=$${remainingExposure.toFixed(2)}`,
+        originalUsd,
+        scaledUsd: newSize * simAction.price,
+        clippedBy: "min_order",
+      };
+    }
   }
 
   const finalUsd = newSize * simAction.price;

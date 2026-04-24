@@ -21,7 +21,8 @@ export const RISK_CONFIG = {
   MAX_DAILY_LOSS_USD: 50,        // pause for the day if hit
   MAX_OPEN_POSITIONS: 5,         // limit concurrent exposure
   MAX_PENDING_ORDERS: 10,        // unfilled orders cap
-  MIN_ORDER_USD: 1,              // PM minimum
+  MIN_ORDER_USD: 1,              // PM minimum (notional — enforced on takers)
+  MIN_ORDER_SHARES: 5,           // PM maker minimum — resting orders < 5 shares get "Size (N) lower than the minimum: 5". Takers crossing the book bypass this.
   HALT_FLAG_PATH: path.join(DATA_DIR, "live_halt.flag"),
   HALT_RECHECK_MS: 5_000,        // re-stat the halt flag at most this often
 };
