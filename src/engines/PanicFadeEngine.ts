@@ -39,8 +39,8 @@ export class PanicFadeEngine extends AbstractEngine {
     this.trackBinance(tick);
     const regime = this.currentRegime(60);  // returns regime label string
 
-    if (fearGreed > 40) return [];                       // need fear
-    if (vol5m < dvol * 1.5) return [];                   // local vol must be stretched
+    if (fearGreed > 45) return [];                       // need fear (was 40)
+    if (vol5m < dvol * 1.2) return [];                   // local vol stretched (was 1.5 — never fired)
     if (regime !== "CHOP" && regime !== "QUIET") return [];  // post-spike cooldown
 
     const spread = this.spreadBps(upTokenId);

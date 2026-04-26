@@ -22,8 +22,8 @@ export class VolRegimeGateEngine extends AbstractEngine {
   name = "Vol Regime Gate";
   version = "1.0.0";
 
-  private readonly expandThreshold = 1.5;
-  private readonly compressThreshold = 0.5;
+  private readonly expandThreshold = 1.3;   // was 1.5 — never fired in normal markets
+  private readonly compressThreshold = 0.6; // was 0.5
   private readonly maxCashPct = 0.15;
 
   onTick(tick: MarketTick, state: EngineState, signals?: SignalSnapshot): EngineAction[] {

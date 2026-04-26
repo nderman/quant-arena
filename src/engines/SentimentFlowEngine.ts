@@ -19,8 +19,10 @@ export class SentimentFlowEngine extends AbstractEngine {
   name = "Sentiment Flow Convergent";
   version = "1.1.0";
 
-  private readonly IMBALANCE_THRESHOLD = 0.65;
-  private readonly MIN_FUNDING_RATE = 0.0001;  // 0.01%
+  // Loosened Apr 26: triple-conjunction at original thresholds never fired.
+  // Generating data > maximizing signal purity at this stage.
+  private readonly IMBALANCE_THRESHOLD = 0.45;     // was 0.65
+  private readonly MIN_FUNDING_RATE = 0.00005;     // was 0.0001
   private readonly TICK_SIZE = 0.01;
 
   onTick(tick: MarketTick, state: EngineState, signals?: SignalSnapshot): EngineAction[] {
