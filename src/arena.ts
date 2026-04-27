@@ -183,7 +183,12 @@ function clearEngineRequireCache(): void {
  * Exported for unit tests.
  */
 export function reloadFlagPath(): string {
-  return path.resolve("data", `reload_engines_${CONFIG.ARENA_COIN}.flag`);
+  // Per-arena-instance, not per-coin. Was per-coin until Apr 27 — but the
+  // first arena to detect the flag deletes it (unlinkSync below), starving
+  // the other 3 instances of the same coin (5m/15m/1h/4h share the coin
+  // name). Result: 9 of 12 arenas silently kept old code on every
+  // surgical deploy. Per-instance flag = each arena consumes its own.
+  return path.resolve("data", `reload_engines_${CONFIG.ARENA_INSTANCE_ID}.flag`);
 }
 
 /**
