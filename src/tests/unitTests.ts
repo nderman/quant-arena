@@ -371,13 +371,19 @@ import { reloadFlagPath, maybeReloadEngines } from "../arena";
 import * as fsRT from "fs";
 import type { BaseEngine } from "../types";
 
-// reloadFlagPath is per-coin and lives under data/
+// reloadFlagPath is per-arena-instance (Apr 27 — was per-coin). Locks in
+// the fix that prevents flag-starvation between sibling arenas (5m/15m/1h/4h
+// of the same coin used to fight over a single flag file).
 {
+  const { CONFIG } = require("../config");
   const p = reloadFlagPath();
   assert(p.endsWith(".flag"), `flag path should end .flag, got ${p}`);
   assert(p.includes("reload_engines_"), `flag path should include prefix, got ${p}`);
   assert(p.includes("data"), `flag path should be under data/, got ${p}`);
-  console.log(`  reloadFlagPath ends with .flag and includes coin ✓`);
+  // Must include the instance ID so each arena consumes its own flag
+  assert(p.includes(CONFIG.ARENA_INSTANCE_ID),
+    `flag path should include ARENA_INSTANCE_ID (${CONFIG.ARENA_INSTANCE_ID}), got ${p}`);
+  console.log(`  reloadFlagPath includes ARENA_INSTANCE_ID ✓ (${p.split("/").pop()})`);
 }
 
 // No flag present → maybeReloadEngines returns the same array (no-op)

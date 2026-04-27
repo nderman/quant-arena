@@ -47,20 +47,19 @@ rsync -avz \
 echo "[3/4] Remote tsc..."
 ssh "$REMOTE_HOST" "cd $REMOTE_DIR && npx tsc"
 
-# 4. Touch reload flag for each arena instance per requested coin. Each
-#    coin runs 4 instances (5m/15m/1h/4h) in separate PM2 processes, and
-#    each consumes its own flag file. Touching only the per-coin flag
-#    starves 3 of 4 instances (first-to-detect deletes the flag — bug
-#    discovered Apr 27 after surgical deploys silently failed for days).
+# 4. Touch reload flag for each arena instance per coin (4 instances each).
+#    Per-instance flags fix starvation bug discovered Apr 27 — sibling
+#    arenas used to fight over a shared per-coin flag.
 echo "[4/4] Touching reload flags (4 arena instances per coin)..."
-INSTANCES=()
+FLAG_PATHS=()
 for coin in "${COINS[@]}"; do
-  INSTANCES+=("$coin" "${coin}-15m" "${coin}-1h" "${coin}-4h")
+  for suffix in "" "-15m" "-1h" "-4h"; do
+    FLAG_PATHS+=("$REMOTE_DIR/data/reload_engines_${coin}${suffix}.flag")
+  done
 done
-for inst in "${INSTANCES[@]}"; do
-  ssh "$REMOTE_HOST" "touch $REMOTE_DIR/data/reload_engines_${inst}.flag"
-  echo "  → reload_engines_${inst}.flag"
-done
+# Single ssh call for all flags — saves ~2s per deploy vs 12 round-trips.
+ssh "$REMOTE_HOST" "touch ${FLAG_PATHS[*]}"
+for p in "${FLAG_PATHS[@]}"; do echo "  → $(basename $p)"; done
 
 echo ""
 echo "Engine deploy complete."
