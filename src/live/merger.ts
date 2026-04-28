@@ -14,8 +14,14 @@ import { Wallet } from "@ethersproject/wallet";
 import { Contract } from "@ethersproject/contracts";
 import * as providers from "@ethersproject/providers";
 import { BigNumber } from "@ethersproject/bignumber";
-import { utils, constants } from "ethers";
-import type { ClobClient } from "@polymarket/clob-client";
+// new Interface + parseUnits + HashZero — sourced from
+// @ethersproject/* sub-packages so we don't depend on the ethers umbrella
+// package (no longer pulled in transitively after dropping
+// @polymarket/clob-client v1 on Apr 28 v2-protocol upgrade).
+import { Interface } from "@ethersproject/abi";
+import { parseUnits } from "@ethersproject/units";
+import { HashZero } from "@ethersproject/constants";
+import type { ClobClient } from "@polymarket/clob-client-v2";
 import type { LiveEngineState, TokenConditionMap } from "./liveState";
 
 // ── Polygon contract addresses ──────────────────────────────────────────────
@@ -23,7 +29,7 @@ import type { LiveEngineState, TokenConditionMap } from "./liveState";
 const CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 const USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 
-const CTF_IFACE = new utils.Interface([
+const CTF_IFACE = new Interface([
   "function mergePositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] partition, uint256 amount) external",
   "function balanceOf(address account, uint256 id) external view returns (uint256)",
   "function getCollectionId(bytes32 parentCollectionId, bytes32 conditionId, uint256 indexSet) external view returns (bytes32)",
@@ -64,7 +70,7 @@ async function getOnchainBalance(
   const provider = await getProvider();
   const ctf = new Contract(CTF_ADDRESS, CTF_IFACE, provider);
 
-  const collectionId = await ctf.getCollectionId(constants.HashZero, conditionId, outcomeIndex);
+  const collectionId = await ctf.getCollectionId(HashZero, conditionId, outcomeIndex);
   const positionId = await ctf.getPositionId(USDC_ADDRESS, collectionId);
   const balance: BigNumber = await ctf.balanceOf(funderAddress, positionId);
   return Number(balance.toString()) / 1e6; // USDC 6 decimals
@@ -144,13 +150,13 @@ export async function executeOnchainMerge(
     const gasParams = feeData.maxFeePerGas
       ? {
           maxFeePerGas: feeData.maxFeePerGas.add(feeData.maxFeePerGas.div(4)),
-          maxPriorityFeePerGas: BigNumber.from(utils.parseUnits("30", "gwei")),
+          maxPriorityFeePerGas: BigNumber.from(parseUnits("30", "gwei")),
         }
       : { gasPrice: feeData.gasPrice };
 
     const tx = await ctf.mergePositions(
       USDC_ADDRESS,
-      constants.HashZero,
+      HashZero,
       conditionId,
       partition,
       amountRaw,

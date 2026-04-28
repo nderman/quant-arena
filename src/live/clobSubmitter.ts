@@ -15,7 +15,7 @@
  * the resulting trade to get actual fill price.
  */
 
-import type { ClobClient as ClobClientType } from "@polymarket/clob-client";
+import type { ClobClient as ClobClientType } from "@polymarket/clob-client-v2";
 import type { EngineAction } from "../types";
 import type { SubmitResult, OrderSubmitter } from "./liveExecutor";
 
@@ -72,7 +72,7 @@ export function buildClobSubmitter(cfg: ClobSubmitterConfig): OrderSubmitter {
 
     try {
       // Dynamic import so tests / non-live code don't have to load the SDK
-      const { OrderType, Side } = await import("@polymarket/clob-client");
+      const { OrderType, Side } = await import("@polymarket/clob-client-v2");
 
       // Resolve negRisk: config override > per-token lookup > false
       let negRisk = cfg.negRisk;
