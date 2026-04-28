@@ -23,7 +23,7 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
 const ANALYST_MODEL = process.env.ANALYST_MODEL || "google/gemini-2.0-flash-001";
 const CODER_MODEL = process.env.CODER_MODEL || "anthropic/claude-haiku-4-5";
 /** Bump this on prompt changes so we can filter pre/post-prompt bred engines in analytics. */
-const BREEDER_PROMPT_VERSION = "v2-signals-2026-04-24";
+const BREEDER_PROMPT_VERSION = "v3-regime-fix-2026-04-28";
 const MAX_RETRIES = 2;
 const MIN_NEW_ROUNDS_TO_BREED = Number(process.env.MIN_NEW_ROUNDS_TO_BREED ?? 3);
 const PROJECT_ROOT = path.resolve(__dirname, "..");
@@ -390,10 +390,40 @@ consider at least one non-Binance signal to widen the alpha surface.
 3) BINANCE MOMENTUM — via this.trackBinance() / this.recentMomentum():
    Still useful. Not exclusive.
 
-Example with mixed signals:
+4) REGIME API — CRITICAL DISTINCTION (multiple bred engines got this wrong):
+
+   this.currentRegime(lookbackSec)         // RETURNS A STRING:
+                                           //   "QUIET" | "CHOP" | "TREND" | "SPIKE" | "UNKNOWN"
+   this.currentRegimeStable(label)         // RETURNS A BOOLEAN:
+                                           //   true if current regime IS the given label, with hysteresis
+
+   ❌ WRONG (silently always-false): const regime = this.currentRegimeStable("anything");
+                                     if (regime === "TREND") return [];  // never matches: bool !== string
+   ✓ RIGHT: const regime = this.currentRegime(60);
+            if (regime === "TREND") return [];
+   ✓ ALSO RIGHT: if (this.currentRegimeStable("CHOP")) { ... }
+
+═══════════════════════════════════════════════════════════════════
+PROVEN SIGNAL-COMBINATION PATTERN (Apr 28)
+═══════════════════════════════════════════════════════════════════
+The strongest bred engines so far combine TWO OR MORE signals from
+DIFFERENT categories (macro + micro, vol + flow, etc). bred-jp1t
+(67% WR over 3 rounds on eth-4h, +$10/round EV) reads
+realizedVol + bookImbalance + fearGreed + Binance momentum together.
+
+Anti-pattern: triple-conjunction at extreme thresholds (e.g. F&G ≥ 75
+AND |funding| > 0.02% AND imbalance > 0.65) almost never fires in
+normal markets. Loosen each gate or you'll get a beautiful never-firing
+engine. Aim for 2 gates that align ~30% of the time, not 4 that align
+~1%. Selectivity is good; over-selectivity is dead code.
+
+Example with mixed signals (bred-jp1t style):
    const imb = this.bookImbalance(upTokenId);
    const fng = signals?.fearGreed?.value ?? 50;
-   if (imb > 0.4 && fng < 40) { /* book + sentiment both support UP */ }
+   const v5m = signals?.realizedVol?.vol5m ?? 0;
+   if (imb > 0.4 && fng < 40 && v5m > 30) {
+     // book + sentiment + vol all support UP
+   }
 
 ═══════════════════════════════════════════════════════════════════
 STRATEGY — YOU DECIDE
