@@ -1,6 +1,37 @@
 # Tuesday Apr 28 Handoff — Weekend Learnings + Todo List
 
-Last updated: 2026-04-25 ~14:30 UTC (Friday before US Memorial Day weekend, Monday Apr 27 holiday)
+Last updated: 2026-04-28 09:30 UTC (Tuesday morning, post-investigation, pre-cutover)
+
+## TUESDAY UPDATE (Apr 28, ~07-09 UTC)
+
+### What happened today
+- Pulled fresh leaderboards (#53 ✓). 26 SAFE entries now. **chop-fader-v1 still #1** (12r / 58% WR / +$11.86 EV). **book-imbalance-v1 in 5 SAFE arenas**, the new standout (eth-15m: 12r / 75% WR / +$5.85).
+- Reload-flag bug fixed Mon evening (per-arena-instance flags) so all 12 arenas now actually receive surgical deploys.
+- Discovered Polymarket v2 exchange upgrade lands today at **11:00 UTC** — all open orders cleared, v1 SDK stops working post-cutover.
+
+### Live deployment chosen
+- **book-imbalance-v1 @ ETH 15m, full $18 bankroll** (concentrated). Initially split with momentum-settle BTC 1h @ $6, but $6 was structurally below the 5-share-min × 45%-exposure-cap interaction (rejected on every fire). Concentrated where the engine can fire.
+- Live trading runs from 07:30 UTC → 10:50 UTC halt.
+- Cron-armed halt scheduled for 12:50 SAST (10:50 UTC).
+- Expected fires: 1-2 trades over 3-hour window per sim history (0.4 fires/hr, 75% non-silent rounds).
+
+### v2 SDK migration prep
+- Branch: `clob-v2-migration` (commit 918e198, pushed)
+- Migrated to **`@polymarket/clob-client-v2@1.0.0`** (separate npm package, not a higher version of `@polymarket/clob-client`)
+- Constructor: positional → options object (`{host, chain, signer, creds, signatureType, funderAddress}`)
+- 249 tests passing on migration branch
+- DO NOT MERGE pre-cutover. Merge + deploy after 12:00 UTC + after pUSD signing.
+
+### Post-cutover playbook
+1. Wait for cutover to complete (~12:00 UTC)
+2. **Manual: sign pUSD conversion in Polymarket UI** (one-time, can't be automated)
+3. Check `npm view @polymarket/clob-client-v2 version` for any post-cutover bumps; update package.json if needed
+4. Merge `clob-v2-migration` → `live-execution`
+5. Full deploy with halt-flag protection (it's an arena.ts-equivalent change since clobClient.ts touches core init)
+6. Verify `[clob] Connected using cached API credentials from .env` logs cleanly (or `[clob] Derived API key` if creds invalid post-pUSD migration)
+7. Re-arm live engines roster only after a smoke-test trade succeeds
+
+
 
 ## Where we left off
 
