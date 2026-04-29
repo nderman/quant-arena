@@ -26,9 +26,15 @@ export class TradeSettlePingerEngine extends AbstractEngine {
   name = "Trade-Settle Pinger";
   version = "1.0.0";
 
-  private readonly entryMin = 0.70;
+  // Loosened Apr 29 after 0 fires in 2.5h sim. Original gates:
+  //   entryMin 0.70, maxSecondsLeft 60, imbalance >= 0 required
+  // Diagnosed: leading side at 0.75 typically has NEGATIVE book imbalance
+  // (sellers stack ask) — the imbalance gate was filtering out exactly
+  // the high-conviction setups the thesis describes. Removed it.
+  // Also widened to 0.65-0.85 + 90s window for more fire opportunities.
+  private readonly entryMin = 0.65;
   private readonly entryMax = 0.85;
-  private readonly maxSecondsLeft = 60;
+  private readonly maxSecondsLeft = 90;
   private readonly maxCashPct = 0.15;
 
   onTick(tick: MarketTick, state: EngineState, _signals?: SignalSnapshot): EngineAction[] {
@@ -66,9 +72,11 @@ export class TradeSettlePingerEngine extends AbstractEngine {
     const tokenId = buyUp ? upTokenId : downTokenId;
     const askPrice = buyUp ? upAsk : downAsk;
 
-    // Book confirmation — leading side must show non-negative imbalance
+    // Note: removed `imbalance >= 0` gate. Leading-side books at 0.70+
+    // typically have NEGATIVE imbalance (sellers stack the ask believing
+    // it's overpriced) — the gate filtered out the very setups the
+    // thesis describes. Logged imbalance in note for post-hoc analysis.
     const imbalance = this.bookImbalance(tokenId, 3);
-    if (imbalance < 0) return [];
 
     const edge = this.feeAdjustedEdge(0.70, askPrice);
     if (!edge.profitable) return [];
