@@ -2,6 +2,17 @@
 
 Last updated: 2026-04-28 09:30 UTC (Tuesday morning, post-investigation, pre-cutover)
 
+## ⏰ FRIDAY MAY 1 ACTION ITEM
+**Top up OpenRouter credits + upgrade breeder to Sonnet 4.6.**
+User pays on May 1 (work reimbursement). After balance ≥$20:
+1. SSH to VPS: `echo "CODER_MODEL=anthropic/claude-sonnet-4-6" >> ~/quant-arena/.env`
+2. Restart breeders: `pm2 restart quant-breeder-btc quant-breeder-eth quant-breeder-sol`
+3. Force test cycle: `cd ~/quant-arena && ARENA_COIN=eth npx ts-node src/breeder.ts`
+4. Verify bred output is materially better — multi-signal, no `currentRegimeStable` bool trap, fewer over-gates.
+5. Cost: ~$0.30/breed × 9 breeds/day = ~$2.70/day. ~$80/month.
+
+Reverted to Haiku Apr 29 after hitting OpenRouter credit wall (1225 tokens/request affordable; needed 8192). Live engines unaffected.
+
 ## TUESDAY UPDATE (Apr 28, ~07-09 UTC)
 
 ### What happened today
