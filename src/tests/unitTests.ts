@@ -1381,6 +1381,75 @@ console.log("\n── CLOB tick alignment ────────────�
   assert(highSell <= 0.99, `extreme-high SELL clamped below 1, got ${highSell}`);
 }
 
+// ── Post-timeout reconcile (clobSubmitter) ──────────────────────────────────
+
+import { buildClobSubmitter } from "../live/clobSubmitter";
+
+async function runClobSubmitterTimeoutTests(): Promise<void> {
+  console.log("\n── clobSubmitter post-timeout reconcile ────");
+
+  // Mock client where createAndPostOrder NEVER resolves (simulates PM hung)
+  function hungClient(getOpenOrdersResp: unknown[]) {
+    return {
+      createAndPostOrder: () => new Promise(() => { /* never resolves */ }),
+      getNegRisk: async () => false,
+      getOpenOrders: async () => getOpenOrdersResp,
+    } as never;
+  }
+
+  // Case 1: timeout fires AND open-order probe finds matching order → accepted
+  {
+    const submit = buildClobSubmitter({
+      client: hungClient([{ id: "ord-found-123", market: "TOK1", asset_id: "TOK1", size: 5 }]),
+      timeoutMs: 200,
+      tickSize: "0.01",
+      negRisk: false,
+    });
+    const start = Date.now();
+    const r = await submit({ side: "BUY", tokenId: "TOK1", price: 0.50, size: 5 });
+    const elapsed = Date.now() - start;
+    assert(r.ok === true, `timeout-with-found-order: should accept, got ${JSON.stringify(r)}`);
+    if (r.ok) {
+      assert(r.clientOrderId === "ord-found-123", `expected clientOrderId=ord-found-123, got ${r.clientOrderId}`);
+    }
+    assert(elapsed >= 200 && elapsed < 5000, `should take ~200ms+ (timeout duration), took ${elapsed}ms`);
+    console.log(`  timeout + getOpenOrders match → accepted as in-flight ✓ (${elapsed}ms)`);
+  }
+
+  // Case 2: timeout fires AND open-order probe returns empty → rejected
+  {
+    const submit = buildClobSubmitter({
+      client: hungClient([]),
+      timeoutMs: 200,
+      tickSize: "0.01",
+      negRisk: false,
+    });
+    const r = await submit({ side: "BUY", tokenId: "TOK1", price: 0.50, size: 5 });
+    assert(r.ok === false, `timeout-with-empty-probe: should reject, got ${JSON.stringify(r)}`);
+    if (!r.ok) {
+      assert(!!r.reason && r.reason.includes("timeout"), `reason should mention timeout: ${r.reason}`);
+    }
+    console.log(`  timeout + getOpenOrders empty → rejected ✓`);
+  }
+
+  // Case 3: timeout fires AND open-order probe throws → rejected gracefully
+  {
+    const submit = buildClobSubmitter({
+      client: {
+        createAndPostOrder: () => new Promise(() => {/* never */}),
+        getNegRisk: async () => false,
+        getOpenOrders: async () => { throw new Error("network down"); },
+      } as never,
+      timeoutMs: 200,
+      tickSize: "0.01",
+      negRisk: false,
+    });
+    const r = await submit({ side: "BUY", tokenId: "TOK1", price: 0.50, size: 5 });
+    assert(r.ok === false, `timeout-with-probe-error: should reject, got ${JSON.stringify(r)}`);
+    console.log(`  timeout + getOpenOrders error → rejected gracefully ✓`);
+  }
+}
+
 // ── Book microstructure signals (pulse.ts) ──────────────────────────────────
 
 console.log("\n── Book microstructure signals ────────");
@@ -1538,7 +1607,7 @@ console.log("\n── Signal Contrarian gate logic ───────");
 
 // ── Summary ──────────────────────────────────────────────────────────────────
 
-Promise.all([runLiveExecutorTests(), runRejectionReasonTests()])
+Promise.all([runLiveExecutorTests(), runRejectionReasonTests(), runClobSubmitterTimeoutTests()])
   .then(() => {
     console.log(`\n${"=".repeat(40)}`);
     console.log(`Tests: ${passed} passed, ${failed} failed`);
