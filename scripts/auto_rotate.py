@@ -51,6 +51,8 @@ LIVE_ENGINES_PATH = DATA_DIR / "live_engines.json"
 DISABLED_FLAG = DATA_DIR / "auto_rotation.disabled"
 ROTATION_LOG = DATA_DIR / "auto_rotation.log"
 COOLDOWN_PATH = DATA_DIR / "auto_rotation_cooldown.json"
+LAST_SEEN_ROSTER_PATH = DATA_DIR / "auto_rotation_last_seen.json"
+FUNDER_ADDRESS = os.environ.get("FUNDER", "0xda848fc283c4543fCB5dd996d81a21E06072F93e")
 
 ARENAS = [
     "btc", "eth", "sol",
@@ -70,6 +72,9 @@ ROSTER_SIZE = 5             # top K
 LIVE_BANKROLL_USD = 25.0    # used for cash buffer check
 MIN_CASH_PER_ENGINE = 5.0   # skip add if cash < this * roster size
 SHRINKAGE_K = 5             # Bayesian-style shrinkage: sharpe *= n/(n+K)
+LIVE_PNL_LOOKBACK_HOURS = 6 # window for live-PnL drift feedback
+LIVE_PNL_LOSS_PENALTY = 0.5 # multiplier when an engine has bled live in lookback
+LIVE_PNL_LOSS_THRESHOLD = -2.0  # USD — engine penalized if it's lost more than this
 
 # Regime fit multipliers
 REGIME_POSITIVE_MULT = 1.5
@@ -118,6 +123,79 @@ def atomic_write_json(path: Path, data: Any) -> None:
 
 def save_cooldown(cd: Dict[str, float]) -> None:
     atomic_write_json(COOLDOWN_PATH, cd)
+
+
+def fetch_live_pnl_by_coin(hours: float = LIVE_PNL_LOOKBACK_HOURS) -> Dict[str, float]:
+    """Pull recent Polymarket activity, attribute by coin from market title.
+    Returns coin -> net_usd_flow over the lookback window.
+
+    Used as a "live drift" feedback signal: if an engine's coin has been
+    bleeding cash in the last N hours, penalize that engine's score so
+    auto-rotate doesn't keep re-adding it.
+    """
+    import urllib.request
+    cutoff = time.time() - hours * 3600
+    out: Dict[str, float] = defaultdict(float)
+    try:
+        url = f"https://data-api.polymarket.com/activity?user={FUNDER_ADDRESS}&limit=200"
+        req = urllib.request.Request(url, headers={"User-Agent": "quant-farm/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+    except Exception as e:
+        log(f"warn: activity API fetch failed: {e}")
+        return {}
+    for a in data:
+        ts = a.get("timestamp", 0)
+        if ts < cutoff:
+            continue
+        title = (a.get("title", "") or "")
+        coin = "ETH" if "Ethereum" in title else ("SOL" if "Solana" in title else ("BTC" if "Bitcoin" in title else None))
+        if not coin:
+            continue
+        usd = a.get("usdcSize", 0) or 0
+        typ = (a.get("type", "") or "").upper()
+        if typ == "TRADE" and a.get("side") == "BUY":
+            out[coin] -= usd
+        elif typ == "REDEEM":
+            out[coin] += usd
+        elif typ == "TRADE" and a.get("side") == "SELL":
+            out[coin] += usd
+    return dict(out)
+
+
+def load_last_seen_roster() -> set:
+    """Load the roster set as of the previous cron run, for manual-cull detection."""
+    if not LAST_SEEN_ROSTER_PATH.exists():
+        return set()
+    try:
+        d = json.loads(LAST_SEEN_ROSTER_PATH.read_text())
+        return {tuple(pair) for pair in d.get("pairs", [])}
+    except Exception:
+        return set()
+
+
+def save_last_seen_roster(pairs: set) -> None:
+    atomic_write_json(LAST_SEEN_ROSTER_PATH, {"pairs": [list(p) for p in pairs], "ts": time.time()})
+
+
+def detect_and_record_manual_culls(current_set: set, last_seen: set, cooldown: Dict[str, float]) -> int:
+    """If an engine was in last_seen but is missing from current_set, the user
+    manually removed it (since auto_rotate would have added cooldown via its
+    own removal path). Add cooldown so we don't auto-readd it.
+
+    Returns count of newly-cooled-down pairs.
+    """
+    now = time.time()
+    cooldown_until = now + COOLDOWN_HOURS * 3600
+    n = 0
+    for pair in last_seen:
+        if pair not in current_set:
+            cd_key = f"{pair[0]}:{pair[1]}"
+            existing = cooldown.get(cd_key, 0)
+            if existing < cooldown_until:  # don't shorten an existing cooldown
+                cooldown[cd_key] = cooldown_until
+                n += 1
+    return n
 
 
 # ── Scoring ──────────────────────────────────────────────────────────────────
@@ -188,11 +266,57 @@ def loss_streak(pnls: List[float]) -> int:
 
 # ── Regime detection ─────────────────────────────────────────────────────────
 
-def current_regime() -> str:
-    """Classify current regime from cached signals.
+def fetch_realized_vols() -> Dict[str, float]:
+    """Direct fetch BTCUSDT realized vol from Binance klines.
+    Computes 5m / 1h / 1d annualized vol from 1m candles.
 
-    Reads data/last_signals.json if available (written by signals cron).
-    Falls back to running `npm run signals` and parsing stdout.
+    Avoids npm dependency in cron context. Falls back to cached file
+    on network failure.
+    """
+    import urllib.request, urllib.error, math
+    cache = DATA_DIR / "last_signals.json"
+
+    def fetch_klines(interval: str, limit: int) -> List[float]:
+        url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval={interval}&limit={limit}"
+        req = urllib.request.Request(url, headers={"User-Agent": "quant-farm/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        # Each kline: [openTime, open, high, low, close, volume, ...]
+        return [float(k[4]) for k in data]
+
+    def annualized_vol(closes: List[float], periods_per_year: float) -> float:
+        if len(closes) < 2: return 0.0
+        rets = [math.log(closes[i]/closes[i-1]) for i in range(1, len(closes)) if closes[i-1] > 0]
+        if len(rets) < 2: return 0.0
+        m = sum(rets)/len(rets)
+        var = sum((r-m)**2 for r in rets)/(len(rets)-1)
+        return math.sqrt(var * periods_per_year) * 100  # percent
+
+    try:
+        # 5m window: 5 1m candles → 5m realized vol annualized via per-minute
+        closes_5 = fetch_klines("1m", 6)  # need 6 to get 5 returns
+        v5 = annualized_vol(closes_5, 525_600)  # 525_600 minutes/year
+        # 1h window: 60 1m candles
+        closes_60 = fetch_klines("1m", 60)
+        v1h = annualized_vol(closes_60, 525_600)
+        # 1d window: 24 1h candles
+        closes_d = fetch_klines("1h", 24)
+        v1d = annualized_vol(closes_d, 8_760)  # hours/year
+        sig = {"vol5m": v5, "vol1h": v1h, "vol1d": v1d, "ts": time.time()}
+        atomic_write_json(cache, sig)
+        return sig
+    except Exception as e:
+        log(f"warn: realized vol fetch failed: {e}; falling back to cache")
+        if cache.exists():
+            try:
+                return json.loads(cache.read_text())
+            except Exception:
+                pass
+        return {}
+
+
+def current_regime() -> str:
+    """Classify current regime from realized BTCUSDT vol.
 
     Categories:
       SPIKE: realized 5m > 1h * 1.3 (short-term spikiness)
@@ -200,53 +324,19 @@ def current_regime() -> str:
       TREND: 1h > 1d (medium-term elevated vol)
       CHOP: default
     """
-    # Try cached file first
-    cache = DATA_DIR / "last_signals.json"
-    if cache.exists():
-        try:
-            sig = json.loads(cache.read_text())
-        except Exception:
-            sig = None
-    else:
-        sig = None
-
+    sig = fetch_realized_vols()
     if not sig:
-        # Run npm and parse — best-effort, may be slow
-        try:
-            import subprocess
-            r = subprocess.run(["npm", "run", "signals"], capture_output=True, text=True, timeout=30)
-            out = r.stdout
-            sig = parse_signals_text(out)
-        except Exception:
-            return "UNKNOWN"
-
-    try:
-        v5 = sig.get("vol5m", 0) or 0
-        v1h = sig.get("vol1h", 0) or 0
-        v1d = sig.get("vol1d", 0) or 0
-        if v5 > v1h * 1.3 and v1h > 0:
-            return "SPIKE"
-        if v5 < v1h * 0.7 and v1h > 0:
-            return "QUIET"
-        if v1h > v1d and v1d > 0:
-            return "TREND"
-        return "CHOP"
-    except Exception:
         return "UNKNOWN"
-
-
-def parse_signals_text(text: str) -> dict:
-    import re
-    out: dict = {}
-    m = re.search(r"Realized Vol \([^)]+\): 5m=([\d.]+)%\s*\|\s*1h=([\d.]+)%\s*\|\s*1d=([\d.]+)%", text)
-    if m:
-        out["vol5m"] = float(m.group(1))
-        out["vol1h"] = float(m.group(2))
-        out["vol1d"] = float(m.group(3))
-    m = re.search(r"Fear & Greed:\s*(\d+)", text)
-    if m:
-        out["fng"] = int(m.group(1))
-    return out
+    v5 = sig.get("vol5m", 0) or 0
+    v1h = sig.get("vol1h", 0) or 0
+    v1d = sig.get("vol1d", 0) or 0
+    if v5 > v1h * 1.3 and v1h > 0:
+        return "SPIKE"
+    if v5 < v1h * 0.7 and v1h > 0:
+        return "QUIET"
+    if v1h > v1d and v1d > 0:
+        return "TREND"
+    return "CHOP"
 
 
 def regime_fit_mult(engine_id: str, arena: str, regime: str) -> float:
@@ -326,13 +416,21 @@ def regime_fit_mult(engine_id: str, arena: str, regime: str) -> float:
 
 # ── Selection ────────────────────────────────────────────────────────────────
 
-def candidates(regime: str, cooldown: Dict[str, float], current_set: Optional[set] = None) -> List[Dict[str, Any]]:
-    """Build scored candidate list across all (engine, arena) pairs."""
-    if current_set is None:
-        current_set = set()
+def candidates(
+    regime: str,
+    cooldown: Dict[str, float],
+    current_set: set,
+    live_pnl_by_coin: Dict[str, float],
+) -> List[Dict[str, Any]]:
+    """Build scored candidate list across all (engine, arena) pairs.
+
+    Score = recent_sharpe × regime_fit × incumbent_bonus × live_pnl_penalty
+    Hard filters: SAFE worst-round, MIN_ROUNDS, cooldown.
+    """
     now = time.time()
     out = []
     for arena in ARENAS:
+        coin_upper = arena.split("-")[0].upper()
         per_engine = gather_engine_rounds(arena)
         for engine_id, rounds in per_engine.items():
             if len(rounds) < MIN_ROUNDS:
@@ -350,7 +448,14 @@ def candidates(regime: str, cooldown: Dict[str, float], current_set: Optional[se
             mult = regime_fit_mult(engine_id, arena, regime)
             incumbent = (engine_id, arena) in current_set
             inc_bonus = (1 + INCUMBENT_BONUS) if incumbent else 1.0
-            score = sharpe * mult * inc_bonus
+            # Live PnL drift penalty: if this engine's coin has bled below the
+            # threshold in the last LIVE_PNL_LOOKBACK_HOURS, penalize.
+            # Skip incumbents — they're holding positions and we already trust them.
+            coin_drift = live_pnl_by_coin.get(coin_upper, 0)
+            live_penalty = 1.0
+            if not incumbent and coin_drift < LIVE_PNL_LOSS_THRESHOLD:
+                live_penalty = LIVE_PNL_LOSS_PENALTY
+            score = sharpe * mult * inc_bonus * live_penalty
             out.append({
                 "engine_id": engine_id,
                 "arena": arena,
@@ -359,6 +464,7 @@ def candidates(regime: str, cooldown: Dict[str, float], current_set: Optional[se
                 "sharpe": sharpe,
                 "mult": mult,
                 "incumbent": incumbent,
+                "live_penalty": live_penalty,
                 "score": score,
                 "worst": min(pnls),
                 "best": max(pnls),
@@ -472,17 +578,31 @@ def main() -> int:
     cooldown = load_cooldown()
     current = load_live_engines()
     current_set = current_roster_set(current)
-    cands = candidates(regime, cooldown, current_set)
+
+    # Manual-cull detection: anything in last_seen but missing from current
+    # = user manually removed it. Apply cooldown so we don't re-add it.
+    last_seen = load_last_seen_roster()
+    n_culled = detect_and_record_manual_culls(current_set, last_seen, cooldown)
+    if n_culled > 0:
+        log(f"detected {n_culled} manual cull(s) — applied {COOLDOWN_HOURS}h cooldown")
+        save_cooldown(cooldown)
+
+    # Live-PnL drift feedback: penalize coins that have been bleeding live
+    live_pnl = fetch_live_pnl_by_coin()
+    if live_pnl:
+        log(f"live PnL last {LIVE_PNL_LOOKBACK_HOURS}h: " + ", ".join(f"{c}=${v:+.2f}" for c, v in live_pnl.items()))
+
+    cands = candidates(regime, cooldown, current_set, live_pnl)
     log(f"candidates passing SAFE+cooldown: {len(cands)}")
 
     chosen = construct_roster(cands)
     log(f"proposed roster: {len(chosen)} engines")
     print()
-    print(f"{'Rank':<5} {'Engine':<26} {'Arena':<10} {'N':<4} {'Sharpe':<7} {'Mult':<5} {'Score':<7} {'Worst':<7} {'Inc':<4} {'Streak'}")
-    print("-" * 95)
+    print(f"{'Rank':<5} {'Engine':<26} {'Arena':<10} {'N':<4} {'Sharpe':<7} {'Mult':<5} {'LP':<5} {'Score':<7} {'Worst':<7} {'Inc'}")
+    print("-" * 100)
     for i, c in enumerate(chosen):
         inc = "★" if c["incumbent"] else ""
-        print(f"{i+1:<5} {c['engine_id']:<26} {c['arena']:<10} {c['n_rounds']:<4} {c['sharpe']:<7.2f} {c['mult']:<5.1f} {c['score']:<7.2f} ${c['worst']:<6.0f} {inc:<4} {c['loss_streak']}")
+        print(f"{i+1:<5} {c['engine_id']:<26} {c['arena']:<10} {c['n_rounds']:<4} {c['sharpe']:<7.2f} {c['mult']:<5.1f} {c.get('live_penalty',1.0):<5.2f} {c['score']:<7.2f} ${c['worst']:<6.0f} {inc}")
     print()
 
     proposed = proposed_roster_dict(chosen, args.bankroll)
@@ -496,6 +616,7 @@ def main() -> int:
 
     if not do_swap:
         log("no swap — current roster acceptable")
+        save_last_seen_roster(current_set)
         return 0
 
     # Diff
@@ -507,6 +628,7 @@ def main() -> int:
 
     if not args.commit:
         log("DRY RUN — would swap but --commit not set. No changes written.")
+        save_last_seen_roster(current_set)  # track current state for next run's manual-cull detection
         return 0
 
     # Backup + atomic write
@@ -523,6 +645,7 @@ def main() -> int:
     for eng, arena in removed:
         cooldown[f"{eng}:{arena}"] = cooldown_until
     save_cooldown(cooldown)
+    save_last_seen_roster(proposed_set)
     log(f"cooldown set on {len(removed)} swapped-out pairs until +{COOLDOWN_HOURS}h")
 
     return 0
