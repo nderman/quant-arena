@@ -9,7 +9,8 @@ Evolutionary arena for Polymarket 5M crypto binary markets. AI-bred engines comp
 - `npm run arena:dry` — simulated data, no APIs
 - `npm run arena:live` — live PM + Binance data (auto-discovers markets)
 - `npm run arena:1round:dry` — quick test (1 min round)
-- `npm run test:unit` — 249 tests, must all pass
+- `npm run test:unit` — 255 tests, must all pass
+- `python3 scripts/auto_rotate.py` — dry-run engine roster selection (Phase 1a). Add `--commit` to actually swap.
 - `npm run build` — TypeScript compile
 - `npm run discover` — list active crypto markets
 - `npm run signals` — test all signal sources

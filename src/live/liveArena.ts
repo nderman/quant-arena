@@ -187,6 +187,77 @@ export function startLiveArena(cfg: LiveArenaConfig): LiveArenaHandle {
   reconcileTimer = setTimeout(runReconcile, reconcileMs);
   settlementTimer = setTimeout(runSettlement, settlementMs);
 
+  // ── live_engines.json file-watcher (mid-round hot-reload) ──
+  //
+  // Polls the roster file's mtime every 30s. When it changes, diff the
+  // roster: add new engines (fresh LiveEngineState), pause removed engines
+  // but keep their state alive until open positions settle (prevents losing
+  // track of in-flight trades). Avoids PM2 restart so sim arena stays alive.
+  const liveEnginesPath = path.join(DATA_DIR, "live_engines.json");
+  let lastMtimeMs = 0;
+  try {
+    lastMtimeMs = fs.statSync(liveEnginesPath).mtimeMs;
+  } catch { /* file may not exist yet */ }
+
+  let watcherTimer: NodeJS.Timeout | null = null;
+  const checkRosterChange = (): void => {
+    if (!running) return;
+    try {
+      const stat = fs.statSync(liveEnginesPath);
+      if (stat.mtimeMs > lastMtimeMs) {
+        lastMtimeMs = stat.mtimeMs;
+        const newRoster = loadGraduatedEngines(cfg.coin, instanceId);
+        const newIds = new Set(newRoster.map(g => g.engineId));
+        const oldIds = new Set(states.keys());
+
+        // Added engines (or re-added after a pause)
+        const walletAddr = process.env.FUNDER ?? "0x0";
+        for (const g of newRoster) {
+          const existing = states.get(g.engineId);
+          if (!existing) {
+            const state = createLiveState(g.engineId, walletAddr, g.bankrollUsd, g.graduationRoundId);
+            states.set(g.engineId, state);
+            console.log(`[live-arena:${instanceId ?? cfg.coin}] HOT-ADD ${g.engineId} bankroll=$${g.bankrollUsd}`);
+          } else if (existing.paused && existing.pauseReason === "removed-from-roster-awaiting-settle") {
+            // Engine was previously removed but kept alive for settlement.
+            // Now it's been re-added — clear the pause so it can fire again.
+            existing.paused = false;
+            existing.pauseReason = undefined;
+            console.log(`[live-arena:${instanceId ?? cfg.coin}] HOT-RESUME ${g.engineId} (re-added before settlement)`);
+          }
+        }
+
+        // Removed engines: pause but keep state if open positions; only delete
+        // when all positions settle and no pending orders remain.
+        for (const eid of oldIds) {
+          if (!newIds.has(eid)) {
+            const state = states.get(eid);
+            if (!state) continue;
+            const hasOpenWork = state.positions.size > 0 || state.pendingOrders.size > 0;
+            if (hasOpenWork) {
+              if (!state.paused) {
+                state.paused = true;
+                state.pauseReason = "removed-from-roster-awaiting-settle";
+                console.log(`[live-arena:${instanceId ?? cfg.coin}] HOT-REMOVE ${eid} — pausing (positions=${state.positions.size}, pending=${state.pendingOrders.size}); state retained until settle`);
+              }
+            } else {
+              states.delete(eid);
+              console.log(`[live-arena:${instanceId ?? cfg.coin}] HOT-REMOVE ${eid} — clean removal`);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      // File may not exist; ignore quietly
+      if (err instanceof Error && !err.message.includes("ENOENT")) {
+        console.warn(`[live-arena:${instanceId ?? cfg.coin}] roster watcher error: ${err.message}`);
+      }
+    } finally {
+      if (running) watcherTimer = setTimeout(checkRosterChange, 30_000);
+    }
+  };
+  watcherTimer = setTimeout(checkRosterChange, 30_000);
+
   const onSimAction = async (
     engineId: string,
     action: EngineAction,
@@ -230,6 +301,7 @@ export function startLiveArena(cfg: LiveArenaConfig): LiveArenaHandle {
     running = false;
     if (reconcileTimer) clearTimeout(reconcileTimer);
     if (settlementTimer) clearTimeout(settlementTimer);
+    if (watcherTimer) clearTimeout(watcherTimer);
   };
 
   const snapshot = (): LiveSnapshot => ({
