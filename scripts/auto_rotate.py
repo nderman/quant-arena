@@ -548,14 +548,21 @@ def should_swap(current_set: set, proposed_set: set, cands: List[dict]) -> Tuple
 # ── Logging ──────────────────────────────────────────────────────────────────
 
 def log(msg: str) -> None:
+    """Write to ROTATION_LOG file. Stdout is captured separately by cron via
+    redirect — log() doesn't print() to avoid duplication when the script
+    runs under cron with `>> data/auto_rotation.log 2>&1`.
+    """
     line = f"[{dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')}Z] {msg}"
-    print(line)
     try:
         ROTATION_LOG.parent.mkdir(parents=True, exist_ok=True)
         with ROTATION_LOG.open("a") as f:
             f.write(line + "\n")
     except Exception:
         pass
+    # Also print so interactive runs show output. Under cron, stdout redirects
+    # to ROTATION_LOG would duplicate — but new crontab pipes stdout to
+    # /dev/null and only relies on log() for persistent decisions.
+    print(line)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
