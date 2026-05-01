@@ -114,22 +114,26 @@ export function readLedger(): (FillEvent | SettleEvent)[] {
  */
 export function rehydratePositionsFromLedger(
   engineIds: Set<string>,
+  arenaInstanceId?: string,  // when set, only rows with matching arenaInstanceId are replayed
 ): Map<string, Map<string, { shares: number; costBasis: number; avgEntry: number; side: "YES" | "NO" }>> {
   const out = new Map<string, Map<string, { shares: number; costBasis: number; avgEntry: number; side: "YES" | "NO" }>>();
   const settled = new Set<string>(); // engineId:tokenId pairs that have settled
   const rows = readLedger();
+  const matchesArena = (r: FillEvent | SettleEvent) =>
+    !arenaInstanceId || r.arenaInstanceId === arenaInstanceId;
 
-  // First pass: mark settled (engine, token) pairs
+  // First pass: mark settled (engine, token) pairs (within arena scope)
   for (const r of rows) {
-    if (r.type === "SETTLE" && engineIds.has(r.engineId)) {
+    if (r.type === "SETTLE" && engineIds.has(r.engineId) && matchesArena(r)) {
       settled.add(`${r.engineId}:${r.tokenId}`);
     }
   }
 
-  // Second pass: accumulate FILLs that haven't been settled
+  // Second pass: accumulate FILLs that haven't been settled (within arena scope)
   for (const r of rows) {
     if (r.type !== "FILL") continue;
     if (!engineIds.has(r.engineId)) continue;
+    if (!matchesArena(r)) continue;
     const key = `${r.engineId}:${r.tokenId}`;
     if (settled.has(key)) continue;
 

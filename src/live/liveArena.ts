@@ -132,7 +132,7 @@ export function startLiveArena(cfg: LiveArenaConfig): LiveArenaHandle {
   // Observed Apr 30 (bred-jp1t) + May 1 (signal-contrarian + sol). Fix:
   // read data/live_trades.jsonl, replay FILLs not yet SETTLEd, restore.
   if (states.size > 0) {
-    const restored = rehydratePositionsFromLedger(new Set(states.keys()));
+    const restored = rehydratePositionsFromLedger(new Set(states.keys()), instanceId ?? cfg.coin);
     for (const [engineId, posMap] of restored) {
       const state = states.get(engineId);
       if (!state) continue;
