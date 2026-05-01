@@ -5,6 +5,9 @@ Evolutionary arena for Polymarket 5M crypto binary markets. AI-bred engines comp
 
 **Multi-coin:** BTC, ETH, SOL each run their own arena + breeder process. Telegram is shared.
 
+## Scripts catalog
+**Before writing any one-off analysis script, check `scripts/README.md`.** It indexes every script with purpose, args, status, and known issues. Update it in the same PR when you add or change a script.
+
 ## Key Commands
 - `npm run arena:dry` — simulated data, no APIs
 - `npm run arena:live` — live PM + Binance data (auto-discovers markets)

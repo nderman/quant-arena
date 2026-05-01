@@ -6,7 +6,7 @@ that fires only when conditions favor its edge is more valuable than one
 that trades constantly. Standard mean-PnL-per-round penalizes selective
 engines because their many silent rounds drag the average toward 0.
 
-This script computes:
+Computed per (engine, arena):
   - firing rounds: rounds where tradeCount > 0
   - silence rate: % of rounds where the engine did nothing
   - mean PnL **per firing round** (excludes silent rounds)
@@ -18,95 +18,78 @@ high firing win rate. dca-settle-v1 is the anti-pattern: ~0% silence,
 modest mean, low win rate.
 
 Usage:
-  python3 scripts/engineSelectivity.py                # VPS fetch
-  python3 scripts/engineSelectivity.py --local        # ./data instead
-  python3 scripts/engineSelectivity.py --rounds 20    # only last N
+  python3 scripts/engineSelectivity.py                # local (./data) — works on VPS
+  python3 scripts/engineSelectivity.py --source vps   # SSH to VPS
+  python3 scripts/engineSelectivity.py --rounds 20    # only last N rounds per arena
   python3 scripts/engineSelectivity.py --min-firing 3 # skip engines with < N firings
+  python3 scripts/engineSelectivity.py --prefix bred- # filter by engine id prefix
+  python3 scripts/engineSelectivity.py --by-engine    # collapse arenas (legacy view)
 """
-import json, sys, os, subprocess, argparse
+import argparse
 from collections import defaultdict
 from statistics import mean
 
-VPS = "root@165.232.84.91"
-REMOTE_DIR = "~/quant-arena/data"
-LOCAL_DIR = "data"
-COINS = ["btc", "eth", "sol"]
-
-
-def load_history(coin, local):
-    if local:
-        path = os.path.join(LOCAL_DIR, f"round_history_{coin}.json")
-        if not os.path.exists(path):
-            return None
-        with open(path) as f:
-            return json.load(f)
-    try:
-        result = subprocess.run(
-            ["ssh", VPS, f"cat {REMOTE_DIR}/round_history_{coin}.json"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode != 0:
-            return None
-        return json.loads(result.stdout)
-    except Exception as e:
-        print(f"  [{coin}] fetch error: {e}", file=sys.stderr)
-        return None
+from _arena_history import iter_rounds
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--local", action="store_true")
-    ap.add_argument("--rounds", type=int, default=0, help="last N rounds per coin")
-    ap.add_argument("--min-firing", type=int, default=2, help="skip engines with < N firing rounds")
+    ap.add_argument("--source", choices=["local", "vps", "backfill"], default="local")
+    ap.add_argument("--rounds", type=int, default=0, help="last N rounds per arena")
+    ap.add_argument("--min-firing", type=int, default=2, help="skip rows with < N firing rounds")
     ap.add_argument("--prefix", help="filter engines by id prefix")
+    ap.add_argument("--by-engine", action="store_true",
+                    help="collapse arenas — one row per engine across all arenas")
     args = ap.parse_args()
 
-    # engine -> list of (coin, totalPnl, tradeCount, isFiring)
-    per_engine: dict[str, list[tuple[str, float, int, bool]]] = defaultdict(list)
-    rounds_seen = {c: 0 for c in COINS}
+    # key -> [(pnl, trades), ...]
+    per_key: dict[tuple, list[tuple[float, int]]] = defaultdict(list)
+    rounds_per_arena: dict[str, int] = defaultdict(int)
 
-    for coin in COINS:
-        history = load_history(coin, args.local)
-        if history is None:
-            continue
+    # Group rounds by arena first so --rounds can take last N per arena.
+    arena_rounds: dict[str, list] = defaultdict(list)
+    for arena, rd in iter_rounds(args.source):
+        arena_rounds[arena].append(rd)
+
+    for arena, rounds in arena_rounds.items():
         if args.rounds > 0:
-            history = history[-args.rounds:]
-        rounds_seen[coin] = len(history)
-
-        for entry in history:
-            for r in entry.get("allResults", []):
+            rounds = rounds[-args.rounds:]
+        rounds_per_arena[arena] = len(rounds)
+        for rd in rounds:
+            for r in rd.get("allResults", []):
                 eid = r.get("engineId")
-                if eid is None:
+                if not eid:
                     continue
                 if args.prefix and not eid.startswith(args.prefix):
                     continue
                 pnl = r.get("totalPnl", 0) or 0
                 trades = r.get("tradeCount", 0) or 0
-                per_engine[eid].append((coin, pnl, trades, trades > 0))
+                key = eid if args.by_engine else (eid, arena)
+                per_key[key].append((pnl, trades))
 
-    if not per_engine:
+    if not per_key:
         print("No matching engines.")
         return
 
-    coin_hdr = " ".join(f"{c}={rounds_seen[c]}" for c in COINS)
-    print(f"Rounds per coin: {coin_hdr}")
+    print("Rounds per arena: " + " ".join(f"{a}={n}" for a, n in sorted(rounds_per_arena.items())))
     print()
 
-    # Build the selectivity table
     rows = []
-    for eid, entries in per_engine.items():
+    for key, entries in per_key.items():
         total_rounds = len(entries)
-        firing = [(c, p, t) for c, p, t, f in entries if f]
+        firing = [(p, t) for p, t in entries if t > 0]
         n_firing = len(firing)
         if n_firing < args.min_firing:
             continue
-
-        firing_pnls = [p for _, p, _ in firing]
-        firing_trades = sum(t for _, _, t in firing)
+        firing_pnls = [p for p, _ in firing]
+        firing_trades = sum(t for _, t in firing)
         wins = sum(1 for p in firing_pnls if p > 0)
-
+        if isinstance(key, tuple):
+            label = f"{key[0]} @ {key[1]}"
+        else:
+            label = key
         rows.append({
-            "eid": eid,
+            "label": label,
             "total_rounds": total_rounds,
             "n_firing": n_firing,
             "silence_pct": 100 * (total_rounds - n_firing) / total_rounds if total_rounds else 0,
@@ -118,60 +101,52 @@ def main():
             "worst": min(firing_pnls),
         })
 
-    # Sort by mean-per-firing descending — the headline metric
     rows.sort(key=lambda r: -r["mean_per_firing"])
 
-    print("=" * 130)
+    print("=" * 145)
     print("SELECTIVITY-AWARE LEADERBOARD")
     print("Sorted by mean PnL per firing round. Silence% = rounds where engine didn't trade.")
-    print("=" * 130)
-    print(f"{'engine':<28}{'rounds':>8}{'firing':>8}{'silence%':>10}"
-          f"{'mean/fire':>12}{'win%/fire':>12}{'trades/fire':>12}"
+    print("=" * 145)
+    print(f"{'engine @ arena':<48}{'rounds':>8}{'firing':>8}{'silence%':>10}"
+          f"{'mean/fire':>12}{'win%/fire':>12}{'trades/fire':>13}"
           f"{'total':>10}{'best':>10}{'worst':>10}")
-    print("-" * 130)
-
+    print("-" * 145)
     for r in rows:
-        print(f"{r['eid']:<28}{r['total_rounds']:>8}{r['n_firing']:>8}"
+        print(f"{r['label']:<48}{r['total_rounds']:>8}{r['n_firing']:>8}"
               f"{r['silence_pct']:>9.0f}%"
               f"{r['mean_per_firing']:>+12.2f}"
               f"{r['firing_win_pct']:>11.0f}%"
-              f"{r['trades_per_firing']:>12.1f}"
+              f"{r['trades_per_firing']:>13.1f}"
               f"{r['total_pnl']:>+10.1f}"
               f"{r['best']:>+10.1f}"
               f"{r['worst']:>+10.1f}")
 
-    # ── Highlight the patterns ──
     print()
-    print("=" * 130)
-    print("THE TWO ENDS OF THE SELECTIVITY SPECTRUM")
-    print("=" * 130)
+    print("=" * 145)
+    print("PATTERNS")
+    print("=" * 145)
 
-    # Most selective AND statistically meaningful (silence ≥ 50%, n_firing ≥ 10)
+    # Most selective AND statistically meaningful (silence ≥ 50%, n_firing ≥ 10).
     # Without the n_firing floor, a 2-sample lucky engine looks like alpha.
-    # bred-gki8 (Apr 14): 2 firings, 1 win 1 loss → +$72/fire mean is noise.
     selective = sorted(
         [r for r in rows if r["silence_pct"] >= 50 and r["n_firing"] >= 10],
         key=lambda r: -r["mean_per_firing"]
-    )[:5]
+    )[:8]
     if selective:
         print("\nMost selective AND profitable (silence ≥ 50%, n_firing ≥ 10):")
         for r in selective:
-            print(f"  {r['eid']:<28} silence {r['silence_pct']:.0f}%  "
+            print(f"  {r['label']:<48} silence {r['silence_pct']:.0f}%  "
                   f"mean/fire ${r['mean_per_firing']:+.2f}  "
                   f"win% {r['firing_win_pct']:.0f}  total ${r['total_pnl']:+.0f}")
-    else:
-        print("\nNo selective engines yet (need silence ≥ 50% AND n_firing ≥ 10)")
 
-    # Also flag tiny-sample standouts as suspicious-not-alpha
     tiny_high = [r for r in rows if r["n_firing"] < 10 and r["mean_per_firing"] > 20]
     if tiny_high:
         print("\nTiny-sample standouts (n<10, mean/fire > +$20) — likely noise, NOT alpha:")
         for r in tiny_high:
-            print(f"  {r['eid']:<28} n_firing={r['n_firing']:<3} "
+            print(f"  {r['label']:<48} n_firing={r['n_firing']:<3} "
                   f"mean/fire ${r['mean_per_firing']:+.2f}  "
                   f"best ${r['best']:+.0f}  worst ${r['worst']:+.0f}")
 
-    # Anti-pattern: trades constantly, loses
     constant_losers = sorted(
         [r for r in rows if r["silence_pct"] < 20 and r["mean_per_firing"] < 0],
         key=lambda r: r["mean_per_firing"]
@@ -179,7 +154,7 @@ def main():
     if constant_losers:
         print("\nAnti-pattern (silence < 20%, mean/fire < 0):")
         for r in constant_losers:
-            print(f"  {r['eid']:<28} silence {r['silence_pct']:.0f}%  "
+            print(f"  {r['label']:<48} silence {r['silence_pct']:.0f}%  "
                   f"mean/fire ${r['mean_per_firing']:+.2f}  "
                   f"trades/fire {r['trades_per_firing']:.0f}  total ${r['total_pnl']:+.0f}")
 

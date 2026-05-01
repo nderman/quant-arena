@@ -35,6 +35,11 @@ VPS = "root@165.232.84.91"
 REMOTE_DIR = "~/quant-arena/data"
 LOCAL_DIR = "data"
 
+# Auto-detect: if running on the VPS itself, use local files instead of SSH-to-self.
+if not LOCAL and os.path.isdir("/root/quant-arena/data"):
+    LOCAL = True
+    LOCAL_DIR = "/root/quant-arena/data"
+
 
 def fetch_klines(symbol, start_ms, end_ms):
     """Fetch 1-min klines for a specific window. Returns list of (ts_ms, close)."""

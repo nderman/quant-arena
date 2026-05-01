@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""Generate a daily markdown summary of engine performance by regime and coin.
+"""DEPRECATED — use scripts/engineRegimeReport.py + scripts/crossArenaAnalysis.py.
 
-Pulls round_history from VPS, cross-tabulates engine × regime × coin, writes
-to data/summaries/YYYY-MM-DD.md. Run via cron or manually to snapshot what
-worked today BEFORE the next sim change invalidates the data.
+Was a daily snapshot of engine × regime × coin. Hardcoded to base 5min coins
+(missed *-15m/*-1h/*-4h arenas). The two replacements together give a richer
+picture across all arenas.
 
-Usage:
-  python3 scripts/dailySummary.py              # today, from VPS
-  python3 scripts/dailySummary.py --local      # local data files
-  python3 scripts/dailySummary.py --date 2026-04-22
+Kept for reference but not maintained.
 """
 import json, sys, os, subprocess, argparse
 from collections import defaultdict

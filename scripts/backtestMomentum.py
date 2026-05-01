@@ -11,13 +11,18 @@ Usage:
   python3 scripts/backtestMomentum.py          # last 24h BTC
   python3 scripts/backtestMomentum.py 72 ETH   # last 72h ETH
 """
-import json, sys, time
+import argparse, json, time
 from urllib.request import urlopen
 from collections import defaultdict
 
-HOURS = int(sys.argv[1]) if len(sys.argv) > 1 else 24
-SYMBOL = (sys.argv[2] if len(sys.argv) > 2 else "BTC").upper() + "USDT"
-CANDLE_SECS = 300  # 5 minutes
+ap = argparse.ArgumentParser(description="Backtest: does Binance direction at T+Xs predict 5min candle outcome?")
+ap.add_argument("hours", nargs="?", type=int, default=24, help="lookback hours (default 24)")
+ap.add_argument("coin", nargs="?", default="BTC", help="BTC, ETH, SOL (default BTC)")
+args = ap.parse_args()
+
+HOURS = args.hours
+SYMBOL = args.coin.upper() + "USDT"
+CANDLE_SECS = 300
 CHECK_POINTS = [30, 60, 90, 120, 150, 180]
 
 print(f"Backtesting momentum prediction for {SYMBOL} over last {HOURS}h")

@@ -1,20 +1,13 @@
 #!/usr/bin/env python3
-"""Graduation candidate report.
+"""DEPRECATED — use scripts/crossArenaAnalysis.py instead.
 
-Given per-coin round history with regime tags, identify (engine, arena) pairs
-that meet the graduation bar:
-  1. Fired in ≥ MIN_ROUNDS rounds (enough sample)
-  2. Net PnL > 0 across those rounds
-  3. WR ≥ MIN_WR OR avg_win > abs(avg_loss) (positive expected value)
-  4. Max single-round loss ≤ MAX_LOSS_MULT × abs(avg_loss) (no blow-up risk)
-  5. If regime data available: positive or flat in each regime seen ≥ 2 times
+The SAFE candidates table in crossArenaAnalysis covers everything this script
+did, with proper multi-arena support (this script only sees base 5min coins).
 
-Output: markdown table of pass/fail + summary of why. Run after
-tagRoundRegimes.py has tagged current history.
+Kept for reference but not maintained.
 
-Usage:
-  python3 scripts/graduationCandidates.py              # VPS fetch
-  python3 scripts/graduationCandidates.py --local      # local round_history
+Original purpose: identify (engine, arena) pairs that meet graduation bar
+(min rounds fired, net positive, bounded worst loss).
 """
 import json, sys, os, subprocess, argparse
 from collections import defaultdict

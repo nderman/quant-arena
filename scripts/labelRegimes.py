@@ -11,6 +11,7 @@ Fetches ledger data over ssh and 1m klines from Binance public API.
 
 import json
 import math
+import os
 import subprocess
 import sys
 import urllib.request
@@ -50,9 +51,17 @@ ROUNDS = {
 }
 
 
+_ON_VPS = os.path.isdir("/root/quant-arena/data")
+
+
 def ssh_sqlite(db: str, sql: str) -> str:
     escaped = sql.replace('"', '\\"')
-    cmd = ["ssh", VPS, f'sqlite3 {db} "{escaped}"']
+    if _ON_VPS:
+        # Running on VPS — invoke sqlite3 locally; expand ~ to /root.
+        local_db = db.replace("~", "/root")
+        cmd = ["sqlite3", local_db, sql]
+    else:
+        cmd = ["ssh", VPS, f'sqlite3 {db} "{escaped}"']
     out = subprocess.run(cmd, capture_output=True, text=True, check=True)
     return out.stdout.strip()
 

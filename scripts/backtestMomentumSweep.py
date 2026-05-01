@@ -13,12 +13,17 @@ Usage:
   python3 scripts/backtestMomentumSweep.py          # 168h BTC, default sweep
   python3 scripts/backtestMomentumSweep.py 72 ETH   # 72h ETH
 """
-import json, sys, time
+import argparse, json, time
 from urllib.request import urlopen
 
-HOURS = int(sys.argv[1]) if len(sys.argv) > 1 else 168
-SYMBOL = (sys.argv[2] if len(sys.argv) > 2 else "BTC").upper() + "USDT"
-CANDLE_SECS = 300  # 5 minutes
+ap = argparse.ArgumentParser(description="Sweep momentum threshold × lookback window for stingo43 config.")
+ap.add_argument("hours", nargs="?", type=int, default=168, help="lookback hours (default 168)")
+ap.add_argument("coin", nargs="?", default="BTC", help="BTC, ETH, SOL (default BTC)")
+args = ap.parse_args()
+
+HOURS = args.hours
+SYMBOL = args.coin.upper() + "USDT"
+CANDLE_SECS = 300
 
 # Sweep grid
 LOOKBACKS = [30, 60, 90, 120, 150, 180]  # seconds into candle
