@@ -12,6 +12,7 @@
 
 import { CONFIG } from "./config";
 import { getBookForToken, getBinanceVolumeSpike, pulseEvents } from "./pulse";
+import { random } from "./rng";
 import type {
   EngineAction,
   FillResult,
@@ -21,11 +22,20 @@ import type {
   OrderBook,
   MarketTick,
   OrderType,
+  RejectionReason,
 } from "./types";
 
 // ── Binance momentum tracking (for correlated toxic flow) ────────────────────
 
 const binanceState = new Map<string, { lastMid: number; delta: number }>();
+
+// Sliding window of recent Binance moves (per symbol). Used by the
+// stale-book / snipe-stale-makers guard: when Binance has moved
+// significantly recently AND the local PM book hasn't been refreshed,
+// the book is a stale snipe target and taker orders should be rejected
+// (modeling real-world market maker cancellation latency, ~30-50ms).
+const binanceMoveHistory: Map<string, { ts: number; delta: number }[]> = new Map();
+const BINANCE_HISTORY_WINDOW_MS = 30_000; // keep ~30s of history
 
 pulseEvents.on("binance_tick", (tick: MarketTick) => {
   const sym = tick.symbol.toUpperCase();
@@ -33,6 +43,17 @@ pulseEvents.on("binance_tick", (tick: MarketTick) => {
   const lastMid = prev?.lastMid ?? 0;
   const delta = lastMid > 0 ? (tick.midPrice - lastMid) / lastMid : 0;
   binanceState.set(sym, { lastMid: tick.midPrice, delta });
+
+  // Append to sliding history; trim anything older than the window
+  const now = Date.now();
+  let history = binanceMoveHistory.get(sym);
+  if (!history) {
+    history = [];
+    binanceMoveHistory.set(sym, history);
+  }
+  history.push({ ts: now, delta });
+  const cutoff = now - BINANCE_HISTORY_WINDOW_MS;
+  while (history.length > 0 && history[0].ts < cutoff) history.shift();
 });
 
 function getBinanceDelta(): number {
@@ -42,6 +63,121 @@ function getBinanceDelta(): number {
   if (state) return state.delta;
   for (const [, s] of binanceState) return s.delta;
   return 0;
+}
+
+/**
+ * Cumulative Binance momentum over the last `windowMs` milliseconds.
+ * Returns the sum of per-tick deltas (negative for downward, positive for up).
+ */
+function getRecentBinanceMomentum(windowMs: number, now: number = Date.now()): number {
+  const primary = CONFIG.BINANCE_SYMBOL.toUpperCase();
+  const history = binanceMoveHistory.get(primary);
+  if (!history || history.length === 0) return 0;
+  const cutoff = now - windowMs;
+  let sum = 0;
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].ts < cutoff) break;
+    sum += history[i].delta;
+  }
+  return sum;
+}
+
+/**
+ * Returns true if the order should be rejected because we're sniping a
+ * stale book during a Binance move (modeling real-world MM cancellation
+ * latency, ~30-50ms). Exported for testing.
+ *
+ * Model:
+ *   1. Sum Binance momentum over the last SNIPE_MOMENTUM_WINDOW_MS.
+ *   2. If |momentum| < SNIPE_MIN_MOMENTUM, no snipe risk — calm market.
+ *   3. If the book.timestamp < SNIPE_BOOK_STALE_MS old, MMs already
+ *      re-quoted, not a stale target.
+ *   4. Otherwise, reject with probability scaling linearly with momentum
+ *      in basis points: 5 bps → ~50%, 10 bps → ~95% (capped).
+ */
+export function shouldRejectStaleSnipe(book: OrderBook, isMaker: boolean): boolean {
+  // Makers aren't snipers — they post liquidity, not consume it.
+  if (isMaker) return false;
+  if (!book.timestamp) return false;
+
+  const now = Date.now();
+  const recentMomentum = Math.abs(getRecentBinanceMomentum(CONFIG.SNIPE_MOMENTUM_WINDOW_MS, now));
+  if (recentMomentum < CONFIG.SNIPE_MIN_MOMENTUM) return false;
+
+  const bookAgeMs = now - book.timestamp;
+  if (bookAgeMs < CONFIG.SNIPE_BOOK_STALE_MS) return false;
+
+  // Linear in basis points: per-bps slope × momentum-in-bps, capped at MAX.
+  // At default 0.10/bps × 5bps = 0.50; × 10bps = 1.0 → capped to 0.95.
+  const momentumBps = recentMomentum * 10_000;
+  const cancelProb = Math.min(CONFIG.SNIPE_CANCEL_PROB_MAX, momentumBps * CONFIG.SNIPE_CANCEL_PROB_PER_BPS);
+  return random() < cancelProb;
+}
+
+/**
+ * Returns true if the taker order should be rejected because competing
+ * real-world takers raced us to visibly cheap liquidity. Complements
+ * `shouldRejectStaleSnipe` (which models MMs pulling quotes on Binance
+ * moves) — this one models other humans/bots seeing the same obvious
+ * opportunity we do.
+ *
+ * Model:
+ *   1. Only fires for taker BUYs below COMPETE_MAX_PRICE (default 20¢) —
+ *      the extreme-underdog zone where asymmetric payoff is publicly
+ *      visible on PM's leaderboard and price history.
+ *   2. Cheaper price = more obvious opportunity = more competition.
+ *      Linear scale from MAX_PRICE→0 to 0→COMPETE_PROB_MAX.
+ *   3. Larger size = higher collision probability with racing takers.
+ *      Linear scale from 0→SIZE_CAP, clipped to [0,1].
+ *   4. Final prob = priceFactor × sizeFactor × PROB_MAX.
+ *
+ * Examples at default config (MAX_PRICE=0.20, PROB_MAX=0.50, SIZE_CAP=50):
+ *   price=0.05, size=50 → 0.75 × 1.00 × 0.50 = 37.5%
+ *   price=0.05, size=10 → 0.75 × 0.20 × 0.50 = 7.5%
+ *   price=0.15, size=50 → 0.25 × 1.00 × 0.50 = 12.5%
+ *   price=0.25, size=50 → 0 (above max — no competition)
+ */
+export function shouldRejectCompetingTaker(
+  price: number,
+  size: number,
+  isMaker: boolean,
+): boolean {
+  if (!CONFIG.COMPETE_ENABLED) return false;
+  if (isMaker) return false; // makers post liquidity, aren't racing
+  if (price <= 0 || price >= CONFIG.COMPETE_MAX_PRICE) return false;
+
+  const priceFactor = (CONFIG.COMPETE_MAX_PRICE - price) / CONFIG.COMPETE_MAX_PRICE;
+  const sizeFactor = Math.min(1, size / CONFIG.COMPETE_SIZE_CAP);
+  const prob = priceFactor * sizeFactor * CONFIG.COMPETE_PROB_MAX;
+  return random() < prob;
+}
+
+/** Build a "not filled" FillResult for the rejection paths. */
+function makeRejectedFill(
+  action: EngineAction,
+  latencyMs: number,
+  reason: RejectionReason,
+  orderType: "maker" | "taker" = "taker",
+): FillResult {
+  return {
+    action, filled: false, fillPrice: 0, fillSize: 0,
+    fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs,
+    toxicFlowHit: false, orderType, rejectionReason: reason,
+  };
+}
+
+/**
+ * Increment `state.rejectionCounts[reason]` for every unfilled result in
+ * `results`. Call from processActions after producing a batch so arena-side
+ * consumers don't each need to re-walk the results for bookkeeping.
+ */
+function tallyRejections(results: FillResult[], state: EngineState): void {
+  for (const r of results) {
+    if (!r.filled && r.rejectionReason) {
+      state.rejectionCounts[r.rejectionReason] =
+        (state.rejectionCounts[r.rejectionReason] ?? 0) + 1;
+    }
+  }
 }
 
 // ── Maker Rebate Pool ───────────────────────────────────────────────────────
@@ -178,15 +314,44 @@ export function calculateFeeAdjustedEdge(
  * Returns null if insufficient liquidity.
  * Returns { filled, remaining } for partial fill support.
  */
-function walkBook(
+/**
+ * Returns true if a book has the structural shape of real PM data:
+ *  - Both bids AND asks present (not one-sided)
+ *  - NOT crossed (best bid < best ask)
+ *  - Best prices in (PM_PRICE_MIN, PM_PRICE_MAX) — outside this range is
+ *    almost certainly stale/corrupt, not real PM market state
+ *  - Spread < PM_BOOK_MAX_SPREAD (wider means book is half-empty)
+ *  - Timestamp < PM_BOOK_STALE_MS old (no stale snapshots)
+ *
+ * Exported so engines can pre-check book quality before submitting orders
+ * (avoids silent walkBook rejections).
+ */
+export function isBookTradeable(book: OrderBook): boolean {
+  if (!book.bids.length || !book.asks.length) return false;
+  const bestBid = book.bids[0].price;
+  const bestAsk = book.asks[0].price;
+  // Crossed book detection — bestBid must be strictly less than bestAsk.
+  // The spread check below would NOT catch this (a negative spread is not
+  // > PM_BOOK_MAX_SPREAD), so we need an explicit check.
+  if (bestBid >= bestAsk) return false;
+  if (bestAsk <= CONFIG.PM_PRICE_MIN || bestAsk >= CONFIG.PM_PRICE_MAX) return false;
+  if (bestBid <= CONFIG.PM_PRICE_MIN || bestBid >= CONFIG.PM_PRICE_MAX) return false;
+  if (bestAsk - bestBid > CONFIG.PM_BOOK_MAX_SPREAD) return false;
+  if (book.timestamp && Date.now() - book.timestamp > CONFIG.PM_BOOK_STALE_MS) return false;
+  return true;
+}
+
+// Exported for unit tests — pure function, no side effects unless mutate=true
+export function walkBook(
   size: number,
   side: "BUY" | "SELL",
   book: OrderBook,
   minFillSize: number = CONFIG.MIN_ORDER_SIZE,
   mutate: boolean = false,
+  limitPrice?: number,
 ): { effectivePrice: number; totalCost: number; filledSize: number } | null {
+  if (!isBookTradeable(book)) return null;
   const levels = side === "BUY" ? book.asks : book.bids;
-  if (!levels.length) return null;
 
   const decayEnabled = CONFIG.FILL_DECAY_ENABLED;
   const decayMult = CONFIG.FILL_DECAY_MULTIPLIER;
@@ -224,6 +389,16 @@ function walkBook(
   }
 
   if (filledSize < minFillSize) return null;
+
+  // Limit price enforcement: if a limit was specified, the effective fill must
+  // be at or better than it. Real CLOB rejects fills outside the limit.
+  // Without this check, "limit BUY at $0.01" can fill at $0.99 (whatever the
+  // book has), turning every order into a market order.
+  const effectivePrice = totalCost / filledSize;
+  if (limitPrice !== undefined && limitPrice > 0) {
+    if (side === "BUY" && effectivePrice > limitPrice) return null;
+    if (side === "SELL" && effectivePrice < limitPrice) return null;
+  }
 
   // Apply depletions to the book (mutate mode only, after we've confirmed fill)
   if (mutate) {
@@ -272,7 +447,7 @@ function simulateToxicFlow(
   else if (volSpike > 2) toxicProb = Math.min(0.95, toxicProb + 0.20);
   else if (volSpike > 1.5) toxicProb = Math.min(0.95, toxicProb + 0.10);
 
-  if (Math.random() > toxicProb) {
+  if (random() > toxicProb) {
     return { adjustedPrice: action.price, toxicHit: false, slippage: 0 };
   }
 
@@ -316,11 +491,14 @@ function simulateToxicFlow(
  * 4. Calculate parabolic fee (or flat merge fee)
  * 5. Return fill result
  */
-/** Per-tick book snapshot — mutated as engines deplete liquidity within one tick */
+/** Per-tick book snapshot — eagerly cloned at snapshot time, mutated as engines deplete liquidity. */
 export interface TickBooks {
   upTokenId: string;
   downTokenId: string;
-  /** Lazy cache of cloned books keyed by tokenId. Books are cloned on first access so walkBook(mutate=true) never touches live pulse.ts state. */
+  /** Cache of cloned books keyed by tokenId. UP and DOWN are cloned eagerly at
+   * snapshot creation; any other token (rare, e.g. expired) is lazy-cloned on
+   * first access. Eager cloning ensures the engine sees a consistent moment-
+   * in-time view, not whatever the live book happened to be at first access. */
   bookCache: Map<string, OrderBook>;
 }
 
@@ -332,12 +510,16 @@ function cloneBook(book: OrderBook): OrderBook {
   };
 }
 
-/** Create an empty per-tick snapshot. Books are cloned lazily on first access via bookFromTick. */
+/** Create a per-tick snapshot. UP and DOWN books are cloned eagerly so all
+ * engines processed in this tick see the same moment-in-time state. */
 export function snapshotTickBooks(upTokenId: string, downTokenId: string): TickBooks {
+  const bookCache = new Map<string, OrderBook>();
+  if (upTokenId) bookCache.set(upTokenId, cloneBook(getBookForToken(upTokenId)));
+  if (downTokenId) bookCache.set(downTokenId, cloneBook(getBookForToken(downTokenId)));
   return {
     upTokenId,
     downTokenId,
-    bookCache: new Map(),
+    bookCache,
   };
 }
 
@@ -366,6 +548,7 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: 0,
         toxicFlowHit: false, orderType: action.orderType ?? "taker",
+        rejectionReason: "invalid_token",
       };
     }
   }
@@ -377,11 +560,12 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: 0,
         toxicFlowHit: false, orderType: action.orderType ?? "taker",
+        rejectionReason: "fill_price_out_of_range",
       };
     }
   }
 
-  // HOLD — no-op
+  // HOLD — no-op (not a rejection; filled=false is the expected response)
   if (action.side === "HOLD") {
     return {
       action, filled: false, fillPrice: 0, fillSize: 0,
@@ -392,11 +576,11 @@ async function processActionNoLatency(
 
   const actualLatency = config.latencyMs;
 
-  // ── MERGE action (on-chain — gas applies here) ──
-  // Two flavors:
-  //   A) "Just merge what we hold" — already hold both sides → only gas cost
-  //   B) "Buy + merge" — hold one side, buy opposite, then merge
-  // Merge arb exists because UP_ask + DOWN_ask > $1 (the market gap).
+  // ── MERGE action (Flavor A only) ──
+  // Engine must already hold both sides of the same conditional pair.
+  // Flavor B (buy opposite + merge atomically) was removed — see git history
+  // for the bred-5h5h exploit chain. To emulate B: emit BUY then MERGE on
+  // separate ticks. Future-correct version is task #11 (FOK + atomic batches).
   if (action.side === "MERGE") {
     // Merge finality guard: the tx takes ON_CHAIN_LATENCY_MS to land on Polygon.
     // If the candle settles before the merge mines, the conditional-token contract
@@ -407,6 +591,7 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: false, orderType: "taker",
+        rejectionReason: "merge_window_closed",
       };
     }
 
@@ -417,6 +602,7 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: false, orderType: "taker",
+        rejectionReason: "no_position",
       };
     }
 
@@ -427,13 +613,28 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: false, orderType: "taker",
+        rejectionReason: "size_below_min",
+      };
+    }
+
+    // Stale position guard: reject merges on positions whose token isn't part
+    // of the current active market. Real PM enforces this via conditionId
+    // matching; without it, "opposite" resolves to a different pair entirely.
+    const isCurrentMarket =
+      action.tokenId === state.activeTokenId ||
+      action.tokenId === state.activeDownTokenId;
+    if (!isCurrentMarket) {
+      return {
+        action, filled: false, fillPrice: 0, fillSize: 0,
+        fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
+        toxicFlowHit: false, orderType: "taker",
+        rejectionReason: "invalid_token",
       };
     }
 
     // Determine the opposite token
-    const storedOpposite = state.expiringTokenIds?.get(action.tokenId);
     const isHoldingDown = pos.side === "NO";
-    const oppositeTokenId = storedOpposite || (isHoldingDown ? state.activeTokenId : state.activeDownTokenId);
+    const oppositeTokenId = isHoldingDown ? state.activeTokenId : state.activeDownTokenId;
 
     // ── Flavor A: do we already hold the opposite? ──
     const oppositePos = state.positions.get(oppositeTokenId);
@@ -455,6 +656,7 @@ async function processActionNoLatency(
             action, filled: false, fillPrice: 0, fillSize: 0,
             fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
             toxicFlowHit: false, orderType: "taker",
+            rejectionReason: "insufficient_cash",
           };
         }
 
@@ -484,62 +686,14 @@ async function processActionNoLatency(
       }
     }
 
-    // ── Flavor B: buy the opposite, then merge ──
-    // Walk the OPPOSITE token's real book to buy the other side
-    const oppositeBook = bookFromTick(oppositeTokenId, tickBooks);
-    const oppositeWalk = walkBook(shares, "BUY", oppositeBook, CONFIG.MIN_MERGE_SIZE, !!tickBooks);
-
-    if (!oppositeWalk) {
-      return {
-        action, filled: false, fillPrice: 0, fillSize: 0,
-        fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
-        toxicFlowHit: false, orderType: "taker",
-      };
-    }
-
-    const oppositePrice = oppositeWalk.effectivePrice;
-    const oppositeCost = oppositeWalk.totalCost;
-    const oppositeFee = calculateFee(oppositePrice, oppositeCost);
-
-    // Flat merge fee on the merged value ($1 per pair)
-    const mergeValue = shares * 1.0;
-    const mergeFlatFee = calculateMergeFee(mergeValue);
-
-    // Gas cost for the merge transaction (on-chain contract action)
-    // Scales with Binance volatility — gas spikes during high-vol events
-    const absDelta = Math.abs(getBinanceDelta());
-    const volMultiplier = 1 + (CONFIG.GAS_VOL_MULTIPLIER - 1) * Math.min(absDelta / 0.005, 1);
-    const gasCost = CONFIG.GAS_COST_USD * volMultiplier;
-
-    const totalCost = oppositeCost + oppositeFee + mergeFlatFee + gasCost;
-    const totalFee = oppositeFee + mergeFlatFee + gasCost;
-
-    if (state.cashBalance < totalCost) {
-      return {
-        action, filled: false, fillPrice: 0, fillSize: 0,
-        fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
-        toxicFlowHit: false, orderType: "taker",
-      };
-    }
-
-    // P&L: merge payout ($1/share) minus our cost basis minus opposite buy cost
-    const costBasis = pos.avgEntry * shares;
-    const pnl = mergeValue - costBasis - totalCost;
-
-    state.cashBalance -= totalCost;
-    state.cashBalance += mergeValue;
-    state.feePaid += totalFee;
-    state.roundPnl += pnl;
-
-    // Remove merged shares from position
-    pos.shares -= shares;
-    pos.costBasis -= costBasis;
-    if (pos.shares <= 0.001) state.positions.delete(action.tokenId);
-
+    // No Flavor B: engine doesn't hold the opposite side. Reject the merge.
+    // The engine must explicitly BUY the opposite side via a separate action,
+    // then re-call MERGE on a subsequent tick when both positions are held.
     return {
-      action, filled: true, fillPrice: 1.0, fillSize: shares,
-      fee: totalFee, rebate: 0, slippage: 0, pnl, latencyMs: actualLatency,
+      action, filled: false, fillPrice: 0, fillSize: 0,
+      fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
       toxicFlowHit: false, orderType: "taker",
+      rejectionReason: "no_position",
     };
   }
 
@@ -549,29 +703,39 @@ async function processActionNoLatency(
       action, filled: false, fillPrice: 0, fillSize: 0,
       fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
       toxicFlowHit: false, orderType: action.orderType ?? "taker",
+      rejectionReason: "size_below_min",
     };
   }
 
-  // ── Directional maker fill probability ──
-  // In a trending market, asks fill instantly (takers snipe them), bids never fill.
+  // ── Maker orders go straight to FIFO GTC queue ──
+  // No lottery bypass — with the virtual queue model, all maker orders
+  // join the back of the queue and fill only when sharesAhead reaches 0.
+  // The old 12% lottery gave free instant fills that bypassed queue depth.
   const isMakerOrder = action.orderType === "maker";
   if (isMakerOrder) {
-    const delta = getBinanceDelta();
-    const sensitivity = 50.0; // 10bps move = 50% adjustment
-    const adjustment = delta * sensitivity;
-    let fillProb = CONFIG.MAKER_FILL_PROBABILITY;
-    if (action.side === "BUY") {
-      fillProb = Math.max(0.05, Math.min(0.95, fillProb - adjustment)); // price up → bids less likely
-    } else {
-      fillProb = Math.max(0.05, Math.min(0.95, fillProb + adjustment)); // price up → asks more likely
+    if (action.price > 0 && action.size >= CONFIG.MIN_ORDER_SIZE) {
+      const gtcBook = bookFromTick(action.tokenId, tickBooks);
+      const initialDepth = bookDepthAtPrice(gtcBook, action.side as "BUY" | "SELL", action.price);
+      addGtcOrder({
+        engineId: state.engineId,
+        action,
+        state,
+        postedAt: Date.now(),
+        tokenId: action.tokenId,
+        side: action.side as "BUY" | "SELL",
+        limitPrice: action.price,
+        size: action.size,
+        queueAttempts: 0,
+        sharesAhead: Math.max(initialDepth, hiddenQueueFloor(action.price)),
+        lastBookDepth: initialDepth,
+      });
     }
-    if (Math.random() > fillProb) {
-      return {
-        action, filled: false, fillPrice: 0, fillSize: 0,
-        fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
-        toxicFlowHit: false, orderType: "maker",
-      };
-    }
+    return {
+      action, filled: false, fillPrice: 0, fillSize: 0,
+      fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
+      toxicFlowHit: false, orderType: "maker",
+      rejectionReason: "maker_not_filled",
+    };
   }
 
   // ── Toxic flow check (re-check book after latency) ──
@@ -583,19 +747,130 @@ async function processActionNoLatency(
   // Detect DOWN token for position side tracking
   const isDownToken = !!(state.activeDownTokenId && action.tokenId === state.activeDownTokenId);
 
+  // Dual-book consistency: in real PM, UP_ask + DOWN_ask is always near $1.00
+  // (Croissant's tightest observed sum was $0.91). If both sides' books are
+  // showing impossibly cheap prices (sum < $0.85), the data is stale or
+  // corrupted — reject the trade. Catches the bred-5h5h Gemini-audit pattern
+  // where extreme-underdog buys at $0.01-$0.04 happened against books that
+  // wouldn't exist in real PM.
+  if (action.side === "BUY" || action.side === "SELL") {
+    const oppositeTokenId =
+      action.tokenId === state.activeTokenId ? state.activeDownTokenId :
+      action.tokenId === state.activeDownTokenId ? state.activeTokenId :
+      "";
+    if (oppositeTokenId) {
+      const thisBook = bookFromTick(action.tokenId, tickBooks);
+      const oppBook = bookFromTick(oppositeTokenId, tickBooks);
+      const thisAsk = thisBook.asks[0]?.price;
+      const oppAsk = oppBook.asks[0]?.price;
+      const now = Date.now();
+
+      // Reject when the dual-book sum is structurally impossible (<0.95).
+      if (thisAsk !== undefined && oppAsk !== undefined && (thisAsk + oppAsk) < CONFIG.DUAL_BOOK_MIN_SUM) {
+        return {
+          action, filled: false, fillPrice: 0, fillSize: 0,
+          fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
+          toxicFlowHit: false, orderType: action.orderType ?? "taker",
+          rejectionReason: "dual_book_inconsistent",
+        };
+      }
+
+      // Reject when the OPPOSITE book is stale while our target is fresh.
+      // In real PM the two sides stay arb'd within ~100ms; if one side has
+      // gone silent for >PM_BOOK_STALE_MS while the other is active, the
+      // "gap" between them is data artifact, not a real opportunity. This
+      // is the stale-side exploit class (one book frozen while the other
+      // updates — merge-arb-sniper-v1 harvested $59 from this on Apr 11).
+      if (oppBook.timestamp && now - oppBook.timestamp > CONFIG.PM_BOOK_STALE_MS) {
+        return {
+          action, filled: false, fillPrice: 0, fillSize: 0,
+          fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
+          toxicFlowHit: false, orderType: action.orderType ?? "taker",
+          rejectionReason: "dual_book_inconsistent",
+        };
+      }
+    }
+  }
+
   // ── BUY action (off-chain CLOB — no gas) ──
   // Each token has its own real book — no price inversion needed
   if (action.side === "BUY") {
     const isMaker = action.orderType === "maker";
     const tokenBook = bookFromTick(action.tokenId, tickBooks);
-    const walked = walkBook(action.size, "BUY", tokenBook, CONFIG.MIN_ORDER_SIZE, !!tickBooks);
 
-    // Reject if no book or insufficient liquidity
+    // Stale-book / snipe-stale-makers guard. In real PM, market makers
+    // cancel/re-quote within ~30-50ms of significant Binance moves. Our sim
+    // approximates: if Binance has moved meaningfully recently AND the book
+    // hasn't been refreshed since, reject the taker fill (modeling MM cancel).
+    if (shouldRejectStaleSnipe(tokenBook, isMaker)) {
+      return makeRejectedFill(action, actualLatency, "stale_snipe");
+    }
+
+    // Competing-taker guard. When the price is visibly cheap, real-world
+    // takers (humans + bots) race us for the same liquidity. The cheaper
+    // the price, the more obvious the asymmetric-payoff opportunity, the
+    // more competition. Fires in calm markets — complements stale-snipe.
+    const takerRefPrice = action.price > 0 ? action.price : (tokenBook.asks[0]?.price ?? 0);
+    if (shouldRejectCompetingTaker(takerRefPrice, action.size, isMaker)) {
+      return makeRejectedFill(action, actualLatency, "competing_taker");
+    }
+
+    // Adverse-selection gate for extreme-price takers. Live PM (Apr 20-21)
+    // proved taker BUYs at <15¢ fill ONLY on losing candles (informed takers
+    // eat winners). Model this: if Binance momentum favors our trade
+    // direction (we'd win), reject the fill — HFTs got there first.
+    // Only fires below 15¢ where the asymmetric-payoff race is intense.
+    if (!isMaker && action.side === "BUY" && takerRefPrice > 0 && takerRefPrice < 0.15) {
+      const delta = getBinanceDelta();  // positive = price rising
+      const isDown = !!(state.activeDownTokenId && action.tokenId === state.activeDownTokenId);
+      // UP wins when price rises (delta > 0); DOWN wins when price falls (delta < 0)
+      const tradeWinning = isDown ? delta < -0.0002 : delta > 0.0002;
+      if (tradeWinning) {
+        return makeRejectedFill(action, actualLatency, "competing_taker");
+      }
+    }
+
+    // Post-Only enforcement: maker BUY must NOT cross the spread. If the
+    // engine's limit price is at or above bestAsk, the order would execute
+    // immediately as a taker. Reject (matches real PM Post-Only behavior).
+    if (isMaker && action.price > 0) {
+      const bestAsk = tokenBook.asks[0]?.price;
+      if (bestAsk !== undefined && action.price >= bestAsk) {
+        return {
+          action, filled: false, fillPrice: 0, fillSize: 0,
+          fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
+          toxicFlowHit: toxicHit, orderType: "maker",
+          rejectionReason: "post_only_cross",
+        };
+      }
+    }
+
+    // Pre-check book tradability so walkBook==null below unambiguously means
+    // "enough depth was there but limit or size constraint failed".
+    if (!isBookTradeable(tokenBook)) {
+      return {
+        action, filled: false, fillPrice: 0, fillSize: 0,
+        fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
+        toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+        rejectionReason: "book_not_tradeable",
+      };
+    }
+
+    // Limit price enforcement: action.price (when > 0) is the engine's max
+    // acceptable fill. walkBook will reject if it would walk to a worse price.
+    const limit = action.price > 0 ? action.price : undefined;
+    const walked = walkBook(action.size, "BUY", tokenBook, CONFIG.MIN_ORDER_SIZE, !!tickBooks, limit);
+
+    // After the isBookTradeable pre-check, walked==null means either the
+    // limit was breached OR the walked fill fell below MIN_ORDER_SIZE (thin
+    // depth). Prefer limit_violated when a limit was given; otherwise the
+    // walk ran out of liquidity before MIN_ORDER_SIZE.
     if (!walked) {
       return {
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+        rejectionReason: limit !== undefined ? "limit_violated" : "size_below_min",
       };
     }
 
@@ -613,6 +888,7 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+        rejectionReason: "fill_price_out_of_range",
       };
     }
 
@@ -636,6 +912,7 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+        rejectionReason: "insufficient_cash",
       };
     }
 
@@ -694,6 +971,7 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+        rejectionReason: pos ? "insufficient_shares" : "no_position",
       };
     }
 
@@ -704,17 +982,53 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+        rejectionReason: "size_below_min",
       };
     }
 
     // Each token has its own real book — no price inversion needed
     const tokenBook = bookFromTick(action.tokenId, tickBooks);
-    const walked = walkBook(sellSize, "SELL", tokenBook, CONFIG.MIN_ORDER_SIZE, !!tickBooks);
+
+    // Stale-book guard: same as BUY path. Sniping stale bid liquidity during
+    // Binance moves models real MM cancellation latency.
+    if (shouldRejectStaleSnipe(tokenBook, isMaker)) {
+      return makeRejectedFill(action, actualLatency, "stale_snipe");
+    }
+
+    // Post-Only enforcement for maker SELL: limit price must be ABOVE bestBid
+    // (otherwise the order would execute immediately as a taker).
+    if (isMaker && action.price > 0) {
+      const bestBid = tokenBook.bids[0]?.price;
+      if (bestBid !== undefined && action.price <= bestBid) {
+        return {
+          action, filled: false, fillPrice: 0, fillSize: 0,
+          fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
+          toxicFlowHit: toxicHit, orderType: "maker",
+          rejectionReason: "post_only_cross",
+        };
+      }
+    }
+
+    // Pre-check book tradability — same reasoning as BUY path.
+    if (!isBookTradeable(tokenBook)) {
+      return {
+        action, filled: false, fillPrice: 0, fillSize: 0,
+        fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
+        toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+        rejectionReason: "book_not_tradeable",
+      };
+    }
+
+    // Limit price enforcement: action.price is the engine's MIN acceptable
+    // fill price. walkBook rejects if walked effectivePrice falls below.
+    const limit = action.price > 0 ? action.price : undefined;
+    const walked = walkBook(sellSize, "SELL", tokenBook, CONFIG.MIN_ORDER_SIZE, !!tickBooks, limit);
     if (!walked) {
       return {
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+        rejectionReason: limit !== undefined ? "limit_violated" : "size_below_min",
       };
     }
 
@@ -732,6 +1046,7 @@ async function processActionNoLatency(
         action, filled: false, fillPrice: 0, fillSize: 0,
         fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
         toxicFlowHit: toxicHit, orderType: isMaker ? "maker" : "taker",
+        rejectionReason: "fill_price_out_of_range",
       };
     }
 
@@ -793,7 +1108,217 @@ async function processActionNoLatency(
     action, filled: false, fillPrice: 0, fillSize: 0,
     fee: 0, rebate: 0, slippage: 0, pnl: 0, latencyMs: actualLatency,
     toxicFlowHit: false, orderType: "taker",
+    rejectionReason: "other",
   };
+}
+
+// ── GTC Limit Order Subsystem ────────────────────────────────────────────────
+/** Sum shares at or better than limitPrice on the given side of the book. */
+/**
+ * Price-dependent hidden HFT queue floor for new GTC orders.
+ * HFT concentrates where the asymmetric payoff lives (extreme prices).
+ * Mid-prices have no hidden queue — visible book is the real queue.
+ *
+ *   ≤0.15 or ≥0.85:  floor = GTC_MIN_QUEUE_DEPTH (~500) — deep HFT zone
+ *   0.20–0.80:       floor = 0 — trust the visible book
+ *   gradient in the 0.15-0.20 and 0.80-0.85 bands
+ */
+function hiddenQueueFloor(price: number): number {
+  const maxFloor = CONFIG.GTC_MIN_QUEUE_DEPTH;
+  const extremeCut = 0.15;
+  const midCut = 0.20;
+  const distFromCenter = Math.abs(price - 0.50);  // 0 at mid, 0.50 at extremes
+  const extremeness = 0.50 - extremeCut;  // 0.35 = fully extreme
+  const midStart = 0.50 - midCut;          // 0.30 = where floor hits zero
+  if (distFromCenter >= extremeness) return maxFloor;
+  if (distFromCenter <= midStart) return 0;
+  // Linear ramp in the transition band
+  const t = (distFromCenter - midStart) / (extremeness - midStart);
+  return Math.round(maxFloor * t);
+}
+
+function bookDepthAtPrice(book: OrderBook, side: "BUY" | "SELL", limitPrice: number): number {
+  let depth = 0;
+  if (side === "BUY") {
+    for (const lvl of book.bids) {
+      if (lvl.price >= limitPrice) depth += lvl.size;
+      else break;
+    }
+  } else {
+    for (const lvl of book.asks) {
+      if (lvl.price <= limitPrice) depth += lvl.size;
+      else break;
+    }
+  }
+  return depth;
+}
+
+// Persistent maker orders that sit on the book until filled or expired.
+// When an engine posts a maker order that doesn't fill immediately (the
+// 12% fill lottery), it's stored here and re-checked on every subsequent
+// tick. Fills when the book crosses the limit price. Expires on market
+// rotation (candle change).
+
+export interface GtcOrder {
+  engineId: string;
+  action: EngineAction;
+  state: EngineState;
+  postedAt: number;
+  tokenId: string;
+  side: "BUY" | "SELL";
+  limitPrice: number;
+  size: number;
+  queueAttempts: number;
+  sharesAhead: number;
+  lastBookDepth: number;
+}
+
+const pendingGtc: GtcOrder[] = [];
+
+/** Store a maker order for future fill attempts. */
+function addGtcOrder(order: GtcOrder): void {
+  pendingGtc.push(order);
+}
+
+/** Remove all GTC orders for tokens no longer in the active market. */
+export function expireGtcOrders(activeTokenIds: Set<string>): number {
+  const before = pendingGtc.length;
+  for (let i = pendingGtc.length - 1; i >= 0; i--) {
+    if (!activeTokenIds.has(pendingGtc[i].tokenId)) {
+      pendingGtc.splice(i, 1);
+    }
+  }
+  return before - pendingGtc.length;
+}
+
+/** Clear all GTC orders (round end). */
+export function clearGtcOrders(): void {
+  pendingGtc.length = 0;
+}
+
+/** Get count of pending GTC orders. */
+export function gtcOrderCount(): number {
+  return pendingGtc.length;
+}
+
+/** Get GTC orders for a specific engine. */
+export function getGtcOrdersForEngine(engineId: string): GtcOrder[] {
+  return pendingGtc.filter(o => o.engineId === engineId);
+}
+
+/**
+ * Check all pending GTC orders against current book state. Fill any
+ * that now cross. Returns FillResults for filled orders (both
+ * successful fills and expired/failed).
+ *
+ * Called by arena.ts on every tick AFTER engine actions are processed.
+ */
+export function processGtcOrders(tickBooks?: TickBooks): FillResult[] {
+  const results: FillResult[] = [];
+  for (let i = pendingGtc.length - 1; i >= 0; i--) {
+    const order = pendingGtc[i];
+    const book = bookFromTick(order.tokenId, tickBooks);
+    if (!isBookTradeable(book)) continue;
+
+    let shouldFill = false;
+    if (order.side === "BUY") {
+      // BUY limit: fills when bestAsk drops to or below our limit
+      const bestAsk = book.asks[0]?.price ?? 999;
+      shouldFill = bestAsk <= order.limitPrice;
+    } else {
+      // SELL limit: fills when bestBid rises to or above our limit
+      const bestBid = book.bids[0]?.price ?? 0;
+      shouldFill = bestBid >= order.limitPrice;
+    }
+
+    // Track queue position from real book changes.
+    const currentDepth = bookDepthAtPrice(book, order.side, order.limitPrice);
+
+    if (currentDepth < order.lastBookDepth) {
+      // Depth decreased — could be fills (ahead of us) or cancellations (behind us).
+      // Conservative: only credit 50% as queue advancement since we can't
+      // distinguish fills from cancellations without a trade tape.
+      const decrease = order.lastBookDepth - currentDepth;
+      order.sharesAhead = Math.max(0, order.sharesAhead - decrease * 0.5);
+    } else if (currentDepth > order.lastBookDepth) {
+      // Depth increased — new makers posted at our price or better.
+      // They jump ahead of us in price-time priority.
+      order.sharesAhead += (currentDepth - order.lastBookDepth);
+    }
+    order.lastBookDepth = currentDepth;
+
+    if (!shouldFill) continue;
+
+    // FIFO: only fill when all shares ahead of us have been consumed
+    if (order.sharesAhead > 0) continue;
+
+    // Fill the GTC order against the current book
+    const walked = walkBook(
+      order.size, order.side, book,
+      CONFIG.MIN_ORDER_SIZE, !!tickBooks, order.limitPrice,
+    );
+
+    if (!walked) continue; // book doesn't have enough depth at limit
+
+    const fillSize = walked.filledSize;
+    const fillPrice = walked.effectivePrice * (order.side === "BUY" ? MAKER_ADVERSE_BUY : MAKER_ADVERSE_SELL);
+    const roundedPrice = tickRound(fillPrice);
+
+    // Maker: 0% fee + rebate
+    const rebate = calculateMakerRebate(order.tokenId, fillSize);
+    const totalCost = roundedPrice * fillSize;
+
+    if (order.side === "BUY") {
+      if (order.state.cashBalance < totalCost) continue; // can't afford
+
+      order.state.cashBalance -= totalCost;
+      order.state.cashBalance += rebate;
+      order.state.feePaid += 0;
+      order.state.feeRebate += rebate;
+      order.state.tradeCount++;
+
+      const isDownToken = !!(order.state.activeDownTokenId && order.tokenId === order.state.activeDownTokenId);
+      const positionSide = isDownToken ? "NO" : "YES";
+      const existing = order.state.positions.get(order.tokenId);
+      if (existing) {
+        const newShares = existing.shares + fillSize;
+        const newCost = existing.costBasis + totalCost;
+        existing.shares = newShares;
+        existing.costBasis = newCost;
+        existing.avgEntry = newCost / newShares;
+      } else {
+        order.state.positions.set(order.tokenId, {
+          tokenId: order.tokenId,
+          side: positionSide as "YES" | "NO",
+          shares: fillSize,
+          avgEntry: roundedPrice,
+          costBasis: totalCost,
+        });
+      }
+    }
+
+    // Remove from pending
+    pendingGtc.splice(i, 1);
+
+    results.push({
+      action: order.action,
+      filled: true,
+      fillPrice: roundedPrice,
+      fillSize,
+      fee: 0,
+      rebate,
+      slippage: 0,
+      pnl: 0,
+      latencyMs: 0,
+      toxicFlowHit: false,
+      orderType: "maker",
+    });
+
+    console.log(
+      `[gtc] FILLED: ${order.engineId} ${order.side} ${fillSize}@${roundedPrice.toFixed(3)} (limit ${order.limitPrice.toFixed(3)}, waited ${((Date.now() - order.postedAt) / 1000).toFixed(0)}s)`,
+    );
+  }
+  return results;
 }
 
 // ── Batch Processing ─────────────────────────────────────────────────────────
@@ -820,6 +1345,7 @@ export async function processActions(
     results.push(await processActionNoLatency(action, state, tickBooks));
   }
 
+  tallyRejections(results, state);
   return { results, pendingMerges: merges };
 }
 
@@ -833,43 +1359,46 @@ export async function processMergeActions(
   for (const action of actions) {
     results.push(await processActionNoLatency(action, state, tickBooks));
   }
+  tallyRejections(results, state);
   return results;
 }
 
 // ── Utility: Should I Merge? ─────────────────────────────────────────────────
 
 /**
- * Calculates whether merging is cheaper than selling at the current price.
+ * Decide whether merging is cheaper than selling for a given exit.
  *
- * Uses REAL opposite-side book price (UP + DOWN ≠ $1.00 in real markets).
- * The gap between them is where merge arb profit lives.
- *
- * @param price - current token's mid price (what you'd sell at)
- * @param shares - number of shares to exit
- * @param oppositeAsk - best ask on the OPPOSITE token's book (real cost to buy other side)
- *                      If not provided, falls back to 1-price (theoretical)
+ * Only recommends MERGE when `holdsOpposite` is true (engine already holds
+ * enough of the opposite side for Flavor A — gas only). Without the
+ * opposite, MERGE is forbidden (Flavor B was removed) and we return SELL
+ * with mergeFee=Infinity.
  */
 export function cheaperExit(
   price: number,
   shares: number,
-  oppositeAsk?: number,
+  holdsOpposite: boolean = false,
 ): { method: "SELL" | "MERGE"; sellFee: number; mergeFee: number; savings: number } {
   const sellProceeds = price * shares;
   const sellFee = calculateFee(price, sellProceeds);
 
-  // Merge requires buying the opposite side from its real book
-  const oppPrice = oppositeAsk ?? (1 - price);
-  const oppositeCost = oppPrice * shares;
-  const oppositeBuyFee = calculateFee(oppPrice, oppositeCost);
-  const mergeValue = shares * 1.0; // $1 per pair
+  const mergeValue = shares * 1.0;
   const mergeFlatFee = calculateMergeFee(mergeValue);
-  const gasCost = CONFIG.GAS_COST_USD; // base gas (excludes vol spike — conservative estimate)
-  const totalMergeCost = oppositeBuyFee + mergeFlatFee + gasCost;
+  const gasCost = CONFIG.GAS_COST_USD;
 
-  if (totalMergeCost < sellFee) {
-    return { method: "MERGE", sellFee, mergeFee: totalMergeCost, savings: sellFee - totalMergeCost };
+  let mergeFee: number;
+  if (holdsOpposite) {
+    // Flavor A: gas + flat fee. The opposite shares were already paid for
+    // separately, so they don't enter this comparison.
+    mergeFee = mergeFlatFee + gasCost;
+  } else {
+    // Flavor B no longer supported — refuse to recommend MERGE.
+    mergeFee = Number.POSITIVE_INFINITY;
   }
-  return { method: "SELL", sellFee, mergeFee: totalMergeCost, savings: totalMergeCost - sellFee };
+
+  if (mergeFee < sellFee) {
+    return { method: "MERGE", sellFee, mergeFee, savings: sellFee - mergeFee };
+  }
+  return { method: "SELL", sellFee, mergeFee, savings: mergeFee - sellFee };
 }
 
 // ── Mark-to-Market ───────────────────────────────────────────────────────────

@@ -22,6 +22,8 @@ dotenv.config({ path: path.resolve(__dirname, "..", ".env") });
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
 const ANALYST_MODEL = process.env.ANALYST_MODEL || "google/gemini-2.0-flash-001";
 const CODER_MODEL = process.env.CODER_MODEL || "anthropic/claude-haiku-4-5";
+/** Bump this on prompt changes so we can filter pre/post-prompt bred engines in analytics. */
+const BREEDER_PROMPT_VERSION = "v3-regime-fix-2026-04-28";
 const MAX_RETRIES = 2;
 const MIN_NEW_ROUNDS_TO_BREED = Number(process.env.MIN_NEW_ROUNDS_TO_BREED ?? 3);
 const PROJECT_ROOT = path.resolve(__dirname, "..");
@@ -118,7 +120,7 @@ function readBaseEngine(): string {
 
 function readExampleEngine(): string {
   // Try multiple examples in order — any might be pruned
-  const candidates = ["FadeV3Engine.ts", "FadeV2Engine.ts", "MeanRevertV2Engine.ts", "EdgeSniperEngine.ts"];
+  const candidates = ["DcaExtremeEngine.ts", "Stingo43Engine.ts", "FadeV3Engine.ts", "BaseEngine.ts"];
   for (const name of candidates) {
     try {
       return fs.readFileSync(path.join(ENGINES_DIR, name), "utf-8");
@@ -137,10 +139,6 @@ import { loadRoundHistory as loadHistory, buildCumulativePnl as buildPnl, type R
 
 function loadRoundHistory(): RoundHistoryEntry[] {
   return loadHistory(COIN);
-}
-
-function buildCumulativePnl(history: RoundHistoryEntry[]): Map<string, number> {
-  return buildPnl(history);
 }
 
 function formatRoundHistory(history: RoundHistoryEntry[]): string {
@@ -173,7 +171,6 @@ function formatRoundHistory(history: RoundHistoryEntry[]): string {
 async function analyzeArena(): Promise<string> {
   const intel = readRoundIntel();
   const trades = readRecentTrades();
-  const engines = listEngines();
   const history = formatRoundHistory(loadRoundHistory());
 
   const prompt = `You are a quantitative trading analyst reviewing a Polymarket 5-minute crypto prediction market arena.
@@ -187,33 +184,48 @@ ${history}
 ## Recent Trades (last 100)
 ${trades}
 
-## Active Engines
-${engines.join(", ")}
-
 ## Market Rules
-- Polymarket 5M binary markets: BTC/ETH/XRP go UP or DOWN in a 5-minute window
+- Polymarket binary markets: BTC/ETH/SOL go UP or DOWN in a fixed window (5m/15m/1h/4h per arena)
 - Quartic taker fee: 0.25 × (P×(1-P))² — max 1.56% at P=0.50, only 0.20% at P=0.90, near 0% at P=0.99
-- Maker fee: 0% + 20% rebate of taker fees (but 60% fill probability, 5bps adverse selection)
+- Maker fee: 0% + 20% rebate of taker fees
 - UP and DOWN tokens have independent orderbooks (UP + DOWN ≠ $1 — the gap is merge arb)
 - Settlement: $1 per share if correct, $0 if wrong
 - Merge: buy opposite side at real book price + dynamic gas (on-chain, 3s finality)
 
-## Key Performance Metrics
-- **sharpeRatio** (in allResults): profit-to-costs ratio. Higher = better risk-adjusted returns.
-- **Toxic Flow %** (in toxic flow summary): how often Binance moved against the engine during execution. High toxic % = engine is getting picked off by HFTs.
-- Winning engines have HIGH Sharpe (>2) AND LOW toxic flow (<20%). An engine with high P&L but 50% toxic hits is lucky, not skilled.
-- Prioritize strategies that AVOID toxic flow (trade during quiet periods, use maker orders) over strategies that trade frequently.
+## Metrics In The Data
+- **sharpeRatio** (allResults): profit-to-costs ratio — risk-adjusted return proxy.
+- **toxic_flow %** (toxic summary): share of fills where Binance moved against the engine during execution. Signal of adverse selection, not a goal in itself.
+- **total_pnl** across multi-round history: cumulative cash result.
+- **mean PnL per FIRING round** (rounds where the engine traded, excluding silent rounds): the right yardstick for selective engines. A strategy that's silent 60% of the time but earns +$50 mean per firing round beats one that fires every round for +$5 mean.
+- **firing win rate** (% of firing rounds with positive PnL): when an engine activates, does it usually win?
+
+Trade frequency is NOT a quality metric. Engines that fire only when conditions favor their edge can outperform engines that trade constantly. The four cases:
+1. Winning + low trade count → fine, don't penalize for silence.
+2. Winning + high trade count → fine, don't penalize for noise.
+3. Losing + low trade count → cull slowly, sample size may be too small (need n_firing ≥ 10).
+4. Losing + high trade count → cull fast, the verdict is in.
 
 ## Your Task
-Analyze what's working and what's failing. Identify:
-1. Which strategies are profitable and WHY (edge vs fees vs timing vs toxic avoidance)
-2. Which strategies are losing and what specific flaw causes the losses
-3. What UNTRIED approach could beat the current leader (consider: maker-only, toxic flow avoidance, Sharpe optimization)
-4. Whether maker orders, DOWN token bets, merge arb, or specific entry timing could help
+Report the observable facts in the data. You are a DATA REPORTER, not a strategist.
+Do NOT recommend strategies. Do NOT say things like "no engine is doing X" or
+"underexplored corner" or "this is where edge lives". Those phrases cause the
+downstream coder to over-fit on whatever gap you name, producing mode-collapsed
+engines that all target the same "untried" niche. (This has already happened
+twice — first the maker-extreme-price corner, then the merge-arb corner.)
 
-IMPORTANT: Use multi-round history to distinguish HIGH-VARIANCE winners from consistent losers. An engine that wins big some rounds and loses big others has a REAL edge — it just needs risk management. Don't dismiss engines with negative latest-round P&L if their multi-round history shows big wins. Consistency matters but so does total P&L across rounds.
+Instead, describe:
+1. For each engine with ≥5 trades this round: entry price distribution,
+   time-to-close, maker/taker mix, token side bias (UP vs DOWN), and round-
+   over-round PnL variance. Quote actual numbers.
+2. Cross-engine patterns in the raw data: are losing engines concentrated at
+   certain prices, certain times-of-candle, certain tick volumes? Is toxic
+   flow clustered in specific regimes?
+3. The multi-round PnL distribution: which engines have firing win rate ≥ 50%
+   over n_firing ≥ 10 rounds? Which engines fire constantly but lose per fire
+   (the canonical anti-pattern)? Quote actual numbers.
 
-Be specific and quantitative. Reference actual trade data. Output your analysis in 300 words or less.`;
+Facts only. Leave the strategy inference to the coder stage. Output 300 words
+or less.`;
 
   console.log(`[breeder] Analyzing arena with ${ANALYST_MODEL}...`);
   return callAnalyst(prompt);
@@ -225,41 +237,234 @@ async function generateEngine(analysis: string): Promise<{ code: string; classNa
   const baseEngine = readBaseEngine();
   const exampleEngine = readExampleEngine();
   const types = readTypes();
-  const engines = listEngines();
 
   // Generate a unique engine name
   const version = Date.now().toString(36).slice(-4);
   const className = `BredEngine_${version}`;
   const fileName = `BredEngine_${version}`;
 
-  const systemPrompt = `You are an expert TypeScript developer building trading engines for a Polymarket 5-minute binary market arena.
+  const systemPrompt = `You are an expert TypeScript developer building trading engines for a Polymarket 5-minute binary market arena. Your engines compete with other engines and the simulator faithfully models real PM constraints.
 
-You MUST output ONLY valid TypeScript code — no markdown, no explanation, no code fences. Just the raw .ts file content.
+OUTPUT FORMAT
+You MUST output ONLY valid TypeScript code — no markdown, no explanation, no code fences. Just the raw .ts file content. The file will be compiled with strict TypeScript and rejected if it doesn't compile.
 
-The engine must:
+CLASS REQUIREMENTS
 - Import AbstractEngine from "./BaseEngine"
-- Import types from "../types"
+- Import types from "../types": EngineAction, EngineState, MarketTick, SignalSnapshot
 - Export a class named ${className} that extends AbstractEngine
-- Set unique id, name, version properties
-- Implement onTick(tick, state, signals) returning EngineAction[]
-- Call this.feeAdjustedEdge() before ANY trade to check profitability after fees
-- Use this.getUpTokenId() for UP bets, this.getDownTokenId() for DOWN bets
-- Use this.buy(), this.sell(), this.merge() action builders
-- Optionally use { orderType: "maker" } for 0% fee maker orders
-- Clean up state in onRoundEnd()
+- Set unique id, name, version properties (id starts with "bred-")
+- Implement onTick(tick, state, signals?) returning EngineAction[]
+- Implement onRoundEnd(state) to reset per-round state
 
-Quartic fee: fee = amount × 0.25 × (P×(1-P))²
-At P=0.50: 1.56% (kills most edges). At P=0.90: 0.20% (sweet spot). At P=0.99: 0.003%.
-Maker orders: 0% fee but only 60% fill probability and 5bps adverse selection.
-UP and DOWN tokens have independent books (UP + DOWN ≠ $1) — merge arb exists in the gap.
-The arena tracks Sharpe ratio (profit/costs) and toxic flow (adverse selection hits).
-Engines that avoid toxic flow and maximize Sharpe survive evolution; high-frequency P&L chasers get pruned.`;
+═══════════════════════════════════════════════════════════════════
+THE FEE MODEL — QUARTIC (this is the great filter)
+═══════════════════════════════════════════════════════════════════
+fee = amount × 0.25 × (P × (1-P))²
 
-  const userPrompt = `## Analysis of Current Arena
+  P=0.01: 0.0025%   P=0.10: 0.20%   P=0.30: 1.10%
+  P=0.50: 1.56% ←MAX  P=0.70: 1.10%   P=0.90: 0.20%   P=0.99: 0.003%
+
+The fee CRUSHES edges at mid-prices for taker orders. Makers pay 0%
+(+20% rebate) regardless of price. Look at the data to see where
+ACTUAL fills are happening and which strategies survive after fees.
+
+ALWAYS call this.feeAdjustedEdge(modelProb, marketPrice) before trading.
+If !edge.profitable, return [].
+
+═══════════════════════════════════════════════════════════════════
+DUAL ORDERBOOKS — CRITICAL CORRECTNESS RULE
+═══════════════════════════════════════════════════════════════════
+UP and DOWN tokens have INDEPENDENT orderbooks. UP_ask + DOWN_ask is
+NOT necessarily $1.00 — the gap is where merge arb lives.
+
+NEVER do this (it's WRONG and will cause your engine to bleed):
+  const downPrice = 1 - upPrice;        // ❌ WRONG
+  const downAsk = 1 - tick.bestBid;     // ❌ WRONG
+
+ALWAYS read both books directly:
+  import { getBookForToken } from "../pulse";
+  const upBook = getBookForToken(this.getUpTokenId());
+  const downBook = getBookForToken(this.getDownTokenId());
+  const upAsk = upBook.asks[0]?.price;
+  const downAsk = downBook.asks[0]?.price;
+
+The MarketTick passed to onTick has tokenSide ("UP" or "DOWN"). The
+tick.midPrice/bestAsk/bestBid are for THAT side only — not the opposite.
+Don't assume a tick is for UP unless you check tokenSide.
+
+═══════════════════════════════════════════════════════════════════
+MERGE — FLAVOR A ONLY (must hold both sides)
+═══════════════════════════════════════════════════════════════════
+The referee only supports MERGE when the engine ALREADY HOLDS both UP
+and DOWN of the SAME conditional pair. The merge burns both legs and
+credits $1 per pair (minus gas).
+
+To do a "buy opposite + merge" arb, you must:
+  1. Emit BUY for the opposite side as a normal action (one tick)
+  2. Wait for the fill (next tick: check this.getPosition(tokenId))
+  3. THEN emit MERGE on the next tick when both positions exist
+
+You CANNOT call merge() while holding only one side — it will reject.
+The cheaperExit() helper recommends MERGE only when holdsOpposite is
+true; trust its result.
+
+═══════════════════════════════════════════════════════════════════
+MAKER ORDERS — POST-ONLY ENFORCED
+═══════════════════════════════════════════════════════════════════
+Pass { orderType: "maker" } for 0% fee + 20% rebate of taker fees.
+
+CONSTRAINTS:
+- Maker BUY: action.price MUST be < bestAsk (otherwise crosses spread, rejected)
+- Maker SELL: action.price MUST be > bestBid
+- Orders that don't fill immediately wait in a queue, expire on candle rotation.
+- Fill rates vary with price, book depth, and market conditions. Look at
+  the trade data to see what actually fills for similar strategies.
+
+action.price IS A LIMIT. The fill price will be at or better than action.price.
+If the book hasn't crossed your limit yet, the order waits in the queue.
+If the book crosses WAY past your limit, you fill at the book price.
+
+═══════════════════════════════════════════════════════════════════
+BOOK VALIDITY GUARDS (your action may silently reject)
+═══════════════════════════════════════════════════════════════════
+The referee rejects fills against books where:
+- Best price < $0.01 or > $0.99 (extreme/stale data)
+- Spread (bestAsk - bestBid) > $0.50 (half-empty book)
+- Book timestamp > 30s old (stale)
+- One side empty (one-sided book)
+
+Don't try to trade on freshly-rotated markets where the new book
+hasn't received PM updates yet.
+
+═══════════════════════════════════════════════════════════════════
+POSITIONS, ROTATIONS, SETTLEMENT
+═══════════════════════════════════════════════════════════════════
+- 5M markets ROTATE every 2 minutes. Old positions don't disappear —
+  they sit until the candle resolves and settle to $1 or $0.
+- this.getUpTokenId() returns the CURRENT market's UP token. After a
+  rotation, it points to a NEW token. Don't store entry timestamps
+  keyed by upTokenId across rotations — they become stale and cause
+  bugs (a recent bred engine had "1775829203 second hold time" — that's
+  an epoch timestamp masquerading as a duration).
+- Detect rotation by tracking lastTokens = upTokenId+":"+downTokenId.
+- Reset per-candle counters in onRoundEnd AND on rotation.
+- Settlement is automatic — you don't call settle(). Holding to
+  settlement is a real strategy: maker buy underdog cheap, hold for
+  candle close, the SETTLE row will appear with $1/share if you won.
+
+═══════════════════════════════════════════════════════════════════
+AVAILABLE SIGNALS — THE DATA YOU CAN READ
+═══════════════════════════════════════════════════════════════════
+Engines have been historically Binance-momentum-only. The arena ALSO
+provides (and no one reads) these signals. Novel engines should
+consider at least one non-Binance signal to widen the alpha surface.
+
+1) MACRO — via the \`signals\` parameter to onTick():
+
+   signals.fearGreed.value     // 0-100, crypto Fear&Greed (daily cadence)
+   signals.funding.rate        // Binance perp funding, e.g. 0.0001 = 0.01% (8h cycle)
+   signals.funding.direction   // "long" | "short" | "neutral"
+   signals.impliedVol.dvol     // Deribit DVOL, annualized % (minutes)
+   signals.realizedVol.vol5m   // rolling 5m Binance realized vol, annualized
+   signals.binancePrice        // current Binance spot (tracked separately too)
+
+   Contrarian readings at extremes usually beat momentum readings:
+     fearGreed >= 75 → crowd is greedy → fade UP entries
+     fearGreed <= 25 → crowd is fearful → fade DOWN entries
+     funding.rate > +0.0002 → longs crowded → fade UP
+     funding.rate < -0.0002 → shorts crowded → fade DOWN
+   All macro signals may be null if the fetch failed — handle that.
+
+2) MICROSTRUCTURE — via protected BaseEngine methods (this.*):
+
+   this.bookImbalance(tokenId, topN=3)  // [-1..+1], + = bid-heavy
+   this.spreadBps(tokenId)              // current spread, basis points
+   this.quoteVelocity(tokenId)          // book updates in last 10s
+   this.depthAtBestBid(tokenId)         // shares at best bid
+
+   Signals of what real MMs are doing. |imbalance| > 0.4 for ≥10 ticks
+   is directional pressure. Rising quoteVelocity before a move = MM
+   cancel-to-avoid-pick-off. Wide spreadBps late in candle = risk
+   premium as resolution approaches.
+
+3) BINANCE MOMENTUM — via this.trackBinance() / this.recentMomentum():
+   Still useful. Not exclusive.
+
+4) REGIME API — CRITICAL DISTINCTION (multiple bred engines got this wrong):
+
+   this.currentRegime(lookbackSec)         // RETURNS A STRING:
+                                           //   "QUIET" | "CHOP" | "TREND" | "SPIKE" | "UNKNOWN"
+   this.currentRegimeStable(label)         // RETURNS A BOOLEAN:
+                                           //   true if current regime IS the given label, with hysteresis
+
+   ❌ WRONG (silently always-false): const regime = this.currentRegimeStable("anything");
+                                     if (regime === "TREND") return [];  // never matches: bool !== string
+   ✓ RIGHT: const regime = this.currentRegime(60);
+            if (regime === "TREND") return [];
+   ✓ ALSO RIGHT: if (this.currentRegimeStable("CHOP")) { ... }
+
+═══════════════════════════════════════════════════════════════════
+PROVEN SIGNAL-COMBINATION PATTERN (Apr 28)
+═══════════════════════════════════════════════════════════════════
+The strongest bred engines so far combine TWO OR MORE signals from
+DIFFERENT categories (macro + micro, vol + flow, etc). bred-jp1t
+(67% WR over 3 rounds on eth-4h, +$10/round EV) reads
+realizedVol + bookImbalance + fearGreed + Binance momentum together.
+
+Anti-pattern: triple-conjunction at extreme thresholds (e.g. F&G ≥ 75
+AND |funding| > 0.02% AND imbalance > 0.65) almost never fires in
+normal markets. Loosen each gate or you'll get a beautiful never-firing
+engine. Aim for 2 gates that align ~30% of the time, not 4 that align
+~1%. Selectivity is good; over-selectivity is dead code.
+
+Example with mixed signals (bred-jp1t style):
+   const imb = this.bookImbalance(upTokenId);
+   const fng = signals?.fearGreed?.value ?? 50;
+   const v5m = signals?.realizedVol?.vol5m ?? 0;
+   if (imb > 0.4 && fng < 40 && v5m > 30) {
+     // book + sentiment + vol all support UP
+   }
+
+═══════════════════════════════════════════════════════════════════
+STRATEGY — YOU DECIDE
+═══════════════════════════════════════════════════════════════════
+The user message contains a DATA REPORT from the analyst describing
+what the trade data shows: entry-price clusters, time-of-candle
+patterns, maker/taker mix, toxic-flow regimes, fee-zone behavior,
+PnL distribution. Your job is to design a strategy the data
+DESCRIBES — what mechanism is the data telling you exists in the
+market right now.
+
+Do NOT think in terms of "what's missing from the engine roster"
+or "what corners are unexplored". You are not given a roster.
+Convergence with strategies that other engines also implement is
+fine — if the data warrants it, build it. The right answer is
+whatever the data describes most strongly, not whatever is novel.
+
+Rules:
+- Do NOT treat the analyst's phrasing as a recommendation. If the
+  analyst says "engine X has losses concentrated at price Y", that
+  is a data observation — decide yourself whether that implies
+  trade-with-it, fade-it, or ignore-it.
+- Variance is allowed. An engine that wins $500 some rounds and
+  loses $50 others can have positive expectation; don't optimize
+  for flatness. Size to survive drawdowns but accept variance.
+- **Trade frequency is NOT a quality signal.** Silent rounds are
+  fine if the firing rounds win. The arena has shown engines that
+  fire 17 times per round and bleed (-$2/fire, 24% WR) AND engines
+  that fire 5 times per round and win big (+$80/fire, 67% WR). The
+  difference is gating, not entry band. Prefer multiple
+  pre-conditions (regime check + price band + book sanity + maybe
+  Binance momentum direction) over fire-on-any-cheap-price designs.
+- A miss costs nothing. A wrong fire costs $5-40. Gates are cheap
+  insurance.
+
+Your only hard constraints are the correctness rules above — fee
+model, dual books, merge Flavor A, post-only, validity guards,
+rotation handling. Within those, invent freely.`;
+
+  const userPrompt = `## Data Report From Analyst (facts, not recommendations)
 ${analysis}
-
-## Existing Engines (don't duplicate these)
-${engines.join(", ")}
 
 ## Base Class
 ${baseEngine}
@@ -270,9 +475,9 @@ ${types}
 ## Example Engine (for reference)
 ${exampleEngine}
 
-Write a NEW engine class named ${className} that implements a strategy designed to beat the current leader based on the analysis above. Be creative but realistic — the referee simulates toxic flow, book walking, and parabolic fees. The engine that wins is the one that manages fees and timing, not the one that trades the most.`;
+Write a NEW engine class named ${className}. Build the strategy the DATA REPORT most strongly supports — entry-price clusters where wins concentrate, time-of-candle patterns that recur, toxic-flow regimes, fee-zone gaps, recurring book imbalances. Don't think about "what's missing from the population" — think about "what mechanism does this data describe." Convergence with what other engines do is fine if the data warrants it. Ground your design in the data report above as facts to interpret, not as a recommendation to follow.`;
 
-  console.log(`[breeder] Generating engine with ${CODER_MODEL}...`);
+  console.log(`[breeder] Generating engine with ${CODER_MODEL} (prompt=${BREEDER_PROMPT_VERSION})...`);
   const code = await callCoder(systemPrompt, userPrompt);
 
   // Strip markdown code fences if Claude includes them despite instructions
@@ -303,9 +508,19 @@ function validateEngine(_filePath: string): { valid: boolean; error?: string } {
 
 // ── Cleanup: remove worst performers ────────────────────────────────────────
 
+// All coins the multi-coin arena runs. Used for cross-coin pruning safety —
+// an engine that's catastrophic on btc but profitable on eth must not be deleted
+// by the btc breeder. Keep in sync with ecosystem.config.js COINS list.
+const ALL_COINS = ["btc", "eth", "sol"];
+
 function pruneEngines(intel: any): void {
   const engines = listEngines();
-  const prunableEngines = engines.filter(e => e !== "BaseEngine");
+  // Pruner is only allowed to delete BREDENGINE files. Hand-built engines are
+  // never auto-pruned — they're irreplaceable design references and the breeder
+  // doesn't have a way to recreate them. Without this filter the breeder will
+  // happily delete LateSniperEngine, FadeV2Engine, MeanRevertEngine etc. and
+  // break dependent engines (e.g. DisciplinedReverter imports MeanRevertEngine).
+  const prunableEngines = engines.filter(e => e.startsWith("BredEngine_"));
 
   if (prunableEngines.length <= MAX_ENGINES) return;
 
@@ -314,13 +529,24 @@ function pruneEngines(intel: any): void {
 
   if (!intel?.allResults) return;
 
-  // Use multi-round cumulative P&L for pruning (not just latest round)
-  const cumulativePnl = buildCumulativePnl(loadRoundHistory());
+  // Cross-coin protection: build per-engine BEST cumulative pnl across ALL coins.
+  // An engine that loses on this coin but wins big on another must not be pruned —
+  // engine files are shared via src/engines/, deleting them affects every arena.
+  const bestCoinPnl = new Map<string, number>();
+  for (const coin of ALL_COINS) {
+    const coinHistory = loadHistory(coin);
+    const coinCumulative = buildPnl(coinHistory);
+    for (const [engineId, pnl] of coinCumulative) {
+      const prev = bestCoinPnl.get(engineId) ?? -Infinity;
+      if (pnl > prev) bestCoinPnl.set(engineId, pnl);
+    }
+  }
 
-  // Rank by cumulative P&L if available, otherwise latest round
+  // Rank by best-coin cumulative P&L (worst-best-coin first). An engine with
+  // strong performance on any single coin sinks to the bottom of the prune list.
   const ranked = intel.allResults
-    .map((r: any) => ({ ...r, cumulativePnl: cumulativePnl.get(r.engineId) ?? r.totalPnl }))
-    .sort((a: any, b: any) => a.cumulativePnl - b.cumulativePnl);
+    .map((r: any) => ({ ...r, bestCoinPnl: bestCoinPnl.get(r.engineId) ?? r.totalPnl }))
+    .sort((a: any, b: any) => a.bestCoinPnl - b.bestCoinPnl);
 
   if (!fs.existsSync(ARCHIVE_DIR)) fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
 
@@ -336,7 +562,7 @@ function pruneEngines(intel: any): void {
     });
 
     if (worstFile) {
-      console.log(`[breeder] Pruning #${pruned + 1}: ${worstFile} (cumulative P&L: $${result.cumulativePnl.toFixed(2)})`);
+      console.log(`[breeder] Pruning #${pruned + 1}: ${worstFile} (best-coin P&L: $${result.bestCoinPnl.toFixed(2)})`);
       const srcPath = path.join(ENGINES_DIR, worstFile + ".ts");
       const distPath = path.join(PROJECT_ROOT, "dist", "engines", worstFile + ".js");
       const archivePath = path.join(ARCHIVE_DIR, `${worstFile}_pruned_${Date.now()}.ts`);

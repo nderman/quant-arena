@@ -17,6 +17,7 @@ const round = (roundId: string, engineId: string, totalPnl: number): RoundHistor
     engineId, totalPnl, tradeCount: 5,
     finalCash: 50 + totalPnl, positionValue: 0,
     feePaid: 0, slippageCost: 0, winRate: 0, sharpeRatio: 0,
+    rejectionCounts: {},
   }],
 });
 

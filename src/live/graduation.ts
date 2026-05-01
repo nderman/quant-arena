@@ -48,10 +48,13 @@ export interface EngineStats {
 export interface LiveEngineRecord {
   engineId: string;
   coin: string;
+  /** Optional: restrict to a specific arena instance (e.g. "eth-15m").
+   *  If unset, engine loads in all arenas for this coin. */
+  arenaInstanceId?: string;
   bankrollUsd: number;
   graduatedAt: string;
   graduationRoundId: string;
-  stats: EngineStats;
+  stats?: EngineStats;
 }
 
 export type LiveEnginesFile = Record<string, LiveEngineRecord[]>;

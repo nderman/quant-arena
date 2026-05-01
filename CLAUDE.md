@@ -9,10 +9,32 @@ Evolutionary arena for Polymarket 5M crypto binary markets. AI-bred engines comp
 - `npm run arena:dry` — simulated data, no APIs
 - `npm run arena:live` — live PM + Binance data (auto-discovers markets)
 - `npm run arena:1round:dry` — quick test (1 min round)
-- `npm run test:unit` — 15 tests, must all pass
+- `npm run test:unit` — 255 tests, must all pass
+- `python3 scripts/auto_rotate.py` — dry-run engine roster selection (prints ranked candidates + diff). Add `--commit` to actually swap.
+- `python3 scripts/livePnLByEngine.py` — per-engine PnL from data/live_trades.jsonl (FILL+SETTLE ledger). Add `--since 24h` for window.
+- `python3 scripts/backfillLiveLedger.py --reset --write` — rebuild ledger from Polymarket Activity API + ROSTER_HISTORY (script-internal).
+- `python3 scripts/syncManualTrades.py --write` — incrementally sync recent Activity API events into the ledger. Catches manual UI buys/sells + any forward-emit gaps. Wired on VPS as `*/10 * * * *`.
+
+## Auto-Rotation
+Hourly cron on VPS at :05 runs `auto_rotate.py --commit`. Picks top SAFE engines by `recent_sharpe × regime_fit × incumbent_bonus × live_pnl_penalty` (compound penalty floored at 0.5×). Writes `data/live_engines.json`; `liveArena.ts` fs.watch picks up the new roster within 30s, no PM2 restart.
+
+Manual override paths:
+- Edit `data/live_engines.json` directly — file-watcher reloads, cron respects via auto-detected manual-cull cooldown.
+- Touch `data/auto_rotation.disabled` — cron exits early.
+- See `data/auto_rotation.log` for hourly decisions, `data/auto_rotation_cooldown.json` for active cooldowns.
+
+`bankrollUsd` per engine is the **sizing basis** (scales sim positions to live), NOT a wallet allocation. All engines share the single PM funder wallet. Bump per-engine `bankrollUsd` when the wallet tops up.
+
+## Live ledger
+`data/live_trades.jsonl` — append-only log of FILL + SETTLE events tagged with engineId. `src/live/liveLedger.ts` exports `recordFill` (called from liveExecutor + liveReconcile), `recordSettle` (liveSettlement), and `rehydratePositionsFromLedger` (called from liveArena startup to restore in-memory positions across PM2 restarts — closes the chronic double-buy bug). All wire-points pass `coin` + `arenaInstanceId` from liveArena.
+
+Read: `scripts/livePnLByEngine.py`. Historical backfill: `scripts/backfillLiveLedger.py`. Continuous sync (every 10 min, catches manual UI trades + emit gaps): `scripts/syncManualTrades.py` (cron). Dedup uses (slug, side, size, price) fingerprint since forward `clientOrderId` ≠ Activity API `transactionHash`.
 - `npm run build` — TypeScript compile
 - `npm run discover` — list active crypto markets
 - `npm run signals` — test all signal sources
+- `python3 scripts/engineSelectivity.py` — selectivity-aware leaderboard (mean PnL per firing round, firing win rate)
+- `python3 scripts/engineCompare.py --prefix dca-` — head-to-head engine A/B comparison
+- `python3 scripts/engineRegimeReport.py` — engine PnL cross-tabulated by regime
 
 ## Architecture
 - `src/arena.ts` — main loop, loads engines, runs rounds
@@ -43,13 +65,21 @@ fee = amount × 0.25 × (P × (1 − P))²
 - At P=0.80: 0.64% (manageable)
 - At P=0.90: 0.20% (edge trading sweet spot)
 - At P=0.99: 0.003% (near zero)
-- MERGE: buy opposite side at real book price + dynamic gas (contract itself is free). Flavor A (already hold both sides) merges with gas only.
-- Makers: 0% fee + 20% rebate of taker fees, **12% fill probability** (was 60% — unrealistic vs HFT queue priority), 5bps adverse selection
+- **MERGE: Flavor A only.** Engine must already hold BOTH sides of the same conditional pair before calling MERGE — referee burns both legs and credits $1/pair. Flavor B (buy opposite + merge atomically) was removed because it kept producing exploit paths. To emulate B, emit BUY for the opposite then MERGE on a subsequent tick.
+- Makers: 0% fee + 20% rebate of taker fees, 5bps adverse selection. **Post-Only enforced**: maker BUY rejects if `action.price >= bestAsk`; maker SELL rejects if `action.price <= bestBid`. All maker orders go straight to GTC FIFO queue (no instant-fill lottery).
+- **GTC FIFO virtual queue**: Orders track `sharesAhead` (book depth at/above limit price on entry). Each tick: depth decreases advance queue by 50% (can't distinguish fills from cancellations), depth increases push us back (price jumpers). Order only fills when `sharesAhead <= 0`. At 5¢ with 10k shares queued, you wait until queue clears. At 50¢ with thin books, fills are fast.
 - Tick size: $0.001, Latency: 50ms (realistic API lag, no artificial delay)
-- **Per-tick book snapshots:** referee clones the active books once per tick and depletes them as engines fill — engines share liquidity within a tick (no ghost liquidity)
+- **Limit price enforcement**: `action.price` is the engine's max-acceptable BUY (or min-acceptable SELL). walkBook rejects fills that would breach the limit. No more "submit at $0.10, fill at $0.83" silent market-order behavior.
+- **Per-tick book snapshots:** referee eagerly clones UP+DOWN books at snapshot creation (not lazy). Engines processed in the same tick share depletion (no ghost liquidity) and see the same moment-in-time state.
+- **walkBook validity guards** (via `isBookTradeable()`): rejects walks where best bid >= best ask (crossed book), best prices outside [`PM_PRICE_MIN`, `PM_PRICE_MAX`] inclusive (default 0.005-0.995), bid-ask spread > `PM_BOOK_MAX_SPREAD` (default $0.50), one-sided book, or stale book (> `PM_BOOK_STALE_MS`, default 30s). Engines can call `isBookTradeable(book)` directly to pre-check.
+- **Ingestion-time PM book filtering** (`parsePmL2` + `isBookUpdateReasonable` in pulse.ts): drops invalid levels, rejects crossed books at parse time, filters transient quotes where best price jumps > `PM_BOOK_MAX_JUMP_FRACTION` (default 25%) in a single update. Catches PM's occasional bad/transient WS messages before they pollute our books.
+- **Dual-book consistency check**: BUY/SELL actions reject when `thisToken_ask + oppositeToken_ask < CONFIG.DUAL_BOOK_MIN_SUM` (default $0.85). Real PM keeps the sum near $1.00; impossibly cheap sums indicate stale/corrupt book data on one side.
+- **Snipe-stale-makers cancellation model**: taker BUY/SELL rejects with probability scaling on Binance momentum when the local PM book is stale relative to a recent move. Models real-world MM cancellation latency (~30-50ms). At default 5bps cumulative momentum over 5s + 100ms book staleness, rejection prob is ~50%; 10bps → ~95%. Configurable via `SNIPE_*` env vars.
 - **Settlement** writes a `SETTLE` row to the trades table with the true payout pnl, so `SUM(pnl)` is honest
+- **Phantom alpha detector**: arena.runRound flags any engine with > $500 single-round PnL (impossible from $50 starting cash) as a likely sim bug.
 
 ## Rules
+- Use `updatePendingOrders()` / `hasPendingOrder()` / `markPending()` for fill-latency race protection (prevents pyramiding during 50ms fill window). Returns true on market rotation.
 - Every engine must call `feeAdjustedEdge()` before trading
 - Never trade at mid-prices without > 2% raw edge
 - Use `cheapestExit(price, shares, tokenId)` to compare SELL vs MERGE with real book prices
@@ -60,11 +90,15 @@ fee = amount × 0.25 × (P × (1 − P))²
 
 ## Deploy
 ```bash
-bash scripts/deploy.sh  # rsync to VPS, rebuild, PM2 restart
+bash scripts/deploy.sh           # full deploy: rsync, rebuild, PM2 restart (kills in-flight rounds)
+bash scripts/deploy-engines.sh   # surgical: rsync only src/engines/, no PM2 restart
+bash scripts/deploy-engines.sh btc  # only one coin
 ```
-- VPS: 165.22.29.245 (DigitalOcean)
+- VPS: 165.232.84.91 (DigitalOcean)
 - PM2 processes (7 total): `quant-arena-{btc,eth,sol}`, `quant-breeder-{btc,eth,sol}`, `quant-telegram`
 - Deploy excludes BredEngine_* files and `data/` (preserved on VPS)
+- **Use deploy-engines.sh for hand-built engine adds/edits/deletes** — it touches a per-coin reload flag that arena.ts picks up at the next round boundary, swapping the engine roster without disrupting the round. Position state lives per-round in EngineState so swapping instances is safe.
+- **Use full deploy.sh** for arena.ts / referee.ts / pulse.ts changes — those don't go through the require-cache reload path and need a real restart.
 
 ## Config
 All via environment variables. Key:

@@ -32,7 +32,8 @@ interface GammaMarket {
   conditionId: string;
   question: string;
   slug: string;
-  endDateIso: string;
+  endDateIso: string;           // Date-only for non-5M markets: "2026-04-21"
+  endDate?: string;             // Full ISO timestamp: "2026-04-21T11:00:00Z"
   liquidity: string;
   volume: string;
   active: boolean;
@@ -123,7 +124,7 @@ export async function discoverCryptoMarkets(opts: {
         slug: c.slug,
         yesTokenId,
         noTokenId,
-        endDate: c.endDateIso,
+        endDate: c.endDate || c.endDateIso,  // prefer full ISO timestamp over date-only
         liquidity: parseFloat(c.liquidity),
         volume: parseFloat(c.volume || "0"),
         bestBid,
@@ -195,7 +196,7 @@ export async function discoverUpDownMarkets(opts: {
               slug: m.slug || "",
               yesTokenId,
               noTokenId,
-              endDate: m.endDateIso,
+              endDate: m.endDate || m.endDateIso,  // prefer full ISO timestamp over date-only
               liquidity: parseFloat(m.liquidity || "0"),
               volume: parseFloat(m.volume || "0"),
               bestBid,

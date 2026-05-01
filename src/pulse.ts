@@ -11,6 +11,7 @@
 import WebSocket from "ws";
 import { EventEmitter } from "events";
 import { CONFIG } from "./config";
+import { random } from "./rng";
 import type { MarketTick, L2Level, OrderBook } from "./types";
 
 // ── Event Bus ────────────────────────────────────────────────────────────────
@@ -71,12 +72,71 @@ export function getLatestPmBook(): OrderBook { return latestUpBook; }
 export function resetBooks(): void {
   latestUpBook = { bids: [], asks: [], timestamp: 0 };
   latestDownBook = { bids: [], asks: [], timestamp: 0 };
+  resetBookSignals();
 }
 
 /** Get the correct book for a specific token */
 export function getBookForToken(tokenId: string): OrderBook {
   if (tokenId === pmDownTokenId) return latestDownBook;
   return latestUpBook; // UP token or unknown → UP book
+}
+
+// ── Book microstructure signals ──────────────────────────────────────────────
+// Phase B of signal wiring. Engines can read these to trade on order flow
+// (bid/ask imbalance, spread dynamics, quote cancellation velocity) instead
+// of only Binance momentum. All reads are O(N) over the top of the book.
+
+const QUOTE_VELOCITY_WINDOW_MS = 10_000;
+const bookUpdateTimestamps: { up: number[]; down: number[] } = { up: [], down: [] };
+
+function recordBookUpdate(tokenId: string): void {
+  const now = Date.now();
+  const arr = tokenId === pmDownTokenId ? bookUpdateTimestamps.down : bookUpdateTimestamps.up;
+  arr.push(now);
+  // Trim old entries. Hot loop but O(k) amortized since push/shift balance.
+  const cutoff = now - QUOTE_VELOCITY_WINDOW_MS;
+  while (arr.length > 0 && arr[0] < cutoff) arr.shift();
+}
+
+/** Bid/ask imbalance on top N levels. Range [-1, +1]. Positive = bid-heavy. */
+export function getBookImbalance(tokenId: string, topN = 3): number {
+  const book = getBookForToken(tokenId);
+  const bidDepth = book.bids.slice(0, topN).reduce((s, l) => s + l.size, 0);
+  const askDepth = book.asks.slice(0, topN).reduce((s, l) => s + l.size, 0);
+  const total = bidDepth + askDepth;
+  if (total === 0) return 0;
+  return (bidDepth - askDepth) / total;
+}
+
+/** Current spread in basis points. Returns 0 if book is empty or crossed. */
+export function getSpreadBps(tokenId: string): number {
+  const book = getBookForToken(tokenId);
+  const bestBid = book.bids[0]?.price ?? 0;
+  const bestAsk = book.asks[0]?.price ?? 0;
+  if (bestBid <= 0 || bestAsk <= 0 || bestAsk <= bestBid) return 0;
+  const mid = (bestBid + bestAsk) / 2;
+  return ((bestAsk - bestBid) / mid) * 10_000;
+}
+
+/** Book updates in the last 10s. Proxy for MM cancellation/quote-churn rate. */
+export function getQuoteVelocity(tokenId: string): number {
+  const now = Date.now();
+  const cutoff = now - QUOTE_VELOCITY_WINDOW_MS;
+  const arr = tokenId === pmDownTokenId ? bookUpdateTimestamps.down : bookUpdateTimestamps.up;
+  while (arr.length > 0 && arr[0] < cutoff) arr.shift();
+  return arr.length;
+}
+
+/** Shares resting at the best bid (queue-depth proxy for maker fill ETA). */
+export function getDepthAtBestBid(tokenId: string): number {
+  const book = getBookForToken(tokenId);
+  return book.bids[0]?.size ?? 0;
+}
+
+/** Reset velocity counters on rotation so cross-candle velocity doesn't leak. */
+export function resetBookSignals(): void {
+  bookUpdateTimestamps.up.length = 0;
+  bookUpdateTimestamps.down.length = 0;
 }
 
 // Both token IDs for subscription (set by arena on discovery)
@@ -95,18 +155,77 @@ function getPmTokens(): string[] {
 
 // ── Polymarket CLOB WebSocket ────────────────────────────────────────────────
 
-function parsePmL2(data: any): OrderBook | null {
+/**
+ * Parse a PM L2 book message. Validates and filters bad data:
+ *   - Drops levels with invalid (NaN/negative/zero) prices or sizes
+ *   - Drops levels outside the legitimate PM range (0.001, 0.999)
+ *   - Returns null if the book is crossed (best bid >= best ask)
+ *   - Returns null if the resulting book has no levels on either side
+ *
+ * Without this filtering, transient/bad PM quotes (occasionally published
+ * during the few microseconds between market maker updates) leak into our
+ * sim and produce phantom-alpha trades. fade-v2's "impossible win" pattern
+ * was caused by this exact gap.
+ */
+// Exported for unit tests — pure function, no side effects
+export function parsePmL2(data: any): OrderBook | null {
   try {
-    const bids: L2Level[] = (data.bids || [])
-      .map((b: any) => ({ price: parseFloat(b.price), size: parseFloat(b.size) }))
-      .sort((a: L2Level, b: L2Level) => b.price - a.price);
-    const asks: L2Level[] = (data.asks || [])
-      .map((a: any) => ({ price: parseFloat(a.price), size: parseFloat(a.size) }))
-      .sort((a: L2Level, b: L2Level) => a.price - b.price);
+    const cleanLevels = (raw: any[]): L2Level[] =>
+      raw
+        .map((l: any) => ({ price: parseFloat(l.price), size: parseFloat(l.size) }))
+        .filter((l: L2Level) =>
+          Number.isFinite(l.price) &&
+          Number.isFinite(l.size) &&
+          l.size > 0 &&
+          l.price > CONFIG.PM_PRICE_MIN &&
+          l.price < CONFIG.PM_PRICE_MAX
+        );
+
+    const bids = cleanLevels(data.bids || []).sort((a, b) => b.price - a.price);
+    const asks = cleanLevels(data.asks || []).sort((a, b) => a.price - b.price);
+
+    if (!bids.length || !asks.length) return null;
+
+    // Crossed book detection: best bid must be < best ask. PM occasionally
+    // publishes crossed quotes during transient updates — reject them.
+    if (bids[0].price >= asks[0].price) return null;
+
     return { bids, asks, timestamp: Date.now() };
   } catch {
     return null;
   }
+}
+
+/**
+ * Compare a freshly parsed book against the previous one for the same token.
+ * Rejects updates where the best price moved by more than `maxJumpFraction`
+ * (default 25%) — this catches transient quotes where PM briefly publishes
+ * a stale level before the next message corrects it.
+ *
+ * Returns true if the new book is acceptable, false if it should be discarded
+ * as a transient artifact.
+ */
+// Exported for unit tests — pure function, no side effects
+export function isBookUpdateReasonable(
+  newBook: OrderBook,
+  prevBook: OrderBook,
+  maxJumpFraction: number = CONFIG.PM_BOOK_MAX_JUMP_FRACTION,
+): boolean {
+  // First update for this token — accept anything (no baseline to compare).
+  if (!prevBook.bids.length || !prevBook.asks.length) return true;
+  // Stale prev book — can't distinguish a real move from a transient quote
+  // when the previous data is too old, so accept anything.
+  if (Date.now() - prevBook.timestamp > CONFIG.PM_BOOK_PREV_STALE_MS) return true;
+
+  const prevBestBid = prevBook.bids[0].price;
+  const prevBestAsk = prevBook.asks[0].price;
+  const newBestBid = newBook.bids[0].price;
+  const newBestAsk = newBook.asks[0].price;
+
+  const bidJump = Math.abs(newBestBid - prevBestBid) / Math.max(prevBestBid, CONFIG.PM_PRICE_MIN);
+  const askJump = Math.abs(newBestAsk - prevBestAsk) / Math.max(prevBestAsk, CONFIG.PM_PRICE_MIN);
+
+  return bidJump < maxJumpFraction && askJump < maxJumpFraction;
 }
 
 function buildPmTickFromPrice(price: number, assetId: string): MarketTick {
@@ -213,11 +332,22 @@ function startPmBookChannel(): void {
           if (book && book.bids.length && book.asks.length) {
             // Route to correct book based on asset_id
             const assetId = entry.asset_id || entry.market || "";
+            const prevBook = assetId === pmDownTokenId ? latestDownBook : latestUpBook;
+
+            // Transient quote filter: discard updates where the best price
+            // jumps by > 25% in one message. Real PM books don't move that
+            // fast in a single update — these are almost always transient
+            // quotes published during MM repricing windows.
+            if (!isBookUpdateReasonable(book, prevBook)) {
+              continue;
+            }
+
             if (assetId === pmDownTokenId) {
               latestDownBook = book;
             } else {
               latestUpBook = book;
             }
+            recordBookUpdate(assetId);
             lastPmDataTs = Date.now();
             pulseEvents.emit("pm_book", book);
           }
@@ -431,23 +561,23 @@ export function startSimulatedPulse(opts: {
 
   simInterval = setInterval(() => {
     // Random walk
-    const move = (Math.random() - 0.5) * 2 * volatility;
+    const move = (random() - 0.5) * 2 * volatility;
     price = Math.max(0.01, Math.min(0.99, price + move));
 
-    const spread = 0.01 + Math.random() * 0.02;
+    const spread = 0.01 + random() * 0.02;
     const bestBid = price - spread / 2;
     const bestAsk = price + spread / 2;
 
     const book: OrderBook = {
       bids: [
-        { price: bestBid, size: 100 + Math.random() * 500 },
-        { price: bestBid - 0.01, size: 200 + Math.random() * 800 },
-        { price: bestBid - 0.02, size: 300 + Math.random() * 1000 },
+        { price: bestBid, size: 100 + random() * 500 },
+        { price: bestBid - 0.01, size: 200 + random() * 800 },
+        { price: bestBid - 0.02, size: 300 + random() * 1000 },
       ],
       asks: [
-        { price: bestAsk, size: 100 + Math.random() * 500 },
-        { price: bestAsk + 0.01, size: 200 + Math.random() * 800 },
-        { price: bestAsk + 0.02, size: 300 + Math.random() * 1000 },
+        { price: bestAsk, size: 100 + random() * 500 },
+        { price: bestAsk + 0.01, size: 200 + random() * 800 },
+        { price: bestAsk + 0.02, size: 300 + random() * 1000 },
       ],
       timestamp: Date.now(),
     };

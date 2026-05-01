@@ -1,8 +1,8 @@
 // Multi-coin arena: one process per coin, sharing engines but separate ledgers
 const COINS = ["btc", "eth", "sol"]; // adding SOL — validated PM uses Chainlink SOL/USD
 
-const arenaApp = (coin) => ({
-  name: `quant-arena-${coin}`,
+const arenaApp = (coin, interval = "5m") => ({
+  name: interval === "5m" ? `quant-arena-${coin}` : `quant-arena-${coin}-${interval}`,
   script: "./dist/arena.js",
   instances: 1,
   exec_mode: "fork",
@@ -11,16 +11,18 @@ const arenaApp = (coin) => ({
   env: {
     NODE_ENV: "production",
     ARENA_COIN: coin,
+    ARENA_MARKET_INTERVAL: interval,
+    ARENA_INSTANCE_ID: interval === "5m" ? coin : `${coin}-${interval}`,
     STARTING_CASH: "50",
     MAX_ROUNDS: "0",
     LATENCY_MS: "50",
-    ROUND_DURATION_MS: "3600000", // 1h rounds — harsher environment
+    ROUND_DURATION_MS: "21600000",
   },
   exp_backoff_restart_delay: 100,
   log_date_format: "YYYY-MM-DD HH:mm:ss Z",
   merge_logs: true,
-  error_file: `./logs/arena-${coin}-error.log`,
-  out_file: `./logs/arena-${coin}-out.log`,
+  error_file: `./logs/arena-${coin}${interval === "5m" ? "" : `-${interval}`}-error.log`,
+  out_file: `./logs/arena-${coin}${interval === "5m" ? "" : `-${interval}`}-out.log`,
 });
 
 const breederApp = (coin) => ({
@@ -44,7 +46,17 @@ const breederApp = (coin) => ({
 
 module.exports = {
   apps: [
-    ...COINS.map(arenaApp),
+    ...COINS.map(c => arenaApp(c)),           // 5M arenas (existing)
+    // 15M / 1H / 4H across all 3 coins (full cross-section for regime/interval analysis)
+    arenaApp("btc", "15m"),
+    arenaApp("btc", "1h"),
+    arenaApp("btc", "4h"),
+    arenaApp("eth", "15m"),
+    arenaApp("eth", "1h"),
+    arenaApp("eth", "4h"),
+    arenaApp("sol", "15m"),
+    arenaApp("sol", "1h"),
+    arenaApp("sol", "4h"),
     ...COINS.map(breederApp),
     {
       name: "quant-telegram",

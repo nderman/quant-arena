@@ -45,7 +45,7 @@ const settledTokens = new Set<string>();
  */
 export async function pollAndSettle(
   states: Map<string, { engineId: string; state: EngineState }>,
-  options: { lookbackMinutes?: number; tokenSlugPrefix?: string; roundId?: string } = {},
+  options: { lookbackMinutes?: number; tokenSlugPrefix?: string; roundId?: string; intervalTag?: string } = {},
 ): Promise<SettlementResult[]> {
   const lookback = options.lookbackMinutes ?? 60;
   const slugPrefix = options.tokenSlugPrefix ?? "btc-updown-5m";
@@ -54,8 +54,23 @@ export async function pollAndSettle(
   const endMin = new Date(now - lookback * 60_000).toISOString();
   const endMax = new Date(now).toISOString();
 
-  const url = `https://gamma-api.polymarket.com/markets?closed=true&limit=50&order=endDate&ascending=false&end_date_min=${endMin}&end_date_max=${endMax}`;
-  const markets = await fetchJson<GammaMarket[]>(url, 8000);
+  // For non-5M intervals, use the events endpoint with tag_slug to avoid
+  // the general markets list drowning in sports markets (which close every
+  // few minutes and push crypto markets off the limit=50 window).
+  let markets: GammaMarket[] | null;
+  if (options.intervalTag && options.intervalTag !== "5m") {
+    const tag = options.intervalTag.toUpperCase();
+    const eventsUrl = `https://gamma-api.polymarket.com/events?tag_slug=${tag}&closed=true&limit=50&order=endDate&ascending=false`;
+    const events = await fetchJson<Array<{ markets?: GammaMarket[] }>>(eventsUrl, 8000);
+    if (!events || events.length === 0) return [];
+    markets = events.flatMap(e => e.markets ?? []).filter(m => {
+      if (!m.endDate) return false;
+      return m.endDate >= endMin && m.endDate <= endMax;
+    });
+  } else {
+    const url = `https://gamma-api.polymarket.com/markets?closed=true&limit=50&order=endDate&ascending=false&end_date_min=${endMin}&end_date_max=${endMax}`;
+    markets = await fetchJson<GammaMarket[]>(url, 8000);
+  }
   if (!markets || markets.length === 0) return [];
 
   const results: SettlementResult[] = [];

@@ -17,12 +17,15 @@ import * as dotenv from "dotenv";
 dotenv.config({ path: path.resolve(__dirname, "..", ".env") });
 import { CONFIG } from "./config";
 import { pulseEvents, startSimulatedPulse, startPmChannel, startBinanceChannel, startMarketRotation, setPmSubscriptionTokens, shutdown as shutdownPulse } from "./pulse";
-import { processActions, processMergeActions, markToMarket, clearFeePool, clearFeePoolForMarket, snapshotTickBooks } from "./referee";
+import { processActions, processMergeActions, markToMarket, clearFeePool, clearFeePoolForMarket, snapshotTickBooks, processGtcOrders, expireGtcOrders, clearGtcOrders } from "./referee";
 import { recordFill, recordRoundStart, recordRoundEnd, getRoundSummary, closeDb, flushLedger } from "./ledger";
 import { fetchSignalSnapshot } from "./signals";
 import { discoverCryptoMarkets, discoverUpDownMarkets, discover5mMarkets } from "./discovery";
 import { pollAndSettle } from "./settlement";
 import { startChainlinkPoller } from "./chainlink";
+import { seedRng, random } from "./rng";
+import { startLiveArena, type LiveArenaHandle } from "./live/liveArena";
+import { buildDryRunAdapter } from "./live/dryRunAdapter";
 import type {
   BaseEngine,
   EngineAction,
@@ -36,34 +39,107 @@ import type {
 
 // ── Active engine states (shared with market rotation for token ID updates) ──
 let activeStates: Map<string, EngineState> | null = null;
+let liveArenaHandle: LiveArenaHandle | null = null;
 let currentActiveTokenId = "";
 let currentActiveDownTokenId = "";
+let currentMarketSymbol = "";
+let currentWindowEnd = 0;
+let currentWindowStart = 0;
+
+const COIN_SLUG_PREFIXES: Record<string, string[]> = {
+  btc: ["btc-", "bitcoin-"],
+  eth: ["eth-", "ethereum-"],
+  sol: ["sol-", "solana-"],
+  xrp: ["xrp-"],
+};
 
 // ── Engine Loading ───────────────────────────────────────────────────────────
 
 /**
- * Load all engines from the engines directory.
- * Each engine file must export a class that implements BaseEngine.
+ * Scan the engines directory for files not yet in the provided list and
+ * append new engine instances to it. Used at round-start to pick up
+ * freshly-bred engines without requiring a full arena restart.
+ *
+ * Returns the count of newly loaded engines.
  */
+function reloadNewEngines(existing: BaseEngine[]): number {
+  const existingIds = new Set(existing.map(e => e.id));
+  const builtinDir = path.resolve(__dirname, "engines");
+  if (!fs.existsSync(builtinDir)) return 0;
+
+  const files = fs.readdirSync(builtinDir).filter(f =>
+    (f.endsWith(".ts") || f.endsWith(".js")) && !f.startsWith("Base")
+  );
+
+  let added = 0;
+  for (const file of files) {
+    const fullPath = path.join(builtinDir, file);
+    try {
+      // Clear require cache for this file so we pick up the fresh version
+      // (in case of dist rebuilds). Safe because engine files are self-
+      // contained — they don't mutate shared module state.
+      delete require.cache[require.resolve(fullPath)];
+      const mod = require(fullPath);
+      for (const key of Object.keys(mod)) {
+        if (typeof mod[key] === "function") {
+          const instance = new mod[key]();
+          if (typeof instance.onTick === "function" && !existingIds.has(instance.id)) {
+            existing.push(instance);
+            existingIds.add(instance.id);
+            added++;
+            console.log(`[arena] Hot-loaded bred engine: ${instance.name} (${instance.id})`);
+            break;
+          }
+        }
+      }
+    } catch (err: any) {
+      // MODULE_NOT_FOUND is the expected case for a freshly-bred .ts engine
+      // whose .js hasn't been compiled yet — skip quietly. Other failures
+      // (syntax errors, constructor throws) are real bugs worth surfacing.
+      if (err?.code !== "MODULE_NOT_FOUND") {
+        console.error(`[arena] Failed to hot-load ${file}:`, err.message);
+      }
+    }
+  }
+  return added;
+}
+
 function loadEngines(): BaseEngine[] {
   const engines: BaseEngine[] = [];
 
-  // Built-in engines
-  const builtinDir = path.resolve(__dirname, "engines");
-  if (fs.existsSync(builtinDir)) {
-    const files = fs.readdirSync(builtinDir).filter(f =>
-      (f.endsWith(".ts") || f.endsWith(".js")) && !f.startsWith("Base")
+  // Per-coin allow/disable filters. ENGINE_ALLOW is a whitelist (only these
+  // load); ENGINE_DISABLE is a blacklist. ENGINE_ALLOW wins when both are set.
+  // Set per PM2 process via ecosystem.config.js so you can, e.g., run
+  // dca-deep on SOL only without editing code.
+  const allowCsv = CONFIG.ENGINE_ALLOW.trim();
+  const disableCsv = CONFIG.ENGINE_DISABLE.trim();
+  const allow = allowCsv ? new Set(allowCsv.split(",").map(s => s.trim()).filter(Boolean)) : null;
+  const disable = new Set(disableCsv.split(",").map(s => s.trim()).filter(Boolean));
+
+  const shouldLoad = (engineId: string): boolean => {
+    if (allow) return allow.has(engineId);
+    return !disable.has(engineId);
+  };
+
+  const loadFromDir = (dir: string, kind: "built-in" | "user") => {
+    if (!fs.existsSync(dir)) return;
+    const files = fs.readdirSync(dir).filter(f =>
+      (f.endsWith(".ts") || f.endsWith(".js")) &&
+      (kind === "user" || !f.startsWith("Base"))
     );
     for (const file of files) {
       try {
-        const mod = require(path.join(builtinDir, file));
-        // Find the exported class (first export that has onTick)
+        const mod = require(path.join(dir, file));
         for (const key of Object.keys(mod)) {
           if (typeof mod[key] === "function") {
             const instance = new mod[key]();
             if (typeof instance.onTick === "function") {
-              engines.push(instance);
-              console.log(`[arena] Loaded built-in engine: ${instance.name} (${instance.id})`);
+              if (!shouldLoad(instance.id)) {
+                console.log(`[arena] Skipped ${kind} engine: ${instance.id} (env filter)`);
+              } else {
+                engines.push(instance);
+                console.log(`[arena] Loaded ${kind} engine: ${instance.name} (${instance.id})`);
+              }
               break;
             }
           }
@@ -72,34 +148,75 @@ function loadEngines(): BaseEngine[] {
         console.error(`[arena] Failed to load engine ${file}:`, err.message);
       }
     }
-  }
+  };
 
-  // User engines from configurable directory
+  const builtinDir = path.resolve(__dirname, "engines");
+  loadFromDir(builtinDir, "built-in");
+
   const userDir = path.resolve(CONFIG.ENGINES_DIR);
-  if (fs.existsSync(userDir) && userDir !== builtinDir) {
-    const files = fs.readdirSync(userDir).filter(f =>
-      f.endsWith(".ts") || f.endsWith(".js")
-    );
-    for (const file of files) {
-      try {
-        const mod = require(path.join(userDir, file));
-        for (const key of Object.keys(mod)) {
-          if (typeof mod[key] === "function") {
-            const instance = new mod[key]();
-            if (typeof instance.onTick === "function") {
-              engines.push(instance);
-              console.log(`[arena] Loaded user engine: ${instance.name} (${instance.id})`);
-              break;
-            }
-          }
-        }
-      } catch (err: any) {
-        console.error(`[arena] Failed to load user engine ${file}:`, err.message);
-      }
-    }
-  }
+  if (userDir !== builtinDir) loadFromDir(userDir, "user");
 
   return engines;
+}
+
+/**
+ * Purge Node's require cache for every engine file so the next loadEngines()
+ * picks up fresh code. Called by the reload-flag handler in the main loop —
+ * lets the surgical engine-only deploy script ship new engines without a
+ * full pm2 restart (which would wipe in-flight positions).
+ */
+function clearEngineRequireCache(): void {
+  const builtinDir = path.resolve(__dirname, "engines");
+  const userDir = path.resolve(CONFIG.ENGINES_DIR);
+  for (const cachedKey of Object.keys(require.cache)) {
+    if (cachedKey.startsWith(builtinDir) || cachedKey.startsWith(userDir)) {
+      delete require.cache[cachedKey];
+    }
+  }
+}
+
+/**
+ * Path to the engine-reload flag for this coin. Touched by deploy-engines.sh
+ * after a successful rsync; checked at every round boundary. Per-coin so a
+ * BTC-only engine deploy doesn't disrupt the ETH/SOL arenas.
+ *
+ * Exported for unit tests.
+ */
+export function reloadFlagPath(): string {
+  // Per-arena-instance, not per-coin. Was per-coin until Apr 27 — but the
+  // first arena to detect the flag deletes it (unlinkSync below), starving
+  // the other 3 instances of the same coin (5m/15m/1h/4h share the coin
+  // name). Result: 9 of 12 arenas silently kept old code on every
+  // surgical deploy. Per-instance flag = each arena consumes its own.
+  return path.resolve("data", `reload_engines_${CONFIG.ARENA_INSTANCE_ID}.flag`);
+}
+
+/**
+ * Check the reload flag and rebuild the engine roster if present. Returns
+ * the (possibly new) engines array. Safe to call between rounds — it
+ * doesn't touch in-flight position state because positions live in
+ * EngineState (held by the round loop), not on the engine instances.
+ *
+ * Exported for unit tests.
+ */
+export function maybeReloadEngines(current: BaseEngine[]): BaseEngine[] {
+  const flag = reloadFlagPath();
+  if (!fs.existsSync(flag)) return current;
+  console.log(`[arena] Engine reload flag detected at ${flag} — rebuilding roster`);
+  try {
+    clearEngineRequireCache();
+    const fresh = loadEngines();
+    fs.unlinkSync(flag);
+    if (fresh.length === 0) {
+      console.error("[arena] Reload produced 0 engines — keeping previous roster");
+      return current;
+    }
+    console.log(`[arena] Reload complete: ${fresh.length} engines (was ${current.length})`);
+    return fresh;
+  } catch (err: any) {
+    console.error("[arena] Engine reload failed, keeping previous roster:", err.message);
+    return current;
+  }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -122,10 +239,10 @@ function createEngineState(engineId: string): EngineState {
     slippageCost: 0,
     activeTokenId: currentActiveTokenId,
     activeDownTokenId: currentActiveDownTokenId,
-    expiringTokenIds: new Map(),
-    marketSymbol: "",
-    marketWindowEnd: 0,
-    marketWindowStart: 0,
+    marketSymbol: currentMarketSymbol,
+    marketWindowEnd: currentWindowEnd,
+    marketWindowStart: currentWindowStart,
+    rejectionCounts: {},
   };
 }
 
@@ -145,6 +262,12 @@ async function runRound(
 
   recordRoundStart(roundId);
 
+  // Hot-load any newly bred engines that appeared since last round
+  const newCount = reloadNewEngines(engines);
+  if (newCount > 0) {
+    console.log(`[arena] Hot-loaded ${newCount} new engine(s) at round start`);
+  }
+
   // Initialize engine states
   const states = new Map<string, EngineState>();
   const statesForSettlement = new Map<string, { engineId: string; state: EngineState }>();
@@ -155,6 +278,7 @@ async function runRound(
     engine.init(state);
   }
   clearFeePool();
+  clearGtcOrders();
   activeStates = states;
 
   // Track last tick for mark-to-market (PM only — Binance prices are in a different range)
@@ -162,13 +286,16 @@ async function runRound(
   let tickCount = 0;
   const allPendingMerges: { engineId: string; state: EngineState; merges: EngineAction[] }[] = [];
 
-  // ── Fetch signals periodically (every 60s) ──
+  // ── Fetch signals periodically (every 15s) ──
+  // signals.ts has internal caching (F&G 1h, funding/DVOL by HTTP cache
+  // headers), so this polling rate doesn't hammer external APIs — mostly
+  // serves realized-vol freshness + funding drift within an 8h cycle.
   let latestSignals: SignalSnapshot | undefined;
   const signalInterval = setInterval(async () => {
     try {
       latestSignals = await fetchSignalSnapshot(CONFIG.BINANCE_SYMBOL.toUpperCase());
     } catch { /* non-critical */ }
-  }, 60_000);
+  }, 15_000);
   // Initial fetch
   fetchSignalSnapshot(CONFIG.BINANCE_SYMBOL.toUpperCase())
     .then(s => { latestSignals = s; })
@@ -176,13 +303,19 @@ async function runRound(
 
   // ── Settlement: poll Gamma API every 30s for closed markets ──
   const settlementInterval = setInterval(() => {
-    pollAndSettle(statesForSettlement, { tokenSlugPrefix: CONFIG.ARENA_SLUG_PREFIX, roundId }).catch(err =>
+    const lookback = CONFIG.ARENA_MARKET_INTERVAL === "4h" ? 360
+                   : CONFIG.ARENA_MARKET_INTERVAL === "1h" ? 120
+                   : 60;
+    pollAndSettle(statesForSettlement, { tokenSlugPrefix: CONFIG.ARENA_SLUG_PREFIX, roundId, lookbackMinutes: lookback, intervalTag: CONFIG.ARENA_MARKET_INTERVAL }).catch(err =>
       console.error("[arena] settlement error:", err.message)
     );
   }, 30_000);
 
   // ── Tick handler: feed every tick to every engine ──
   const onTick = async (tick: MarketTick) => {
+    // Binance WS delivers all symbols; only pass the configured coin to engines
+    if (tick.source === "binance" && tick.symbol !== CONFIG.ARENA_BINANCE_SYMBOL) return;
+
     if (tick.source === "polymarket") lastPmTick = tick;
     tickCount++;
 
@@ -208,13 +341,32 @@ async function runRound(
         // Process CLOB actions — share tickBooks across engines so liquidity depletes
         const { results: fills, pendingMerges } = await processActions(actions, state, tickBooks);
 
-        // Record CLOB fills to ledger
+        // Record CLOB fills to ledger; rejection counts are tallied by referee.
         for (const fill of fills) {
           if (fill.filled) {
             recordFill(roundId, engine.id, fill, state, fill.pnl);
             if (fill.toxicFlowHit) {
               console.log(`[arena] ${engine.id} TOXIC FLOW: ${fill.action.side} ${fill.fillSize}@${fill.fillPrice.toFixed(4)} (slippage: ${fill.slippage.toFixed(4)})`);
             }
+          }
+          // Mirror to live for: (a) actual sim fills (takers) AND (b) maker
+          // orders that went to sim GTC queue (filled:false, reason=maker_not_filled).
+          // Live CLOB will post the maker as a limit order that sits on the
+          // real book and fills independently — tracked by the reconcile loop.
+          const shouldMirror = fill.filled || fill.rejectionReason === "maker_not_filled";
+          if (shouldMirror && liveArenaHandle) {
+            const positionSide = state.activeDownTokenId === fill.action.tokenId ? "NO" as const : "YES" as const;
+            liveArenaHandle.onSimAction(engine.id, fill.action, positionSide).then(result => {
+              if (result) {
+                if (result.accepted) {
+                  console.log(`[live] ${engine.id} ${fill.action.side} ${result.sizedAction?.size ?? 0}@${(result.sizedAction?.price ?? 0).toFixed(3)} → accepted`);
+                } else {
+                  console.log(`[live] ${engine.id} ${fill.action.side} rejected: ${result.reason}`);
+                }
+              }
+            }).catch(err => {
+              console.warn(`[live-arena] ${engine.id} action failed: ${err.message}`);
+            });
           }
         }
 
@@ -224,6 +376,21 @@ async function runRound(
         }
       } catch (err: any) {
         console.error(`[arena] Engine ${engine.id} error on tick:`, err.message);
+      }
+    }
+
+    // ── Process GTC limit orders against current book ──
+    if (tickBooks) {
+      const gtcFills = processGtcOrders(tickBooks);
+      for (const fill of gtcFills) {
+        const engineId = fill.action.signalSource ? fill.action.signalSource.split("_")[0] : "unknown";
+        // Find the engine state for recording
+        for (const [, st] of states) {
+          if (st.engineId === engineId || st.positions.has(fill.action.tokenId)) {
+            recordFill(roundId, engineId, fill, st, fill.pnl);
+            break;
+          }
+        }
       }
     }
 
@@ -312,6 +479,7 @@ async function runRound(
       slippageCost: state.slippageCost,
       winRate,
       sharpeRatio: sharpe,
+      rejectionCounts: { ...state.rejectionCounts },
     };
     results.push(result);
 
@@ -319,10 +487,32 @@ async function runRound(
     console.log(`    Cash: $${state.cashBalance.toFixed(2)} | Positions: $${posValue.toFixed(2)}`);
     console.log(`    P&L: ${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)} | Trades: ${state.tradeCount}`);
     console.log(`    Fees: $${state.feePaid.toFixed(4)} | Slippage: $${state.slippageCost.toFixed(4)}`);
+    const rejEntries = Object.entries(state.rejectionCounts);
+    if (rejEntries.length > 0) {
+      const totalRej = rejEntries.reduce((s, [, n]) => s + n, 0);
+      const topReasons = rejEntries.sort((a, b) => b[1] - a[1]).slice(0, 3)
+        .map(([r, n]) => `${r}=${n}`).join(" ");
+      console.log(`    Rejections: ${totalRej} total (${topReasons})`);
+    }
   }
 
   // Sort by P&L
   results.sort((a, b) => b.totalPnl - a.totalPnl);
+
+  // Phantom alpha detector: STARTING_CASH × multiplier (default 10x = $500)
+  // is the absolute most a legitimate strategy could produce in one round.
+  // Anything beyond is almost certainly a sim bug — flag loudly so we catch
+  // it before it contaminates round_history and the breeder learns fake signal.
+  const phantomThreshold = CONFIG.STARTING_CASH * CONFIG.PHANTOM_PNL_MULTIPLIER;
+  for (const r of results) {
+    if (r.totalPnl > phantomThreshold) {
+      console.error(
+        `\n🚨 [PHANTOM ALPHA] ${r.engineId} produced +$${r.totalPnl.toFixed(2)} ` +
+        `in round ${roundId} (threshold $${phantomThreshold.toFixed(0)}). ` +
+        `Likely sim bug — audit trades immediately.`
+      );
+    }
+  }
 
   const roundResult: RoundResult = { roundId, startedAt, endedAt, durationMs, results };
 
@@ -358,13 +548,34 @@ function writeRoundIntel(roundId: string, results: EngineRoundResult[]): void {
   console.log(`[arena] Leader: ${leader.engineId} with P&L ${leader.totalPnl >= 0 ? "+" : ""}$${leader.totalPnl.toFixed(2)}`);
 
   // Append to round history (breeder uses last N rounds for multi-round analysis)
-  const historyPath = path.join(path.dirname(CONFIG.ROUND_INTEL_PATH), `round_history_${CONFIG.ARENA_COIN}.json`);
+  // Uses INSTANCE_ID so each arena (5m/15m/1h/4h) has its own file — lets
+  // per-arena analysis work without inferring from trade counts.
+  const historyPath = path.join(path.dirname(CONFIG.ROUND_INTEL_PATH), `round_history_${CONFIG.ARENA_INSTANCE_ID}.json`);
   let history: any[] = [];
   try { history = JSON.parse(fs.readFileSync(historyPath, "utf-8")); } catch {}
-  history.push({ ...intel, timestamp: new Date().toISOString() });
-  // Keep last 20 rounds
-  if (history.length > 20) history = history.slice(-20);
+  history.push({
+    ...intel,
+    timestamp: new Date().toISOString(),
+    arenaInstanceId: CONFIG.ARENA_INSTANCE_ID,
+    coin: CONFIG.ARENA_COIN,
+    interval: CONFIG.ARENA_MARKET_INTERVAL,
+  });
+  // Keep last 100 rounds (~200KB). Was 20, which caused the breeder to
+  // never breed again: the marker said "20 rounds at last breed" and the
+  // file always had exactly 20, so new-rounds count was permanently 0.
+  if (history.length > 100) history = history.slice(-100);
   fs.writeFileSync(historyPath, JSON.stringify(history, null, 2));
+
+  // Flag graduation candidates AFTER history is updated. Read-only on
+  // live_engines.json; only writes new candidates to live_candidates.json
+  // for manual review. No auto-promote.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { flagGraduationCandidates } = require("./live/graduation");
+    flagGraduationCandidates(CONFIG.ARENA_COIN, roundId);
+  } catch (err) {
+    console.warn(`[arena] graduation hook error: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 // ── Main Loop ────────────────────────────────────────────────────────────────
@@ -377,8 +588,17 @@ async function main(): Promise<void> {
 ╚═══════════════════════════════════════════════════════╝
 `);
 
-  // Load engines
-  const engines = loadEngines();
+  // Determinism: seed referee + sim-pulse RNG if RNG_SEED is set. 0 keeps
+  // production non-determinism; non-zero replays exactly. Engines that use
+  // their own Math.random aren't affected.
+  if (CONFIG.RNG_SEED !== 0) {
+    seedRng(CONFIG.RNG_SEED);
+    console.log(`[arena] RNG seeded with ${CONFIG.RNG_SEED} — run is deterministic`);
+  }
+
+  // Load engines (mutable — surgical deploy can swap the roster between
+  // rounds via the reload flag, see maybeReloadEngines)
+  let engines = loadEngines();
   if (engines.length === 0) {
     console.error("[arena] No engines found. Add engines to src/engines/ or set ENGINES_DIR.");
     process.exit(1);
@@ -392,13 +612,18 @@ async function main(): Promise<void> {
     // Retry with backoff. We REQUIRE at least one 5M market for the configured coin —
     // never fall back to simulated pulse when running live (the whole point is real data).
     const maxAttempts = 10;
-    let pick: { title?: string; slug?: string; yesTokenId: string; noTokenId: string; liquidity: number } | null = null;
+    let pick: { title?: string; slug?: string; endDate?: string; yesTokenId: string; noTokenId: string; liquidity: number } | null = null;
     for (let attempt = 1; attempt <= maxAttempts && !pick; attempt++) {
-      // Each call is independent — one timeout shouldn't kill the others.
+      // Discovery strategy depends on ARENA_MARKET_INTERVAL:
+      // "5m" → slug-based 5M discovery (primary) + updown/crypto (fallback)
+      // "15m"/"1h"/"4h" → updown discovery with the specific interval tag
+      const interval = CONFIG.ARENA_MARKET_INTERVAL;
+      const is5m = interval === "5m";
+      const intervalTag = interval === "15m" ? "15M" : interval.toUpperCase();
       const [fiveMinR, updownR, cryptoR] = await Promise.allSettled([
-        discover5mMarkets({ tokens: [CONFIG.ARENA_COIN] }),
-        discoverUpDownMarkets({ intervals: ["1H", "4H"], limit: 5 }),
-        discoverCryptoMarkets({ limit: 5 }),
+        is5m ? discover5mMarkets({ tokens: [CONFIG.ARENA_COIN] }) : Promise.resolve([]),
+        discoverUpDownMarkets({ intervals: is5m ? ["1H", "4H"] : [intervalTag], limit: 10 }),
+        is5m ? discoverCryptoMarkets({ limit: 5 }) : Promise.resolve([]),
       ]);
       const fiveMin = fiveMinR.status === "fulfilled" ? fiveMinR.value : [];
       const updown = updownR.status === "fulfilled" ? updownR.value : [];
@@ -406,7 +631,19 @@ async function main(): Promise<void> {
       const failed = [fiveMinR, updownR, cryptoR].filter(r => r.status === "rejected") as PromiseRejectedResult[];
       for (const f of failed) console.warn(`[arena] discovery sub-call failed: ${f.reason?.message ?? f.reason}`);
 
-      const all = [...fiveMin, ...updown, ...crypto];
+      // CRITICAL: filter all results by ARENA_COIN before merging. Without
+      // this, SOL arena could pick a BTC market from the updown/crypto
+      // fallback when no SOL 5M markets are available, which causes the
+      // wrong subscription. Slug check matches the per-coin discovery
+      // output format: "{coin}-updown-5m-..." or "{coin}-up-down-...".
+      // 5M slugs: "btc-updown-5m-...", 1H slugs: "bitcoin-up-or-down-..."
+      const prefixes = COIN_SLUG_PREFIXES[CONFIG.ARENA_COIN] || [`${CONFIG.ARENA_COIN}-`];
+      const coinFilter = (m: { slug?: string }) =>
+        !!m.slug && prefixes.some(p => m.slug!.toLowerCase().startsWith(p));
+
+      const filteredUpdown = updown.filter(coinFilter);
+      const filteredCrypto = crypto.filter(coinFilter);
+      const all = [...fiveMin, ...filteredUpdown, ...filteredCrypto];
       all.sort((a, b) => {
         const a5m = a.slug?.includes("-5m-") ? 1 : 0;
         const b5m = b.slug?.includes("-5m-") ? 1 : 0;
@@ -431,60 +668,156 @@ async function main(): Promise<void> {
     CONFIG.PM_CONDITION_ID = pick.yesTokenId;
     currentActiveTokenId = pick.yesTokenId;
     currentActiveDownTokenId = pick.noTokenId;
+    // Set window times immediately so engines using getSecondsRemaining()
+    // work from the very first candle (not just after first rotation).
+    if (pick.endDate) {
+      currentWindowEnd = new Date(pick.endDate).getTime();
+    } else if (pick.slug) {
+      // Extract epoch from slug like "btc-updown-5m-1775964108"
+      const epochMatch = pick.slug.match(/(\d{10,})$/);
+      if (epochMatch) currentWindowEnd = parseInt(epochMatch[1]) * 1000 + 300_000;
+    }
+    currentWindowStart = currentWindowEnd - CONFIG.ARENA_INTERVAL_MS;
+    currentMarketSymbol = slugToBinanceSymbol(pick.slug ?? "");
     setPmSubscriptionTokens([pick.yesTokenId, pick.noTokenId]);
     console.log(`\n[arena] Auto-selected: "${pick.title}"`);
     console.log(`  UP token:   ${pick.yesTokenId.slice(0, 20)}...`);
-    console.log(`  DOWN token: ${pick.noTokenId.slice(0, 20)}...\n`);
+    console.log(`  DOWN token: ${pick.noTokenId.slice(0, 20)}...`);
+    console.log(`  Window:     ${new Date(currentWindowStart).toISOString()} → ${new Date(currentWindowEnd).toISOString()}\n`);
   }
 
   // Start data pulse
   if (CONFIG.DRY_RUN) {
     console.log("[arena] DRY_RUN — using simulated pulse");
     startSimulatedPulse({
-      startPrice: 0.50 + (Math.random() - 0.5) * 0.4,
+      startPrice: 0.50 + (random() - 0.5) * 0.4,
       volatility: 0.008,
       intervalMs: CONFIG.TICK_INTERVAL_MS,
     });
   } else {
     startPmChannel();
     startBinanceChannel();
-    startChainlinkPoller([CONFIG.ARENA_BINANCE_SYMBOL], 2000);
+    // Chainlink poller disabled: free-tier Polygon RPC (polygon-rpc.com)
+    // now requires an API key (403). The poller blocks the event loop for
+    // seconds per failed call, slowing ALL engine ticks. No winning engine
+    // (bred-4h85, stingo43-late-v1) uses Chainlink prices. Re-enable with
+    // a paid RPC if chainlink-based engines are ever needed again.
+    // startChainlinkPoller([CONFIG.ARENA_BINANCE_SYMBOL], 2000);
 
-    // For 5M markets: rotate subscription every 2 min as markets expire
+    // Rotate subscription as markets expire (interval-aware discovery)
     startMarketRotation(async () => {
-      const markets = await discover5mMarkets({ tokens: [CONFIG.ARENA_COIN] });
+      const is5m = CONFIG.ARENA_MARKET_INTERVAL === "5m";
+      let markets: Awaited<ReturnType<typeof discover5mMarkets>>;
+      if (is5m) {
+        markets = await discover5mMarkets({ tokens: [CONFIG.ARENA_COIN] });
+      } else {
+        const intervalTag = CONFIG.ARENA_MARKET_INTERVAL === "15m" ? "15M" : CONFIG.ARENA_MARKET_INTERVAL.toUpperCase();
+        markets = await discoverUpDownMarkets({ intervals: [intervalTag], limit: 10 });
+        const prefixes = COIN_SLUG_PREFIXES[CONFIG.ARENA_COIN] || [`${CONFIG.ARENA_COIN}-`];
+        markets = markets.filter(m => m.slug && prefixes.some(p => m.slug.toLowerCase().startsWith(p)));
+      }
       if (markets.length === 0) return null;
 
       // Pick the ACTIVE candle: soonest endDate that's still in the future
-      // (Not the latest — that's a future candle whose book is empty/stale)
       const now = Date.now();
       const active = markets
         .filter(m => new Date(m.endDate).getTime() > now)
         .sort((a, b) => new Date(a.endDate).getTime() - new Date(b.endDate).getTime());
       const picked = active[0] || markets[0];
 
+      // Capture the tokens we're rotating AWAY from for live cancellation
+      const expiredLiveTokens = new Set<string>();
+      if (currentActiveTokenId && currentActiveTokenId !== picked.yesTokenId) {
+        expiredLiveTokens.add(currentActiveTokenId);
+      }
+      if (currentActiveDownTokenId && currentActiveDownTokenId !== picked.noTokenId) {
+        expiredLiveTokens.add(currentActiveDownTokenId);
+      }
+
       // Clean up fee pool for rotated-out markets
       if (currentActiveTokenId) clearFeePoolForMarket(currentActiveTokenId);
       if (currentActiveDownTokenId) clearFeePoolForMarket(currentActiveDownTokenId);
+      // Expire GTC orders for the old candle's tokens
+      const activeTokens = new Set([picked.yesTokenId, picked.noTokenId]);
+      const expired = expireGtcOrders(activeTokens);
+      if (expired > 0) console.log(`[arena] Expired ${expired} GTC orders on candle rotation`);
 
       // Update to new market — old positions settle via settlement.ts ($1 or $0)
       currentActiveTokenId = picked.yesTokenId;
       currentActiveDownTokenId = picked.noTokenId;
-      const pickedSymbol = slugToBinanceSymbol(picked.slug);
-      const pickedWindowEnd = new Date(picked.endDate).getTime();
-      const pickedWindowStart = pickedWindowEnd - 300_000;
+      currentMarketSymbol = slugToBinanceSymbol(picked.slug);
+      currentWindowEnd = new Date(picked.endDate).getTime();
+      currentWindowStart = currentWindowEnd - CONFIG.ARENA_INTERVAL_MS;
+
+      // Notify live arena: cancel stale makers on expired tokens, arm
+      // fast-reconcile for approach-to-settlement of the new candle.
+      if (liveArenaHandle && expiredLiveTokens.size > 0) {
+        liveArenaHandle.onCandleRotate(expiredLiveTokens, currentWindowEnd).catch(err =>
+          console.warn(`[arena] live onCandleRotate error: ${err?.message ?? err}`)
+        );
+      }
       if (activeStates) {
         for (const [, state] of activeStates) {
           state.activeTokenId = picked.yesTokenId;
           state.activeDownTokenId = picked.noTokenId;
-          state.marketSymbol = pickedSymbol;
-          state.marketWindowEnd = pickedWindowEnd;
-          state.marketWindowStart = pickedWindowStart;
+          state.marketSymbol = currentMarketSymbol;
+          state.marketWindowEnd = currentWindowEnd;
+          state.marketWindowStart = currentWindowStart;
         }
       }
 
       return { yesTokenId: picked.yesTokenId, noTokenId: picked.noTokenId };
-    }, 120_000);
+    }, CONFIG.ARENA_MARKET_INTERVAL === "5m" ? 120_000
+       : CONFIG.ARENA_MARKET_INTERVAL === "15m" ? 300_000   // check every 5 min for 15M
+       : CONFIG.ARENA_MARKET_INTERVAL === "1h" ? 600_000    // check every 10 min for 1H
+       : 1_800_000);                                        // every 30 min for 4H
+  }
+
+  // ── Live Trading ───────────────────────────────────────────────────────
+  if (CONFIG.LIVE_ENABLED) {
+    try {
+      let submit: any;
+      let getOrder: any;
+      let cancelOrders: any = undefined;
+      if (CONFIG.LIVE_DRY_RUN) {
+        console.log("[arena] LIVE_DRY_RUN — using mock fills (no real CLOB)");
+        const adapter = buildDryRunAdapter();
+        submit = adapter.submit;
+        getOrder = adapter.getOrder;
+      } else {
+        const privateKey = process.env.PRIVATE_KEY;
+        const funder = process.env.FUNDER;
+        if (!privateKey || !funder) {
+          console.error("[arena] LIVE_ENABLED but PRIVATE_KEY or FUNDER not set. Disabling live.");
+          CONFIG.LIVE_ENABLED = false;
+        } else {
+          console.log("[arena] LIVE mode — initializing CLOB client...");
+          const { initClobClient } = require("./live/clobClient");
+          const { buildClobSubmitter, buildClobLookup, buildClobCanceller } = require("./live/clobSubmitter");
+          const client = await initClobClient();
+          submit = buildClobSubmitter({ client });
+          getOrder = buildClobLookup({ client });
+          cancelOrders = buildClobCanceller({ client });
+          console.log("[arena] LIVE mode — real CLOB orders enabled");
+        }
+      }
+      if (CONFIG.LIVE_ENABLED) {
+        liveArenaHandle = startLiveArena({
+          coin: CONFIG.ARENA_COIN as "btc" | "eth" | "sol" | "xrp",
+          arenaInstanceId: CONFIG.ARENA_INSTANCE_ID,
+          simBankrollUsd: CONFIG.STARTING_CASH,
+          submit,
+          getOrder,
+          cancelOrders,
+        });
+        const engineCount = liveArenaHandle.states.size;
+        console.log(`[arena] Live arena started: ${engineCount} graduated engine(s)\n`);
+      }
+    } catch (err: any) {
+      console.error("[arena] Live arena init failed:", err.message);
+      console.error("[arena] Continuing with sim-only mode");
+      liveArenaHandle = null;
+    }
   }
 
   // Wait for first tick
@@ -504,6 +837,12 @@ async function main(): Promise<void> {
       break;
     }
 
+    // Surgical engine-only deploy: check the reload flag at every round
+    // boundary and rebuild the roster if a new engine was just rsynced in.
+    // Position state lives in EngineState (per-round), not on engine
+    // instances, so rebuilding here is safe — no in-flight positions lost.
+    engines = maybeReloadEngines(engines);
+
     const roundId = `R${String(roundNum).padStart(4, "0")}-${Date.now()}`;
 
     try {
@@ -514,6 +853,17 @@ async function main(): Promise<void> {
         const r = result.results[i];
         const medal = i === 0 ? "👑" : i === 1 ? "🥈" : i === 2 ? "🥉" : "  ";
         console.log(`  ${medal} #${i + 1} ${r.engineId}: ${r.totalPnl >= 0 ? "+" : ""}$${r.totalPnl.toFixed(2)} (${r.tradeCount} trades, $${r.feePaid.toFixed(4)} fees)`);
+      }
+
+      // Live arena round-end snapshot
+      if (liveArenaHandle) {
+        const snap = liveArenaHandle.snapshot();
+        if (snap.engines.length > 0) {
+          console.log(`\n[live-arena] Round ${roundNum} live snapshot:`);
+          for (const e of snap.engines) {
+            console.log(`  ${e.engineId}: cash=$${e.cashBalance.toFixed(2)} positions=${e.positionCount} pending=${e.pendingCount} dailyLoss=$${e.dailyLossUsd.toFixed(2)}${e.paused ? " PAUSED" : ""}`);
+          }
+        }
       }
     } catch (err: any) {
       console.error(`[arena] Round ${roundNum} failed:`, err.message);
@@ -532,6 +882,10 @@ async function main(): Promise<void> {
 // ── Graceful shutdown ────────────────────────────────────────────────────────
 
 function gracefulShutdown(code = 0): void {
+  if (liveArenaHandle) {
+    console.log("[arena] Stopping live arena...");
+    liveArenaHandle.stop();
+  }
   flushLedger(); // commit buffered trades before closing
   shutdownPulse();
   closeDb();
@@ -542,8 +896,13 @@ process.on("SIGINT", () => { console.log("\n[arena] SIGINT received"); gracefulS
 process.on("SIGTERM", () => { console.log("\n[arena] SIGTERM received"); gracefulShutdown(); });
 
 // ── Entry Point ──────────────────────────────────────────────────────────────
+// Guard against accidental auto-start when arena.ts is imported by something
+// other than the CLI (e.g. unit tests importing reloadFlagPath / maybeReloadEngines).
+// Only run main() when this module IS the entry point.
 
-main().catch(err => {
-  console.error("[arena] Fatal error:", err);
-  gracefulShutdown(1);
-});
+if (require.main === module) {
+  main().catch(err => {
+    console.error("[arena] Fatal error:", err);
+    gracefulShutdown(1);
+  });
+}

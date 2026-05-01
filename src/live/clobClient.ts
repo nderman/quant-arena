@@ -1,6 +1,11 @@
-// src/services/clobConnect.ts
-// Builds and verifies a Polymarket CLOB client from environment variables.
-// Provides sig-type fallback logic so all entry points behave consistently.
+// src/live/clobClient.ts
+// Builds and verifies a Polymarket CLOB v2 client from environment variables.
+// Migrated from @polymarket/clob-client (v1 protocol) to
+// @polymarket/clob-client-v2 (v2 protocol) on 2026-04-28 for the
+// Polymarket exchange upgrade. Constructor changed from positional args
+// to options object; chainId renamed to chain; funder renamed to
+// funderAddress. Method surface (deriveApiKey, createOrDeriveApiKey,
+// getBalanceAllowance, getOpenOrders, getNegRisk) preserved.
 
 import { Wallet } from "@ethersproject/wallet";
 import {
@@ -8,13 +13,17 @@ import {
   type BalanceAllowanceParams,
   type ClobClient as ClobClientType,
   ClobClient,
-} from "@polymarket/clob-client";
+} from "@polymarket/clob-client-v2";
 
-const CLOB_HOST = "https://clob.polymarket.com";
-const CHAIN_ID = 137;
+// Route CLOB through AMS proxy to avoid Frankfurt geoblock.
+// PM's CLOB API blocks DE (FRA1) but the WS data feed works there.
+// AMS3 can trade but PM WS delivers no data from there.
+// Solution: arena runs on FRA1 (WS works), CLOB calls proxy through AMS.
+const CLOB_HOST = process.env.CLOB_PROXY_HOST || "https://clob.polymarket.com";
+const CHAIN = 137;
 
 /**
- * Initialises a fully authenticated ClobClient from environment variables.
+ * Initialises a fully authenticated ClobClient (v2) from environment variables.
  * Requires PRIVATE_KEY and FUNDER to be set.
  *
  * If CLOB_API_KEY and CLOB_API_SECRET are set in .env, uses them directly
@@ -39,7 +48,14 @@ export async function initClobClient(): Promise<ClobClientType> {
   const cachedPassphrase = process.env.CLOB_API_PASSPHRASE;
   if (cachedKey && cachedSecret) {
     const creds = { key: cachedKey, secret: cachedSecret, passphrase: cachedPassphrase ?? "" };
-    const client = new ClobClient(CLOB_HOST, CHAIN_ID, signer, creds, signatureType, funder);
+    const client = new ClobClient({
+      host: CLOB_HOST,
+      chain: CHAIN,
+      signer,
+      creds,
+      signatureType,
+      funderAddress: funder,
+    });
     // Verify creds work with a lightweight call
     try {
       await client.getOpenOrders({ market: "0" });
@@ -50,7 +66,14 @@ export async function initClobClient(): Promise<ClobClientType> {
     }
   }
 
-  const makeClient = (sigType: number) => new ClobClient(CLOB_HOST, CHAIN_ID, signer, undefined, sigType, funder);
+  const makeClient = (sigType: number) =>
+    new ClobClient({
+      host: CLOB_HOST,
+      chain: CHAIN,
+      signer,
+      signatureType: sigType,
+      funderAddress: funder,
+    });
 
   const MAX_AUTH_RETRIES = 6;
   const AUTH_RETRY_BASE_MS = 30_000; // 30s → 60s → 120s → 240s → 480s → 960s (~32 min total)
@@ -95,10 +118,16 @@ export async function initClobClient(): Promise<ClobClientType> {
           `CLOB_API_KEY=${creds.key}\nCLOB_API_SECRET=${creds.secret}` +
           (creds.passphrase ? `\nCLOB_API_PASSPHRASE=${creds.passphrase}` : ""),
       );
-      return new ClobClient(CLOB_HOST, CHAIN_ID, signer, creds, finalSigType, funder);
+      return new ClobClient({
+        host: CLOB_HOST,
+        chain: CHAIN,
+        signer,
+        creds,
+        signatureType: finalSigType,
+        funderAddress: funder,
+      });
     }
 
-    // deriveApiKey returned an HTTP response object instead of credentials — rate limited
     console.warn(
       `[clob] Auth returned no key/secret (likely rate limited) — attempt ${attempt + 1}/${MAX_AUTH_RETRIES}`,
     );
@@ -108,8 +137,11 @@ export async function initClobClient(): Promise<ClobClientType> {
 }
 
 /**
- * Fetches the current USDC (collateral) balance for the authenticated signer.
- * Returns the balance in whole USDC (divides raw micro-USDC by 1e6).
+ * Fetches the current pUSD (collateral) balance for the authenticated signer.
+ * Returns the balance in whole dollars (divides raw 1e6-scale by 1e6).
+ *
+ * Note: as of Apr 28 2026 the collateral asset is pUSD (ERC-20 backed 1:1
+ * by USDC), migrated from USDC.e during the v2 exchange upgrade.
  */
 export async function fetchUsdcBalance(client: ClobClientType): Promise<number> {
   const MAX_RETRIES = 3;
@@ -120,7 +152,6 @@ export async function fetchUsdcBalance(client: ClobClientType): Promise<number> 
       } as BalanceAllowanceParams);
       const bal = Number(resp?.balance ?? 0) / 1e6;
       if (bal > 0 || attempt === MAX_RETRIES) return bal;
-      // $0 balance on first attempts likely means a transient CLOB timeout
       console.log(`[clob] Balance returned $0, retrying (${attempt}/${MAX_RETRIES})…`);
     } catch (err) {
       if (attempt === MAX_RETRIES) throw err;

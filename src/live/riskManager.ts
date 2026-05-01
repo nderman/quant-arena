@@ -16,11 +16,13 @@ import type { EngineAction } from "../types";
 import type { LiveEngineState } from "./liveState";
 
 export const RISK_CONFIG = {
-  MAX_POSITION_PCT: 0.05,        // 5% of bankroll per order
+  MAX_POSITION_PCT: 0.15,        // 15% of bankroll per order (was 0.60 — killed $7 account on one $6.50 trade Apr 21)
+  MAX_CANDLE_EXPOSURE_PCT: 0.45, // 45% of bankroll total across all in-flight + filled positions in a candle
   MAX_DAILY_LOSS_USD: 50,        // pause for the day if hit
   MAX_OPEN_POSITIONS: 5,         // limit concurrent exposure
   MAX_PENDING_ORDERS: 10,        // unfilled orders cap
-  MIN_ORDER_USD: 1,              // PM minimum
+  MIN_ORDER_USD: 0.5,            // PM does not actually enforce $1 notional — share count is the real protocol min (see MIN_ORDER_SHARES). Lowered Apr 25: chop-fader entries at 18-22¢ × 5 shares = $0.90-$1.10 were rejected pre-bump on small bankrolls.
+  MIN_ORDER_SHARES: 5,           // PM maker minimum — resting orders < 5 shares get "Size (N) lower than the minimum: 5". Takers crossing the book bypass this.
   HALT_FLAG_PATH: path.join(DATA_DIR, "live_halt.flag"),
   HALT_RECHECK_MS: 5_000,        // re-stat the halt flag at most this often
 };
@@ -74,20 +76,11 @@ export function canTrade(action: EngineAction, state: LiveEngineState): RiskChec
     return { ok: false, reason: `${state.pendingOrders.size} pending orders >= ${RISK_CONFIG.MAX_PENDING_ORDERS}` };
   }
 
-  // Order size: must be ≥ MIN_ORDER_USD and ≤ MAX_POSITION_PCT of bankroll
-  const orderUsd = action.size * action.price;
-  if (orderUsd < RISK_CONFIG.MIN_ORDER_USD) {
-    return { ok: false, reason: `order $${orderUsd.toFixed(2)} below min $${RISK_CONFIG.MIN_ORDER_USD}` };
-  }
-  const maxOrderUsd = state.bankrollUsd * RISK_CONFIG.MAX_POSITION_PCT;
-  if (orderUsd > maxOrderUsd) {
-    return { ok: false, reason: `order $${orderUsd.toFixed(2)} exceeds max $${maxOrderUsd.toFixed(2)} (${RISK_CONFIG.MAX_POSITION_PCT * 100}% of $${state.bankrollUsd})` };
-  }
-
-  // BUY: must have cash
-  if (action.side === "BUY" && orderUsd > state.cashBalance) {
-    return { ok: false, reason: `insufficient cash: need $${orderUsd.toFixed(2)}, have $${state.cashBalance.toFixed(2)}` };
-  }
+  // Order size checks REMOVED from pre-sizing canTrade (Apr 21):
+  // This function runs on the SIM-SCALE action before liveSizing scales
+  // it down. Comparing sim costs ($15-50) against live bankroll caps ($7-15)
+  // blocked every stingo43-late order. sizeForLive handles all sizing
+  // constraints post-scale. Cash check also deferred to post-sizing.
 
   // SELL: must have shares
   if (action.side === "SELL") {
