@@ -67,7 +67,7 @@ RECENT_N = 10               # use last N firing rounds for sharpe
 SAFE_LOSS_USD = 20.0        # worst round must be >= -this (40% of $50 sim bankroll, matches crossArenaAnalysis SAFE classification)
 COOLDOWN_HOURS = 6          # how long swapped-out engine waits before re-entry
 SWAP_THRESHOLD = 0.30       # only swap if proposed score is > current * (1 + this)
-INCUMBENT_BONUS = 0.20      # +20% to score of currently-live (engine, arena) pairs
+INCUMBENT_BONUS = 0.10      # was 0.20 — less sticky so winners can swap in faster
 ROSTER_SIZE = 5             # top K
 LIVE_BANKROLL_USD = 25.0    # used for cash buffer check
 MIN_CASH_PER_ENGINE = 5.0   # skip add if cash < this * roster size
@@ -75,6 +75,8 @@ SHRINKAGE_K = 5             # Bayesian-style shrinkage: sharpe *= n/(n+K)
 LIVE_PNL_LOOKBACK_HOURS = 6 # window for live-PnL drift feedback
 LIVE_PNL_LOSS_PENALTY = 0.5 # multiplier when an engine has bled live in lookback
 LIVE_PNL_LOSS_THRESHOLD = -2.0  # USD — engine penalized if it's lost more than this
+MIN_PENALTY_FLOOR = 0.5     # cap compound penalty; TREND(0.5) × LP(0.5) = 0.25 was killing chop-fader (proven winner)
+ALLOW_MULTIPLE_PER_ARENA = True  # user prefers performance over arena diversification
 
 # Regime fit multipliers
 REGIME_POSITIVE_MULT = 1.5
@@ -455,7 +457,14 @@ def candidates(
             live_penalty = 1.0
             if not incumbent and coin_drift < LIVE_PNL_LOSS_THRESHOLD:
                 live_penalty = LIVE_PNL_LOSS_PENALTY
-            score = sharpe * mult * inc_bonus * live_penalty
+            # Compound penalty floor: cap multiplicative penalties so a proven
+            # winner with both regime + live-PnL penalties (0.5×0.5=0.25)
+            # doesn't drop below 0.5×. Only applies on the multiplicative
+            # penalty side, not the incumbent bonus.
+            penalty_product = mult * live_penalty
+            if penalty_product < MIN_PENALTY_FLOOR:
+                penalty_product = MIN_PENALTY_FLOOR
+            score = sharpe * penalty_product * inc_bonus
             out.append({
                 "engine_id": engine_id,
                 "arena": arena,
@@ -476,24 +485,27 @@ def candidates(
 
 
 def construct_roster(cands: List[dict], k: int = ROSTER_SIZE) -> List[dict]:
-    """Pick top K with one-engine-per-arena and coin diversification preference."""
+    """Pick top K by score. No arena diversification (multiple engines per
+    arena allowed). Coin cap remains to bound concentration risk.
+
+    The same engine_id can't appear twice (would pyramid). Different engines
+    on the same arena is fine — they have independent state.
+    """
     chosen: List[dict] = []
-    used_arenas: set = set()
     used_engines: set = set()
     coin_counts: Dict[str, int] = defaultdict(int)
-    max_per_coin = 2  # don't overload one coin
+    max_per_coin = 3  # bumped from 2 since arena constraint dropped
 
     for c in cands:
         if len(chosen) >= k:
             break
-        if c["arena"] in used_arenas:
-            continue
         if c["engine_id"] in used_engines:
+            continue
+        if not ALLOW_MULTIPLE_PER_ARENA and any(o["arena"] == c["arena"] for o in chosen):
             continue
         if coin_counts[c["coin"]] >= max_per_coin:
             continue
         chosen.append(c)
-        used_arenas.add(c["arena"])
         used_engines.add(c["engine_id"])
         coin_counts[c["coin"]] += 1
     return chosen
