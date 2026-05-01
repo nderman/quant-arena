@@ -10,7 +10,17 @@ Evolutionary arena for Polymarket 5M crypto binary markets. AI-bred engines comp
 - `npm run arena:live` — live PM + Binance data (auto-discovers markets)
 - `npm run arena:1round:dry` — quick test (1 min round)
 - `npm run test:unit` — 255 tests, must all pass
-- `python3 scripts/auto_rotate.py` — dry-run engine roster selection (Phase 1a). Add `--commit` to actually swap.
+- `python3 scripts/auto_rotate.py` — dry-run engine roster selection (prints ranked candidates + diff). Add `--commit` to actually swap.
+
+## Auto-Rotation
+Hourly cron on VPS at :05 runs `auto_rotate.py --commit`. Picks top SAFE engines by `recent_sharpe × regime_fit × incumbent_bonus × live_pnl_penalty` (compound penalty floored at 0.5×). Writes `data/live_engines.json`; `liveArena.ts` fs.watch picks up the new roster within 30s, no PM2 restart.
+
+Manual override paths:
+- Edit `data/live_engines.json` directly — file-watcher reloads, cron respects via auto-detected manual-cull cooldown.
+- Touch `data/auto_rotation.disabled` — cron exits early.
+- See `data/auto_rotation.log` for hourly decisions, `data/auto_rotation_cooldown.json` for active cooldowns.
+
+`bankrollUsd` per engine is the **sizing basis** (scales sim positions to live), NOT a wallet allocation. All engines share the single PM funder wallet. Bump per-engine `bankrollUsd` when the wallet tops up.
 - `npm run build` — TypeScript compile
 - `npm run discover` — list active crypto markets
 - `npm run signals` — test all signal sources
