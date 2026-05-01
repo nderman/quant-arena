@@ -124,7 +124,10 @@ def atomic_write_json(path: Path, data: Any) -> None:
 
 
 def save_cooldown(cd: Dict[str, float]) -> None:
-    atomic_write_json(COOLDOWN_PATH, cd)
+    """Prune expired entries before persisting — file would grow unbounded otherwise."""
+    now = time.time()
+    pruned = {k: v for k, v in cd.items() if v > now}
+    atomic_write_json(COOLDOWN_PATH, pruned)
 
 
 def fetch_live_pnl_by_coin(hours: float = LIVE_PNL_LOOKBACK_HOURS) -> Dict[str, float]:
@@ -154,7 +157,10 @@ def fetch_live_pnl_by_coin(hours: float = LIVE_PNL_LOOKBACK_HOURS) -> Dict[str, 
         coin = "ETH" if "Ethereum" in title else ("SOL" if "Solana" in title else ("BTC" if "Bitcoin" in title else None))
         if not coin:
             continue
-        usd = a.get("usdcSize", 0) or 0
+        try:
+            usd = float(a.get("usdcSize", 0) or 0)  # API may return strings
+        except (ValueError, TypeError):
+            continue
         typ = (a.get("type", "") or "").upper()
         if typ == "TRADE" and a.get("side") == "BUY":
             out[coin] -= usd
@@ -650,11 +656,16 @@ def main() -> int:
         save_last_seen_roster(current_set)  # track current state for next run's manual-cull detection
         return 0
 
-    # Backup + atomic write
+    # Backup + atomic write. Keep last 10 backups to avoid unbounded growth.
     if LIVE_ENGINES_PATH.exists():
         bak = LIVE_ENGINES_PATH.with_suffix(f".json.bak.auto_{int(time.time())}")
         bak.write_text(LIVE_ENGINES_PATH.read_text())
         log(f"backup: {bak}")
+        # Prune oldest auto-backups beyond the last 10
+        backups = sorted(LIVE_ENGINES_PATH.parent.glob("live_engines.json.bak.auto_*"))
+        for old in backups[:-10]:
+            try: old.unlink()
+            except Exception: pass
     atomic_write_json(LIVE_ENGINES_PATH, proposed)
     log(f"wrote new roster to {LIVE_ENGINES_PATH} (atomic)")
 

@@ -248,8 +248,10 @@ export function startLiveArena(cfg: LiveArenaConfig): LiveArenaHandle {
         }
       }
     } catch (err) {
-      // File may not exist; ignore quietly
-      if (err instanceof Error && !err.message.includes("ENOENT")) {
+      // File may not exist; ignore ENOENT quietly. Use the exception code
+      // rather than .message.includes which is fragile across Node versions.
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== "ENOENT" && err instanceof Error) {
         console.warn(`[live-arena:${instanceId ?? cfg.coin}] roster watcher error: ${err.message}`);
       }
     } finally {
