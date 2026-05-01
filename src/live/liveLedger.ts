@@ -23,6 +23,10 @@ import { DATA_DIR } from "../historyStore";
 
 const LEDGER_PATH = path.join(DATA_DIR, "live_trades.jsonl");
 
+// Hoist mkdirSync to module init — was running on every appendFileSync.
+// At ~50 fills/day the savings are negligible but the syscall churn was real.
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch { /* exists */ }
+
 export interface FillEvent {
   ts: number;                         // unix ms
   type: "FILL";
@@ -56,11 +60,12 @@ export interface SettleEvent {
 
 function append(line: object): void {
   try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
     fs.appendFileSync(LEDGER_PATH, JSON.stringify(line) + "\n");
   } catch (err) {
-    // Never let ledger I/O bring down a trade — log and move on
-    console.warn(`[live-ledger] write failed: ${err instanceof Error ? err.message : String(err)}`);
+    // Never let ledger I/O bring down a trade — but log loudly: this is the
+    // audit trail. Lost rows = lost ground truth. Use console.error so it
+    // surfaces in PM2 error logs, not just stdout.
+    console.error(`[live-ledger] write FAILED — audit row LOST: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 

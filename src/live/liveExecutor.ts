@@ -162,8 +162,12 @@ async function submitAndRecord(
   if (submitResult.filledSize >= sizedAction.size) {
     applyFill(state, sizedAction, submitResult, positionSide);
     state.pendingOrders.delete(submitResult.clientOrderId);
-    // Ledger emission — only on confirmed fills, not pending submissions
-    if (coin && arenaInstanceId) {
+    // Ledger emission — only on confirmed fills, not pending submissions.
+    // If context is missing, audit rows would be silently lost — warn loudly
+    // so we notice (every wire-point should pass coin + arenaInstanceId).
+    if (!coin || !arenaInstanceId) {
+      console.warn(`[live-ledger] missing context for ${engineId} fill — no audit row emitted (coin=${coin}, arena=${arenaInstanceId})`);
+    } else {
       recordFill({
         engineId,
         coin,
