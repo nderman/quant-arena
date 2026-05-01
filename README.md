@@ -1,8 +1,10 @@
 # Quant Farm — Evolutionary Arena for Polymarket
 
-A multi-coin TypeScript arena where AI-bred trading engines compete on **live Polymarket 5-minute crypto binary markets** (BTC / ETH / SOL). A high-fidelity referee simulates dual orderbooks, the 2026 quartic fee model, latency, toxic flow, fill decay, oracle noise, and on-chain merge latency.
+A multi-coin TypeScript arena where AI-bred trading engines compete on **live Polymarket crypto binary markets** (BTC / ETH / SOL across 5m / 15m / 1h / 4h candles). A high-fidelity referee simulates dual orderbooks, the 2026 quartic fee model, latency, toxic flow, fill decay, oracle noise, and on-chain merge latency.
 
-The goal: evolve engines that can survive the structural costs of a real prediction market and graduate to live execution with real capital.
+**The full lifecycle:** signals → sim arenas → AI breeder evolves new engines → cross-arena leaderboard → auto-rotation cron picks the SAFE+regime-fit top 5 → real CLOB execution against pUSD wallet → live ledger records every fill+settle → feedback loop scores live PnL drift back into the rotation algorithm.
+
+The goal: evolve engines that can survive the structural costs of a real prediction market and graduate to live execution with real capital — autonomously.
 
 ---
 
@@ -78,6 +80,109 @@ flowchart TD
 
 ---
 
+## Sim → Live Pipeline
+
+How an engine goes from "lives in `src/engines/` and gets simulated" to "fires real orders against the PM CLOB with real money". Fully autonomous since May 2026.
+
+```mermaid
+flowchart LR
+  subgraph Sim["Sim Arena (per coin × interval)"]
+    Engines[["~50 engines<br/>(hand-built + bred)"]]
+    Ref["referee<br/>fills + fees + toxic"]
+    Hist["round_history_*.json<br/>per-arena"]
+  end
+
+  subgraph Score["scoring (auto_rotate.py, hourly cron)"]
+    Sharpe["recent_sharpe<br/>last 10 rounds<br/>×n/(n+5) shrinkage"]
+    SAFE{"SAFE filter:<br/>worst > -$20<br/>n ≥ 8 rounds"}
+    Regime["regime_fit_mult<br/>×1.5 / ×0.5 / ×1.0<br/>(SPIKE/QUIET/TREND/CHOP)"]
+    LivePnL["live_pnl_penalty<br/>×0.5 if coin bled<br/>last 6h"]
+    Cooldown["6h cooldown<br/>(swapped + manual culls)"]
+    Score["score = sharpe<br/>× regime × livepnl<br/>× incumbent_bonus"]
+  end
+
+  subgraph LiveExec["Live Arena (in same PM2 process)"]
+    Roster[("data/<br/>live_engines.json<br/>(top 5)")]
+    Watcher["fs.watch (30s)<br/>hot-reload on change"]
+    Rehydrate["rehydratePositionsFromLedger<br/>(restores state on PM2 restart)"]
+    Exec["liveExecutor<br/>+ liveSizing"]
+    Submit["clobSubmitter<br/>(@polymarket/clob-client-v2)"]
+    Reconcile["liveReconcile<br/>(5s poll, 1s last 30s)"]
+    Settle["liveSettlement<br/>(Gamma poll, 30s)"]
+  end
+
+  subgraph Ledger["Live Ledger (data/live_trades.jsonl)"]
+    Fill["FILL rows<br/>{engineId, slug, side,<br/>size, fillPrice, cost}"]
+    SettleRow["SETTLE rows<br/>{won, payout, pnl,<br/>costBasis}"]
+    Sync["scripts/syncManualTrades.py<br/>(10min cron, catches<br/>manual UI trades)"]
+  end
+
+  PM[/"Polymarket CLOB v2<br/>+ pUSD wallet"/]
+
+  Hist --> Sharpe
+  Sharpe --> SAFE
+  SAFE --> Regime
+  Regime --> LivePnL
+  LivePnL --> Score
+  Cooldown -. "blocks" .-> Score
+
+  Score -- "top 5, atomic write" --> Roster
+  Roster -- "mtime change" --> Watcher
+  Watcher -- "HOT-ADD/REMOVE/RESUME" --> Exec
+  Engines -- "EngineAction" --> Exec
+  Exec -- "sized order" --> Submit
+  Submit --> PM
+  PM -- "fill" --> Reconcile
+  Reconcile -- "FILL" --> Fill
+  Exec -- "FILL (instant)" --> Fill
+  PM -- "candle resolves" --> Settle
+  Settle --> SettleRow
+
+  Sync -. "catches gaps" .-> Fill
+  PM -. "Activity API" .-> Sync
+
+  Fill -- "rehydrate on boot" --> Rehydrate
+  SettleRow -- "rehydrate on boot" --> Rehydrate
+  Rehydrate --> Exec
+
+  Fill -- "fetch_live_pnl_by_coin" --> LivePnL
+  SettleRow -- "fetch_live_pnl_by_coin" --> LivePnL
+```
+
+### How the auto-rotation cron decides each hour
+
+1. **Read sim history** for all (engine, arena) pairs from `data/round_history_*.json`
+2. **Detect current regime** via direct Binance API (5m vs 1h vs 1d realized vol → SPIKE/QUIET/TREND/CHOP)
+3. **Detect live PnL drift per coin** via Polymarket Activity API (last 6h cash flow per ETH/SOL/BTC)
+4. **Score every candidate**: shrunken Sharpe × regime fit × incumbent bonus × live-PnL penalty
+5. **Hard SAFE filter** (worst round ≥ -$20, ≥8 firing rounds) + 6h cooldown
+6. **Construct roster** (top K by score, no engine repeated, max 3 per coin)
+7. **Compare aggregate score** vs current — only swap if proposed > current × 1.30
+8. **Atomic write** `data/live_engines.json` → liveArena's `fs.watch` picks it up within 30s
+
+The threshold prevents thrashing. The cooldown prevents re-adding what was just culled (manual or automatic). The compound-penalty floor (0.5×) prevents two simultaneous penalties from killing a proven winner.
+
+### Live state persistence (closes the chronic double-buy bug)
+
+The Apr 30 / May 1 lesson: PM2 restart wipes `LiveEngineState.positions` (in-memory only). Engine boots, sees no position, re-fires on the same candle → double-buy. Cost us ~$10 across three incidents.
+
+**Fix:** `data/live_trades.jsonl` is a persistent append-only log of every FILL and SETTLE event tagged with `engineId` + `arenaInstanceId`. On `liveArena` startup, `rehydratePositionsFromLedger` replays unsettled FILLs to restore each engine's positions Map and adjusts cashBalance for the locked capital. Engine first-tick correctly sees its open position and `hasPendingOrder()` blocks the duplicate fire.
+
+The ledger has three write paths:
+- **Forward emission** (real-time): `liveExecutor.applyFill` and `liveReconcile` and `liveSettlement` call `recordFill` / `recordSettle`. Untagged `_source`.
+- **Historical backfill** (one-shot): `scripts/backfillLiveLedger.py` reconstructs from Polymarket Activity API for periods before forward emission existed. Tagged `_source: "backfill"`.
+- **Continuous sync** (10-min cron): `scripts/syncManualTrades.py` diffs Activity API against ledger and appends anything missing. Catches manual UI trades + emit gaps. Tagged `_source: "sync"`. Dedup uses `(slug, side, size, price)` fingerprint since forward `clientOrderId` ≠ Activity API `transactionHash`.
+
+### Per-engine live PnL on demand
+
+```bash
+python3 scripts/livePnLByEngine.py --since 24h
+```
+
+Joins FILL → SETTLE rows by `(engineId, arenaInstanceId, tokenId)` and prints win rate + realized PnL + open exposure per engine. Ground truth — what made money, what didn't.
+
+---
+
 ## Referee / Simulator
 
 What happens to a single `EngineAction` between submission and the ledger.
@@ -129,7 +234,7 @@ flowchart TD
 ```bash
 npm install
 npm run build       # tsc compile
-npm run test:unit   # 49 tests — must all pass before deploy
+npm run test:unit   # 255 tests — must all pass before deploy
 ```
 
 ### Run a single arena locally
@@ -140,17 +245,20 @@ ARENA_COIN=btc npm run arena:live     # live PM + Binance + Chainlink
 npm run arena:1round:dry              # quick 1-min round for testing
 ```
 
-### Production (multi-coin via PM2)
+### Production (multi-coin × multi-interval via PM2)
 
-The shipped `ecosystem.config.js` runs **7 processes**:
+The shipped `ecosystem.config.js` runs **16 processes** — one arena per (coin × candle interval) plus shared services:
 
 ```
-quant-arena-btc      quant-breeder-btc
-quant-arena-eth      quant-breeder-eth     quant-telegram
-quant-arena-sol      quant-breeder-sol
+quant-arena-btc       quant-arena-btc-15m  quant-arena-btc-1h  quant-arena-btc-4h
+quant-arena-eth       quant-arena-eth-15m  quant-arena-eth-1h  quant-arena-eth-4h
+quant-arena-sol       quant-arena-sol-15m  quant-arena-sol-1h  quant-arena-sol-4h
+quant-breeder-btc     quant-breeder-eth    quant-breeder-sol   quant-telegram
 ```
 
-Each arena auto-discovers active 5M markets for its coin. Each breeder evolves engines using only that coin's history. Telegram is shared.
+Each arena auto-discovers active markets for its (coin, interval) and runs the full sim engine roster against them. The same engines compete on different cadences — a 5m strategy can be tested simultaneously against 4h candles.
+
+Each breeder evolves engines using its coin's history across all intervals. Telegram is shared. Auto-rotation cron picks live engines from the cross-arena leaderboard.
 
 ```bash
 pm2 start ecosystem.config.js
@@ -161,10 +269,31 @@ pm2 logs quant-breeder-btc
 ### Deploy to VPS
 
 ```bash
-bash scripts/deploy.sh
+bash scripts/deploy.sh                # full: rsync + pm2 restart (kills in-flight rounds)
+bash scripts/deploy-engines.sh        # surgical: engines/ only, no PM2 restart
+bash scripts/deploy-engines.sh btc    # only one coin
 ```
 
-rsync to `165.22.29.245`, rebuild, `pm2 restart`. Excludes `data/`, `node_modules`, `.git`, `.env`, and `BredEngine_*` (preserved on VPS).
+`deploy-engines.sh` touches a per-arena-instance reload flag that `arena.ts` picks up at the next round boundary, swapping the engine roster without disrupting the round. Use this for hand-built engine adds/edits/deletes. Use full `deploy.sh` for `arena.ts` / `referee.ts` / `pulse.ts` changes.
+
+---
+
+## Signals
+
+External free data feeds available to engines via `SignalSnapshot`. Wire access in `BaseEngine` so any engine can call them.
+
+| Signal | Source | Refresh | Notes |
+|---|---|---|---|
+| **Fear & Greed** | alternative.me | 1h cache | 0-100 (0 = extreme fear, 100 = extreme greed) |
+| **Funding rate** | Binance perp | 1h cache | Direction-coded (long-pays / short-pays / neutral) |
+| **DVOL (BTC)** | Deribit | 1h cache | Annualized BTC implied vol |
+| **Realized vol** | Binance klines | per call | 5m / 1h / 1d annualized — input to regime classifier |
+| **Book imbalance** | PM L2 (live) | per tick | Engine-side helper `bookImbalance(tokenId, depth)` |
+| **Binance momentum** | trackBinance helper | per tick | Cumulative bps over rolling lookback |
+
+Engines that fire on multiple signals stacked tend to outperform single-signal ones. The breeder is prompted with the full signal catalog so newly-bred engines compose them.
+
+`npm run signals` prints the current values for all signals (one-shot, useful for live debugging).
 
 ---
 
@@ -349,32 +478,54 @@ See `src/config.ts` for the full list.
 ```
 quant-farm/
 ├── src/
-│   ├── arena.ts                 # main loop, per-coin
+│   ├── arena.ts                 # main sim+live loop, per (coin × interval)
 │   ├── referee.ts               # fee model, fills, toxic flow, merge
 │   ├── pulse.ts                 # WS feeds + simulated pulse
-│   ├── settlement.ts            # Gamma poller + SETTLE rows
+│   ├── settlement.ts            # Gamma poller + SETTLE rows (sim)
 │   ├── breeder.ts               # Gemini analysis + Haiku codegen
 │   ├── discovery.ts             # Gamma API market discovery
-│   ├── ledger.ts                # SQLite trade ledger
+│   ├── ledger.ts                # SQLite trade ledger (sim)
 │   ├── historyStore.ts          # shared round history utilities
-│   ├── signals.ts               # fear/greed, funding, DVOL, vol
+│   ├── signals.ts               # fear/greed, funding, DVOL, realized vol
 │   ├── telegram.ts              # phone monitoring bot
-│   ├── live/                    # live execution scaffolding (Phase 0+)
-│   │   ├── clobClient.ts
-│   │   ├── liveState.ts
-│   │   ├── riskManager.ts
-│   │   ├── graduation.ts
-│   │   └── merger.ts
+│   ├── live/                    # LIVE execution stack
+│   │   ├── liveArena.ts         # orchestrator: loads roster, hot-reloads, rehydrates
+│   │   ├── liveExecutor.ts      # bridge: sim action → CLOB order
+│   │   ├── liveSizing.ts        # bankroll-aware position sizing
+│   │   ├── liveState.ts         # per-engine LiveEngineState
+│   │   ├── liveReconcile.ts     # poll CLOB for async fills
+│   │   ├── liveSettlement.ts    # poll Gamma for closed markets
+│   │   ├── liveLedger.ts        # APPEND-ONLY data/live_trades.jsonl
+│   │   ├── clobClient.ts        # @polymarket/clob-client-v2 wrapper
+│   │   ├── clobSubmitter.ts     # createAndPostOrder + timeout reconcile
+│   │   ├── riskManager.ts       # kill switch, daily loss cap
+│   │   ├── graduation.ts        # candidate scoring → live_engines.json
+│   │   ├── merger.ts            # MERGE flow on real PM
+│   │   └── dryRunAdapter.ts     # mock submitter for tests
 │   ├── engines/
 │   │   ├── BaseEngine.ts        # AbstractEngine + helpers
-│   │   ├── *.ts                 # 9 hand-built strategies
+│   │   ├── *.ts                 # ~25 hand-built strategies
 │   │   └── BredEngine_*.ts      # AI-generated, preserved on VPS
-│   └── tests/
-├── data/                        # per-coin: ledger, intel, history, breed marker
-├── docs/
-│   ├── LIVE_BUILD_PLAN.md
-│   └── LIVE_EXECUTION.md
-├── scripts/deploy.sh
-├── ecosystem.config.js          # PM2 process definitions
+│   └── tests/                   # 255 unit tests
+├── data/                        # per (coin × interval): ledger, intel, history
+│   ├── ledger_<arena>.db        # sim trade SQLite
+│   ├── round_history_<arena>.json
+│   ├── live_engines.json        # current live roster (top 5 from auto_rotate)
+│   ├── live_trades.jsonl        # FILL + SETTLE log (forward + backfill + sync)
+│   ├── auto_rotation.log        # hourly cron decisions
+│   ├── auto_rotation_cooldown.json
+│   ├── auto_rotation_last_seen.json   # for manual-cull detection
+│   └── last_signals.json        # cached realized vol for cron regime
+├── scripts/
+│   ├── auto_rotate.py           # hourly live roster picker (cron)
+│   ├── syncManualTrades.py      # 10min cron, Activity API → ledger
+│   ├── backfillLiveLedger.py    # one-shot historical reconstruct
+│   ├── livePnLByEngine.py       # per-engine realized PnL reader
+│   ├── crossArenaAnalysis.py    # cross (coin × interval) leaderboard
+│   ├── engineSelectivity.py     # mean PnL per firing round
+│   ├── engineRegimeReport.py    # engine × regime cross-tab
+│   ├── deploy.sh                # full deploy + pm2 restart
+│   └── deploy-engines.sh        # surgical engine-roster swap
+├── ecosystem.config.js          # PM2 process definitions (16 procs)
 └── CLAUDE.md                    # AI assistant instructions
 ```
