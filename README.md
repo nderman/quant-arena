@@ -92,13 +92,13 @@ flowchart LR
     Hist["round_history_*.json<br/>per-arena"]
   end
 
-  subgraph Score["scoring (auto_rotate.py, hourly cron)"]
+  subgraph Scoring["scoring (auto_rotate.py, hourly cron)"]
     Sharpe["recent_sharpe<br/>last 10 rounds<br/>×n/(n+5) shrinkage"]
     SAFE{"SAFE filter:<br/>worst > -$20<br/>n ≥ 8 rounds"}
     Regime["regime_fit_mult<br/>×1.5 / ×0.5 / ×1.0<br/>(SPIKE/QUIET/TREND/CHOP)"]
     LivePnL["live_pnl_penalty<br/>×0.5 if coin bled<br/>last 6h"]
     Cooldown["6h cooldown<br/>(swapped + manual culls)"]
-    Score["score = sharpe<br/>× regime × livepnl<br/>× incumbent_bonus"]
+    FinalScore["score = sharpe<br/>× regime × livepnl<br/>× incumbent_bonus"]
   end
 
   subgraph LiveExec["Live Arena (in same PM2 process)"]
@@ -123,10 +123,10 @@ flowchart LR
   Sharpe --> SAFE
   SAFE --> Regime
   Regime --> LivePnL
-  LivePnL --> Score
-  Cooldown -. "blocks" .-> Score
+  LivePnL --> FinalScore
+  Cooldown -. "blocks" .-> FinalScore
 
-  Score -- "top 5, atomic write" --> Roster
+  FinalScore -- "top 5, atomic write" --> Roster
   Roster -- "mtime change" --> Watcher
   Watcher -- "HOT-ADD/REMOVE/RESUME" --> Exec
   Engines -- "EngineAction" --> Exec
