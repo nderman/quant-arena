@@ -21,6 +21,7 @@
 
 import { fetchJson } from "../http";
 import type { LiveEngineState } from "./liveState";
+import { recordSettle } from "./liveLedger";
 
 export interface LiveSettlementResult {
   engineId: string;
@@ -65,6 +66,9 @@ export async function pollLiveSettlements(
   options: {
     lookbackMinutes?: number;
     tokenSlugPrefix?: string;
+    /** Coin + arena context for ledger emission. liveArena passes these in. */
+    coin?: string;
+    arenaInstanceId?: string;
   } = {},
 ): Promise<LiveSettlementResult[]> {
   const lookback = options.lookbackMinutes ?? 60;
@@ -129,6 +133,22 @@ export async function pollLiveSettlements(
           costBasis: pos.costBasis,
           marketSlug: m.slug,
         });
+
+        // Persist to live_trades.jsonl ledger for per-engine PnL analysis
+        if (options.coin && options.arenaInstanceId) {
+          recordSettle({
+            engineId,
+            coin: options.coin,
+            arenaInstanceId: options.arenaInstanceId,
+            tokenId,
+            marketSlug: m.slug,
+            won,
+            shares: pos.shares,
+            payout,
+            pnl,
+            costBasis: pos.costBasis,
+          });
+        }
 
         console.log(
           `[live-settle] ${won ? "✓ WIN" : "✗ LOSS"} ${engineId}: ${pos.shares} ${outcomeName} @ avg $${pos.avgEntry.toFixed(4)} → ` +

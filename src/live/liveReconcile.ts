@@ -21,6 +21,7 @@
 import type { PositionState } from "../types";
 import type { LiveEngineState, PendingOrder } from "./liveState";
 import { applyFill } from "./liveExecutor";
+import { recordFill } from "./liveLedger";
 
 export interface OrderStatus {
   clientOrderId: string;
@@ -30,6 +31,32 @@ export interface OrderStatus {
 }
 
 export type OrderLookup = (clientOrderId: string) => Promise<OrderStatus | null>;
+
+/** Emit a fill row to the live ledger. No-op if engine context isn't passed
+ *  (back-compat for tests + early callers that don't tag the engine). */
+function emitLedger(
+  opts: ReconcileOptions,
+  order: PendingOrder,
+  deltaSize: number,
+  fillPrice: number,
+  positionSide: "YES" | "NO",
+  clientOrderId: string,
+): void {
+  if (!opts.engineId || !opts.coin || !opts.arenaInstanceId) return;
+  recordFill({
+    engineId: opts.engineId,
+    coin: opts.coin,
+    arenaInstanceId: opts.arenaInstanceId,
+    tokenId: order.tokenId,
+    positionSide,
+    side: order.side,
+    size: deltaSize,
+    limitPrice: order.price,
+    fillPrice,
+    cost: deltaSize * fillPrice,
+    clientOrderId,
+  });
+}
 
 export interface ReconcileResult {
   checked: number;
@@ -49,6 +76,10 @@ export interface ReconcileOptions {
   tokenSideLookup?: (tokenId: string) => "YES" | "NO";
   /** Skip orders younger than this (let them breathe before polling) */
   minAgeMs?: number;
+  /** Engine id, coin, arena — passed through to ledger emission on each fill */
+  engineId?: string;
+  coin?: string;
+  arenaInstanceId?: string;
 }
 
 /**
@@ -101,6 +132,7 @@ export async function reconcilePending(
           { filledSize: deltaSize, avgFillPrice: status.avgFillPrice },
           side,
         );
+        emitLedger(opts, order, deltaSize, status.avgFillPrice, side, clientOrderId);
       }
       state.pendingOrders.delete(clientOrderId);
       result.filled++;
@@ -125,6 +157,7 @@ export async function reconcilePending(
           { filledSize: deltaSize, avgFillPrice: status.avgFillPrice },
           side,
         );
+        emitLedger(opts, order, deltaSize, status.avgFillPrice, side, clientOrderId);
       }
       state.pendingOrders.delete(clientOrderId);
       result.cancelled++;
@@ -141,6 +174,7 @@ export async function reconcilePending(
         { filledSize: deltaSize, avgFillPrice: status.avgFillPrice },
         side,
       );
+      emitLedger(opts, order, deltaSize, status.avgFillPrice, side, clientOrderId);
       order.filledSize = status.filledSize;
       result.partialFills++;
     }

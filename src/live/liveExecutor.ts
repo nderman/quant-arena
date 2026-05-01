@@ -18,6 +18,7 @@ import type { EngineAction, PositionState } from "../types";
 import type { LiveEngineState, PendingOrder } from "./liveState";
 import { canTrade, rolloverDailyLossIfNeeded } from "./riskManager";
 import { sizeForLive, computeCandleExposure, type SizingConfig } from "./liveSizing";
+import { recordFill } from "./liveLedger";
 
 export type SubmitResult =
   | { ok: true; clientOrderId: string; filledSize: number; avgFillPrice: number }
@@ -41,6 +42,10 @@ export interface ExecuteOptions {
    * Defaults to "YES" but callers should pass the correct side.
    */
   positionSide?: "YES" | "NO";
+  /** Coin (btc/eth/sol) — used by the ledger to tag fills */
+  coin?: string;
+  /** Arena instance id (e.g. "eth-4h") — used by the ledger */
+  arenaInstanceId?: string;
 }
 
 export interface ExecuteResult {
@@ -108,7 +113,7 @@ export async function executeLive(
     return { ...base, sizedAction: sized.action, reason: `post-size: ${postCheck.reason}` };
   }
 
-  return submitAndRecord(engineId, action, sized.action, state, submit, base, opts.positionSide ?? "YES");
+  return submitAndRecord(engineId, action, sized.action, state, submit, base, opts.positionSide ?? "YES", opts.coin, opts.arenaInstanceId);
 }
 
 async function submitAndRecord(
@@ -119,6 +124,8 @@ async function submitAndRecord(
   submit: OrderSubmitter,
   base: ExecuteResult,
   positionSide: "YES" | "NO",
+  coin?: string,
+  arenaInstanceId?: string,
 ): Promise<ExecuteResult> {
   let submitResult: SubmitResult;
   try {
@@ -155,6 +162,22 @@ async function submitAndRecord(
   if (submitResult.filledSize >= sizedAction.size) {
     applyFill(state, sizedAction, submitResult, positionSide);
     state.pendingOrders.delete(submitResult.clientOrderId);
+    // Ledger emission — only on confirmed fills, not pending submissions
+    if (coin && arenaInstanceId) {
+      recordFill({
+        engineId,
+        coin,
+        arenaInstanceId,
+        tokenId: sizedAction.tokenId,
+        positionSide,
+        side: sizedAction.side === "BUY" ? "BUY" : "SELL",
+        size: submitResult.filledSize,
+        limitPrice: sizedAction.price,
+        fillPrice: submitResult.avgFillPrice,
+        cost: submitResult.filledSize * submitResult.avgFillPrice,
+        clientOrderId: submitResult.clientOrderId,
+      });
+    }
   }
 
   return {

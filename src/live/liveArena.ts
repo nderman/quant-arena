@@ -146,7 +146,9 @@ export function startLiveArena(cfg: LiveArenaConfig): LiveArenaHandle {
       for (const [engineId, state] of states) {
         if (state.pendingOrders.size === 0) continue;
         try {
-          const r = await reconcilePending(state, cfg.getOrder);
+          const r = await reconcilePending(state, cfg.getOrder, {
+            engineId, coin: cfg.coin, arenaInstanceId: instanceId ?? cfg.coin,
+          });
           if (r.filled + r.cancelled + r.partialFills > 0) {
             console.log(`[live-reconcile:${engineId}] filled=${r.filled} partial=${r.partialFills} cancelled=${r.cancelled}`);
           }
@@ -171,6 +173,8 @@ export function startLiveArena(cfg: LiveArenaConfig): LiveArenaHandle {
       if (states.size > 0) {
         const results = await pollLiveSettlements(states, {
           tokenSlugPrefix: `${cfg.coin}-updown-5m`,
+          coin: cfg.coin,
+          arenaInstanceId: instanceId ?? cfg.coin,
         });
         if (results.length > 0) {
           const netPnl = results.reduce((s, r) => s + r.pnl, 0);
@@ -272,6 +276,8 @@ export function startLiveArena(cfg: LiveArenaConfig): LiveArenaHandle {
     return executeLive(engineId, action, state, cfg.submit, {
       simBankrollUsd: cfg.simBankrollUsd,
       positionSide,
+      coin: cfg.coin,
+      arenaInstanceId: instanceId ?? cfg.coin,
     });
   };
 
