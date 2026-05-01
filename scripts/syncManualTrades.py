@@ -72,9 +72,17 @@ def attribute(title: str, ts: float) -> tuple[Optional[str], Optional[str]]:
     return None, arena
 
 def existing_dedup_keys() -> set:
-    """Build set of (transactionHash) and (slug + ts ms) already in ledger.
-    transactionHash is the cleanest dedup key when present; fall back to
-    (marketSlug, ts) for SETTLE rows that may not carry hash."""
+    """Build dedup-key set from existing ledger rows.
+
+    NOTE: Forward-emitted FILL rows store `clientOrderId` = PM's CLOB order
+    UUID (e.g. "0x5f7e09..." but as a CLOB ID, not chain). Activity API
+    returns `transactionHash` = on-chain settlement hash. They are NOT the
+    same value. So we use a tuple-based fingerprint that works for both:
+      FILL:   ("fill", marketSlug, side, round(size,4), round(price,4))
+      SETTLE: ("settle", marketSlug)   — only one SETTLE per market ever
+    The forward emission and the Activity API will agree on this tuple.
+    transactionHash is also added when present, as an extra precaution.
+    """
     keys: set = set()
     if not LEDGER_PATH.exists():
         return keys
@@ -82,12 +90,16 @@ def existing_dedup_keys() -> set:
         if not line.strip(): continue
         try: r = json.loads(line)
         except: continue
-        # Forward-emitted rows have clientOrderId from PM (which IS the tx hash for v2)
-        coid = r.get("clientOrderId", "")
-        if coid: keys.add(("hash", coid))
         slug = r.get("marketSlug", "")
-        ts = r.get("ts", 0)
-        if slug and ts: keys.add(("slug-ts", slug, ts))
+        if r.get("type") == "FILL":
+            side = r.get("side", "")
+            size = round(float(r.get("size", 0) or 0), 4)
+            price = round(float(r.get("fillPrice", r.get("limitPrice", 0)) or 0), 4)
+            if slug: keys.add(("fill", slug, side, size, price))
+            coid = r.get("clientOrderId", "")
+            if coid: keys.add(("hash", coid))
+        elif r.get("type") == "SETTLE":
+            if slug: keys.add(("settle", slug))
     return keys
 
 def fetch_activity(limit: int = 200) -> list[dict]:
@@ -139,13 +151,23 @@ def main() -> int:
         position_side = "YES" if outcome == "Up" else "NO" if outcome == "Down" else "YES"
         tx_hash = a.get("transactionHash", "") or ""
 
-        # Dedup
+        # Dedup. tx_hash dedup catches re-runs of sync (Activity API events
+        # carry a stable transactionHash). The fingerprint dedup catches
+        # forward-emitted rows from liveExecutor (which don't have tx_hash
+        # but do have slug/side/size/price).
         if tx_hash and ("hash", tx_hash) in existing:
             already += 1
             continue
-        if slug and ("slug-ts", slug, ts_ms) in existing:
-            already += 1
-            continue
+        if typ == "TRADE" and side in ("BUY", "SELL"):
+            fp = ("fill", slug, side, round(size, 4), round(price, 4))
+            if fp in existing:
+                already += 1
+                continue
+        elif typ == "REDEEM":
+            # Only one SETTLE per market — dedup by slug alone
+            if slug and ("settle", slug) in existing:
+                already += 1
+                continue
 
         eid, arena = attribute(title, ts)
         if not eid:
@@ -176,8 +198,14 @@ def main() -> int:
         elif typ == "REDEEM":
             buys = buys_by_market.get(slug, [])
             if not buys: continue
-            total_size = sum(b["size"] for b in buys)
-            total_cost = sum(b.get("cost", 0) for b in buys)
+            # Cost basis = sum of BUYs minus SELLs (pro-rata), not naive sum.
+            # Without filtering side, partial sells inflate costBasis and
+            # understate PnL.
+            buy_only = [b for b in buys if b.get("side", "BUY") == "BUY"]
+            sell_only = [b for b in buys if b.get("side") == "SELL"]
+            total_size = sum(b["size"] for b in buy_only) - sum(b["size"] for b in sell_only)
+            total_cost = sum(b.get("cost", 0) for b in buy_only) - sum(b.get("cost", 0) for b in sell_only)
+            if total_size <= 0: continue   # fully closed before settlement
             won = usd > 0
             payout = usd if won else 0
             pnl = payout - total_cost

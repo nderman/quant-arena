@@ -13,6 +13,7 @@ Evolutionary arena for Polymarket 5M crypto binary markets. AI-bred engines comp
 - `python3 scripts/auto_rotate.py` — dry-run engine roster selection (prints ranked candidates + diff). Add `--commit` to actually swap.
 - `python3 scripts/livePnLByEngine.py` — per-engine PnL from data/live_trades.jsonl (FILL+SETTLE ledger). Add `--since 24h` for window.
 - `python3 scripts/backfillLiveLedger.py --reset --write` — rebuild ledger from Polymarket Activity API + ROSTER_HISTORY (script-internal).
+- `python3 scripts/syncManualTrades.py --write` — incrementally sync recent Activity API events into the ledger. Catches manual UI buys/sells + any forward-emit gaps. Wired on VPS as `*/10 * * * *`.
 
 ## Auto-Rotation
 Hourly cron on VPS at :05 runs `auto_rotate.py --commit`. Picks top SAFE engines by `recent_sharpe × regime_fit × incumbent_bonus × live_pnl_penalty` (compound penalty floored at 0.5×). Writes `data/live_engines.json`; `liveArena.ts` fs.watch picks up the new roster within 30s, no PM2 restart.
@@ -25,7 +26,9 @@ Manual override paths:
 `bankrollUsd` per engine is the **sizing basis** (scales sim positions to live), NOT a wallet allocation. All engines share the single PM funder wallet. Bump per-engine `bankrollUsd` when the wallet tops up.
 
 ## Live ledger
-`data/live_trades.jsonl` — append-only log of FILL + SETTLE events tagged with engineId. `src/live/liveLedger.ts` exports `recordFill` (called from liveExecutor + liveReconcile) and `recordSettle` (called from liveSettlement). All wire-points pass `coin` + `arenaInstanceId` from liveArena. Reader: `scripts/livePnLByEngine.py`. Historical backfill via Activity API: `scripts/backfillLiveLedger.py`.
+`data/live_trades.jsonl` — append-only log of FILL + SETTLE events tagged with engineId. `src/live/liveLedger.ts` exports `recordFill` (called from liveExecutor + liveReconcile), `recordSettle` (liveSettlement), and `rehydratePositionsFromLedger` (called from liveArena startup to restore in-memory positions across PM2 restarts — closes the chronic double-buy bug). All wire-points pass `coin` + `arenaInstanceId` from liveArena.
+
+Read: `scripts/livePnLByEngine.py`. Historical backfill: `scripts/backfillLiveLedger.py`. Continuous sync (every 10 min, catches manual UI trades + emit gaps): `scripts/syncManualTrades.py` (cron). Dedup uses (slug, side, size, price) fingerprint since forward `clientOrderId` ≠ Activity API `transactionHash`.
 - `npm run build` — TypeScript compile
 - `npm run discover` — list active crypto markets
 - `npm run signals` — test all signal sources
