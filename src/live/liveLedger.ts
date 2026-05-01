@@ -81,3 +81,82 @@ export function recordSettle(e: Omit<SettleEvent, "type" | "ts"> & { ts?: number
 export function _resetLedgerForTests(): void {
   try { fs.unlinkSync(LEDGER_PATH); } catch { /* doesn't exist */ }
 }
+
+/**
+ * Read all ledger rows. Returns empty array if file doesn't exist or unreadable.
+ * Use for startup rehydration.
+ */
+export function readLedger(): (FillEvent | SettleEvent)[] {
+  try {
+    const raw = fs.readFileSync(LEDGER_PATH, "utf-8");
+    const rows: (FillEvent | SettleEvent)[] = [];
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try { rows.push(JSON.parse(line)); } catch { /* skip malformed line */ }
+    }
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Rehydrate per-engine open positions from the ledger.
+ * Returns map of engineId -> Map<tokenId, {shares, costBasis, avgEntry, side}>.
+ *
+ * For each engine:
+ *  - Sum FILL rows by tokenId (BUYs add shares + cost; SELLs subtract).
+ *  - Drop any token that has a SETTLE row — already closed, no live position.
+ *
+ * Used by liveArena on startup to restore in-memory state after PM2 restart.
+ * Without this, restarts wipe positions Map → engines re-fire on the same
+ * candle thinking they hold nothing → double-buy bug (observed Apr 30 + May 1).
+ */
+export function rehydratePositionsFromLedger(
+  engineIds: Set<string>,
+): Map<string, Map<string, { shares: number; costBasis: number; avgEntry: number; side: "YES" | "NO" }>> {
+  const out = new Map<string, Map<string, { shares: number; costBasis: number; avgEntry: number; side: "YES" | "NO" }>>();
+  const settled = new Set<string>(); // engineId:tokenId pairs that have settled
+  const rows = readLedger();
+
+  // First pass: mark settled (engine, token) pairs
+  for (const r of rows) {
+    if (r.type === "SETTLE" && engineIds.has(r.engineId)) {
+      settled.add(`${r.engineId}:${r.tokenId}`);
+    }
+  }
+
+  // Second pass: accumulate FILLs that haven't been settled
+  for (const r of rows) {
+    if (r.type !== "FILL") continue;
+    if (!engineIds.has(r.engineId)) continue;
+    const key = `${r.engineId}:${r.tokenId}`;
+    if (settled.has(key)) continue;
+
+    let engineMap = out.get(r.engineId);
+    if (!engineMap) {
+      engineMap = new Map();
+      out.set(r.engineId, engineMap);
+    }
+    const existing = engineMap.get(r.tokenId) ?? {
+      shares: 0, costBasis: 0, avgEntry: 0, side: r.positionSide,
+    };
+    if (r.side === "BUY") {
+      existing.shares += r.size;
+      existing.costBasis += r.cost;
+    } else {
+      // SELL: reduce shares + reduce cost basis pro-rata
+      const fraction = existing.shares > 0 ? Math.max(0, (existing.shares - r.size) / existing.shares) : 0;
+      existing.shares = Math.max(0, existing.shares - r.size);
+      existing.costBasis *= fraction;
+    }
+    existing.avgEntry = existing.shares > 0 ? existing.costBasis / existing.shares : 0;
+    if (existing.shares > 0) {
+      engineMap.set(r.tokenId, existing);
+    } else {
+      engineMap.delete(r.tokenId);
+    }
+  }
+
+  return out;
+}

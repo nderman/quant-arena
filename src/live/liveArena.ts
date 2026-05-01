@@ -29,6 +29,7 @@ import { executeLive, type OrderSubmitter, type ExecuteResult } from "./liveExec
 import { reconcilePending, type OrderLookup } from "./liveReconcile";
 import { pollLiveSettlements } from "./liveSettlement";
 import type { LiveEnginesFile } from "./graduation";
+import { rehydratePositionsFromLedger } from "./liveLedger";
 
 export interface LiveArenaConfig {
   coin: "btc" | "eth" | "sol" | "xrp";
@@ -123,6 +124,30 @@ export function startLiveArena(cfg: LiveArenaConfig): LiveArenaHandle {
     const state = createLiveState(g.engineId, walletAddr, g.bankrollUsd, g.graduationRoundId);
     states.set(g.engineId, state);
     console.log(`[live-arena:${instanceId ?? cfg.coin}] loaded ${g.engineId} — bankroll $${g.bankrollUsd}`);
+  }
+
+  // ─── Rehydrate open positions from ledger ───────────────────────────
+  // Without this, PM2 restart wipes the in-memory positions Map. Engines
+  // boot, see "no position", re-fire on the same candle → double-buy.
+  // Observed Apr 30 (bred-jp1t) + May 1 (signal-contrarian + sol). Fix:
+  // read data/live_trades.jsonl, replay FILLs not yet SETTLEd, restore.
+  if (states.size > 0) {
+    const restored = rehydratePositionsFromLedger(new Set(states.keys()));
+    for (const [engineId, posMap] of restored) {
+      const state = states.get(engineId);
+      if (!state) continue;
+      for (const [tokenId, pos] of posMap) {
+        state.positions.set(tokenId, {
+          tokenId, side: pos.side, shares: pos.shares,
+          avgEntry: pos.avgEntry, costBasis: pos.costBasis,
+        });
+        // Reduce cashBalance to reflect the locked capital (already spent)
+        state.cashBalance -= pos.costBasis;
+      }
+      if (posMap.size > 0) {
+        console.log(`[live-arena:${instanceId ?? cfg.coin}] REHYDRATED ${engineId}: ${posMap.size} open positions, cash adjusted`);
+      }
+    }
   }
 
   const reconcileMs = cfg.reconcileIntervalMs ?? 5_000;
