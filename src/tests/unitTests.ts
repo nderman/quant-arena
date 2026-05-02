@@ -6,6 +6,7 @@
 
 import { calculateFee, calculateMergeFee, calculateFeeAdjustedEdge, cheaperExit, walkBook, isBookTradeable, shouldRejectStaleSnipe, shouldRejectCompetingTaker } from "../referee";
 import { parsePmL2, isBookUpdateReasonable } from "../pulse";
+import { extremeFlipProb } from "../settlement";
 import type { OrderBook } from "../types";
 
 // Helper to build minimal valid OrderBook for tests
@@ -1604,6 +1605,42 @@ console.log("\n── Signal Contrarian gate logic ───────");
   const mid2 = computeSignalBias(50, 0);
   assert(mid2.side === null, `F&G=50 neutral: expected null, got ${mid2.side}`);
 }
+
+// ── Extreme-price settlement bias (May 2026) ────────────────────────────────
+console.log("\n=== Extreme-price settlement flip probability ===");
+
+// Mid-prices below threshold should never flip
+assert(extremeFlipProb(0.50) === 0, `mid 0.50 should be 0, got ${extremeFlipProb(0.50)}`);
+assert(extremeFlipProb(0.65) === 0, `0.65 (dist 0.15 < threshold 0.30) should be 0`);
+assert(extremeFlipProb(0.30) === 0, `0.30 (dist 0.20 < threshold 0.30) should be 0`);
+console.log(`  mid prices (≤0.30 from 0.5) → flip prob = 0 ✓`);
+
+// At/near threshold boundary (dist ≈ 0.30): float arithmetic produces tiny
+// drift (0.80 - 0.5 = 0.30000...4 in IEEE754). Tolerance check.
+assert(extremeFlipProb(0.20) < 0.001, `0.20 (dist ≈0.30) should be ~0, got ${extremeFlipProb(0.20)}`);
+assert(extremeFlipProb(0.80) < 0.001, `0.80 (dist ≈0.30) should be ~0, got ${extremeFlipProb(0.80)}`);
+
+// Just past threshold: small positive prob
+const justPast = extremeFlipProb(0.19);  // dist 0.31, extremity 0.05, prob 0.05*0.40 = 0.02
+assert(justPast > 0 && justPast < 0.05, `0.19 should give ~0.02, got ${justPast}`);
+console.log(`  0.19 (just past threshold) → flip prob ${(justPast*100).toFixed(2)}% ✓`);
+
+// Mid-ramp: dist 0.40, extremity 0.50, prob 0.50 × 0.40 = 0.20
+// Locks the linear ramp shape against accidental swap to quadratic/sqrt.
+const midRamp = extremeFlipProb(0.10);
+assert(approx(midRamp, 0.20, 0.001), `0.10 (mid-ramp) should be ~0.20, got ${midRamp}`);
+console.log(`  0.10 (mid-ramp, extremity 0.5) → flip prob ${(midRamp*100).toFixed(0)}% ✓`);
+
+// Symmetric: 0.81 mirrors 0.19
+assert(approx(extremeFlipProb(0.19), extremeFlipProb(0.81)),
+  `symmetric: ${extremeFlipProb(0.19)} vs ${extremeFlipProb(0.81)}`);
+
+// Full extremity (dist 0.5 from mid: prices 0 or 1) → MAX prob (default 0.40)
+const max = extremeFlipProb(0);
+assert(approx(max, 0.40, 0.001), `full extremity should be 0.40, got ${max}`);
+const max2 = extremeFlipProb(1);
+assert(approx(max, max2), `0 and 1 symmetric: ${max} vs ${max2}`);
+console.log(`  full extremity (0 or 1) → flip prob ${(max*100).toFixed(0)}% ✓`);
 
 // ── Summary ──────────────────────────────────────────────────────────────────
 

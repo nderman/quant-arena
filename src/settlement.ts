@@ -21,17 +21,17 @@ const EXTREME_BIAS_THRESHOLD = CONFIG.EXTREME_PRICE_THRESHOLD;
 const EXTREME_BIAS_RANGE = 0.5 - EXTREME_BIAS_THRESHOLD;
 const EXTREME_BIAS_PROB_MAX = CONFIG.EXTREME_SETTLEMENT_BIAS_PROB_MAX;
 
-/** Returns true if a sim position entered at `avgEntry` should be force-flipped
+/** Probability a sim position entered at `avgEntry` will be force-flipped
  *  to a loss at settle, modeling adverse selection at extreme entry prices.
- *  Caller controls whether to invoke (sim only — live engines skip). */
-function shouldFlipToLoss(avgEntry: number): boolean {
-  if (!EXTREME_BIAS_ENABLED) return false;
+ *  0 if not extreme. Exported for testing the calibration. */
+export function extremeFlipProb(avgEntry: number): number {
+  if (!EXTREME_BIAS_ENABLED) return 0;
   const distFromMid = Math.abs(avgEntry - 0.5);
-  if (distFromMid <= EXTREME_BIAS_THRESHOLD) return false;
+  if (distFromMid <= EXTREME_BIAS_THRESHOLD) return 0;
   const extremity = Math.min(1.0, (distFromMid - EXTREME_BIAS_THRESHOLD) / EXTREME_BIAS_RANGE);
-  const flipProb = extremity * EXTREME_BIAS_PROB_MAX;
-  return random() < flipProb;
+  return extremity * EXTREME_BIAS_PROB_MAX;
 }
+
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -129,9 +129,12 @@ export async function pollAndSettle(
         // run pollLiveSettlements (different code path, never flipped).
         let won = truthWon;
         let flipped = false;
-        if (truthWon && shouldFlipToLoss(pos.avgEntry)) {
-          won = false;
-          flipped = true;
+        if (truthWon) {
+          const flipProb = extremeFlipProb(pos.avgEntry);
+          if (flipProb > 0 && random() < flipProb) {
+            won = false;
+            flipped = true;
+          }
         }
 
         const payout = won ? pos.shares : 0;
