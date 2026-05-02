@@ -9,9 +9,29 @@
  * Survives arena restarts since state lives in engine positions, not here.
  */
 
+import { CONFIG } from "./config";
 import { fetchJson } from "./http";
 import { recordSettlement } from "./ledger";
+import { random } from "./rng";
 import type { EngineState } from "./types";
+
+// Hot-path constants for sim settlement bias (sim-only; live skips)
+const EXTREME_BIAS_ENABLED = CONFIG.EXTREME_SETTLEMENT_BIAS_ENABLED;
+const EXTREME_BIAS_THRESHOLD = CONFIG.EXTREME_PRICE_THRESHOLD;
+const EXTREME_BIAS_RANGE = 0.5 - EXTREME_BIAS_THRESHOLD;
+const EXTREME_BIAS_PROB_MAX = CONFIG.EXTREME_SETTLEMENT_BIAS_PROB_MAX;
+
+/** Returns true if a sim position entered at `avgEntry` should be force-flipped
+ *  to a loss at settle, modeling adverse selection at extreme entry prices.
+ *  Caller controls whether to invoke (sim only — live engines skip). */
+function shouldFlipToLoss(avgEntry: number): boolean {
+  if (!EXTREME_BIAS_ENABLED) return false;
+  const distFromMid = Math.abs(avgEntry - 0.5);
+  if (distFromMid <= EXTREME_BIAS_THRESHOLD) return false;
+  const extremity = Math.min(1.0, (distFromMid - EXTREME_BIAS_THRESHOLD) / EXTREME_BIAS_RANGE);
+  const flipProb = extremity * EXTREME_BIAS_PROB_MAX;
+  return random() < flipProb;
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -95,12 +115,24 @@ export async function pollAndSettle(
       if (settledTokens.has(tokenId)) continue;
       settledTokens.add(tokenId);
 
-      const won = prices[i] === "1";
+      const truthWon = prices[i] === "1";
       const side = outcomes[i];
 
       for (const [, { engineId, state }] of states) {
         const pos = state.positions.get(tokenId);
         if (!pos || pos.shares <= 0) continue;
+
+        // Sim-only adverse-selection bias: at extreme entry prices, flip a
+        // win to a loss with probability proportional to extremity. Models
+        // the empirical sim:live divergence on deep-price strategies (May 2
+        // 2026 — chop-fader sim +$15/fire vs live -$7/fire). Live engines
+        // run pollLiveSettlements (different code path, never flipped).
+        let won = truthWon;
+        let flipped = false;
+        if (truthWon && shouldFlipToLoss(pos.avgEntry)) {
+          won = false;
+          flipped = true;
+        }
 
         const payout = won ? pos.shares : 0;
         const pnl = payout - pos.costBasis;
@@ -115,8 +147,9 @@ export async function pollAndSettle(
 
         results.push({ tokenId, won, payout, shares: pos.shares, pnl, costBasis: pos.costBasis });
 
+        const flipTag = flipped ? " [extreme-bias-flipped]" : "";
         console.log(
-          `[settlement] ${won ? "✓ WIN" : "✗ LOSS"} ${engineId}: ${pos.shares} ${side} shares @ avg ${pos.avgEntry.toFixed(4)} → ` +
+          `[settlement]${flipTag} ${won ? "✓ WIN" : "✗ LOSS"} ${engineId}: ${pos.shares} ${side} shares @ avg ${pos.avgEntry.toFixed(4)} → ` +
           `${won ? "$1.00" : "$0.00"} | P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} | ${m.slug}`
         );
       }

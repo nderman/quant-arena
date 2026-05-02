@@ -69,6 +69,16 @@ export const CONFIG = {
   EXTREME_PRICE_ADVERSE_PROB_BOOST_MAX: num("EXTREME_PRICE_ADVERSE_PROB_BOOST_MAX", 0.65),  // max ADDITIVE bump to toxicProb at full extremity (capped by Math.min(0.95) downstream)
   EXTREME_PRICE_EXTRA_ADVERSE_BPS: num("EXTREME_PRICE_EXTRA_ADVERSE_BPS", 30),  // additional bps adverse on the fill itself at full extremity
 
+  // ── Settlement bias (May 2 v2) ─────────────────────────────────────────────
+  // After EXTREME_PRICE referee v1 (fill-cost only) showed retro backtest barely
+  // moved the needle (chop-fader closed $0.01 of $10/fire gap), the real
+  // mechanism is OUTCOME bias: at extreme entries, depth is informed flow
+  // dumping winners. Probability of resolving against you is elevated, not
+  // just fill cost. Modeled here as a probabilistic settlement flip in sim.
+  // Live engines (liveSettlement.ts) are unaffected — they get real PM outcomes.
+  EXTREME_SETTLEMENT_BIAS_ENABLED:    bool("EXTREME_SETTLEMENT_BIAS_ENABLED", true),
+  EXTREME_SETTLEMENT_BIAS_PROB_MAX:   num("EXTREME_SETTLEMENT_BIAS_PROB_MAX", 0.40),  // up to 40% prob force-loss at full extremity (entry @ 5c/95c)
+
   // ── Fill Decay (reactive market makers) ────────────────────────────────────
   FILL_DECAY_ENABLED:     bool("FILL_DECAY_ENABLED", true),
   FILL_DECAY_MULTIPLIER:  num("FILL_DECAY_MULTIPLIER", 1.2),           // 1.2x worse per level consumed
