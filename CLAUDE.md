@@ -18,6 +18,11 @@ Evolutionary arena for Polymarket 5M crypto binary markets. AI-bred engines comp
 - `python3 scripts/backfillLiveLedger.py --reset --write` — rebuild ledger from Polymarket Activity API + ROSTER_HISTORY (script-internal).
 - `python3 scripts/syncManualTrades.py --write` — incrementally sync recent Activity API events into the ledger. Catches manual UI buys/sells + any forward-emit gaps. Wired on VPS as `*/10 * * * *`.
 
+## Safety Nets
+- **Portfolio halt watcher** (`scripts/portfolioHaltWatcher.py`, cron `*/5 * * * *`): sums realized P&L from `data/live_trades.jsonl` over rolling `PORTFOLIO_HALT_LOOKBACK_HOURS` (default 12h). If loss exceeds `PORTFOLIO_HALT_LOSS_USD` (default $25), touches `data/live_halt.flag`. User must manually `rm` the flag to resume. Built after May 2 2026 incident (-$52 in 24h with no system-level circuit breaker).
+- **Streak cull in auto_rotate**: any incumbent live engine with `STREAK_CULL_LOOKBACK` (default 5) consecutive sim losses gets auto-removed + 6h cooldown, regardless of aggregate sharpe. Prevents incumbent_bonus from holding declining engines.
+- **Live halt flag** (`data/live_halt.flag`): if exists, liveArena/liveExecutor refuse new orders. Manual: `touch ~/quant-arena/data/live_halt.flag`.
+
 ## Auto-Rotation
 Hourly cron on VPS at :05 runs `auto_rotate.py --commit`. Picks top SAFE engines by `recent_sharpe × regime_fit × incumbent_bonus × live_pnl_penalty` (compound penalty floored at 0.5×). Writes `data/live_engines.json`; `liveArena.ts` fs.watch picks up the new roster within 30s, no PM2 restart.
 

@@ -28,22 +28,28 @@ def parse_since(s: str) -> float:
 
 
 def read_rows(path: Path | str = LEDGER_PATH, since: str | None = None) -> list[dict]:
-    """Read jsonl ledger, optionally filter by `since` cutoff."""
+    """Read jsonl ledger, optionally filter by `since` cutoff.
+
+    Streams line-by-line so memory use stays bounded as the ledger grows.
+    Sorts at the end since rows can be appended out of order (forward emit
+    + sync cron interleave).
+    """
     p = Path(path)
     if not p.exists():
         return []
     rows = []
     cutoff_ms = parse_since(since) * 1000 if since else 0
-    for line in p.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            r = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if r.get("ts", 0) >= cutoff_ms:
-            rows.append(r)
+    with p.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if r.get("ts", 0) >= cutoff_ms:
+                rows.append(r)
     rows.sort(key=lambda r: r.get("ts", 0))
     return rows
 

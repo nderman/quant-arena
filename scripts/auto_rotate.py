@@ -78,6 +78,8 @@ LIVE_PNL_LOSS_PENALTY = 0.5 # multiplier when an engine has bled live in lookbac
 LIVE_PNL_LOSS_THRESHOLD = -2.0  # USD — engine penalized if it's lost more than this
 MIN_PENALTY_FLOOR = 0.5     # cap compound penalty; TREND(0.5) × LP(0.5) = 0.25 was killing chop-fader (proven winner)
 ALLOW_MULTIPLE_PER_ARENA = True  # user prefers performance over arena diversification
+STREAK_CULL_THRESHOLD = int(os.environ.get("STREAK_CULL_THRESHOLD", "5"))  # N consecutive sim losses → auto-cull
+STREAK_CULL_LOOKBACK = int(os.environ.get("STREAK_CULL_LOOKBACK", "5"))    # check last N firing rounds (must == THRESHOLD for "all losses")
 
 # Regime fit multipliers
 REGIME_POSITIVE_MULT = 1.5
@@ -204,6 +206,34 @@ def load_last_seen_roster() -> set:
 
 def save_last_seen_roster(pairs: set) -> None:
     atomic_write_json(LAST_SEEN_ROSTER_PATH, {"pairs": [list(p) for p in pairs], "ts": time.time()})
+
+
+def detect_streak_culls(current_set: set, cooldown: Dict[str, float]) -> List[Tuple[str, str]]:
+    """Auto-cull live engines on N consecutive sim losses.
+
+    Memory rule (May 2 2026 incident): 5+ consecutive losing rounds is the
+    kill threshold for an engine. Aggregate sharpe + incumbent bonus can hold
+    a declining engine in roster long after its edge has evaporated; this
+    pre-filter catches that before the score-based logic runs.
+
+    Returns list of (engine, arena) pairs that should be removed + cooled.
+    """
+    now = time.time()
+    cooldown_until = now + COOLDOWN_HOURS * 3600
+    culls = []
+    for engine_id, arena in current_set:
+        cd_key = f"{engine_id}:{arena}"
+        if cooldown.get(cd_key, 0) > now:
+            continue  # already cooled, no need to re-flag
+        rounds = gather_engine_rounds(arena).get(engine_id, [])
+        if len(rounds) < STREAK_CULL_LOOKBACK:
+            continue
+        # Sort by timestamp ascending; check last N
+        recent = sorted(rounds, key=lambda r: r[0])[-STREAK_CULL_LOOKBACK:]
+        if all(pnl < 0 for _, pnl in recent):
+            cooldown[cd_key] = cooldown_until
+            culls.append((engine_id, arena))
+    return culls
 
 
 def detect_and_record_manual_culls(current_set: set, last_seen: set, cooldown: Dict[str, float]) -> int:
@@ -636,6 +666,15 @@ def main() -> int:
         log(f"detected {n_culled} manual cull(s) — applied {COOLDOWN_HOURS}h cooldown")
         save_cooldown(cooldown)
 
+    # Streak cull: any incumbent with N consecutive sim losses gets removed +
+    # cooled, regardless of aggregate sharpe. Pre-filter before scoring.
+    streak_culls = detect_streak_culls(current_set, cooldown)
+    for engine_id, arena in streak_culls:
+        log(f"[streak_cull] {engine_id}@{arena}: {STREAK_CULL_LOOKBACK}L sim streak — applied {COOLDOWN_HOURS}h cooldown")
+        current_set.discard((engine_id, arena))
+    if streak_culls:
+        save_cooldown(cooldown)
+
     # Live-PnL drift feedback: penalize coins that have been bleeding live
     live_pnl = fetch_live_pnl_by_coin()
     if live_pnl:
@@ -666,6 +705,12 @@ def main() -> int:
     print(f"proposed: {sorted(proposed_set)}")
     print(f"swap decision: {do_swap}  ({reason})")
     print()
+
+    # Force swap if streak culls fired — they need to leave the roster even
+    # if no replacement is compelling enough to pass the swap threshold.
+    if streak_culls and not do_swap:
+        do_swap, reason = True, f"forced by {len(streak_culls)} streak cull(s)"
+        log(f"swap forced — {reason}")
 
     if not do_swap:
         log("no swap — current roster acceptable")
