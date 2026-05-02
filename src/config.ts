@@ -57,6 +57,18 @@ export const CONFIG = {
   TOXIC_FLOW_PROBABILITY: num("TOXIC_FLOW_PROBABILITY", 0.15),          // 15% chance per fill
   TOXIC_FLOW_BPS:         num("TOXIC_FLOW_BPS", 50),                    // 50bps adverse move
 
+  // ── Extreme-Price Adverse Selection (May 2026) ─────────────────────────────
+  // Live data showed engines that buy at <30c or >70c (chop-fader, stingo43-late)
+  // diverge from sim by $20+/fire. Sim treated extreme-price liquidity as fair;
+  // in live, depth at extremes is INFORMED traders dumping. We're the bag.
+  // Model: probabilistic settlement bias against the extreme-buyer, scaled by
+  // distance from mid. At entry below 0.20, ~70% chance the candle resolves
+  // against us (the depth was real signal, not random liquidity).
+  EXTREME_PRICE_ENABLED:           bool("EXTREME_PRICE_ENABLED", true),
+  EXTREME_PRICE_THRESHOLD:         num("EXTREME_PRICE_THRESHOLD", 0.30),  // |fillPrice - 0.5| > this triggers amplified adverse selection
+  EXTREME_PRICE_ADVERSE_PROB_BOOST_MAX: num("EXTREME_PRICE_ADVERSE_PROB_BOOST_MAX", 0.65),  // max ADDITIVE bump to toxicProb at full extremity (capped by Math.min(0.95) downstream)
+  EXTREME_PRICE_EXTRA_ADVERSE_BPS: num("EXTREME_PRICE_EXTRA_ADVERSE_BPS", 30),  // additional bps adverse on the fill itself at full extremity
+
   // ── Fill Decay (reactive market makers) ────────────────────────────────────
   FILL_DECAY_ENABLED:     bool("FILL_DECAY_ENABLED", true),
   FILL_DECAY_MULTIPLIER:  num("FILL_DECAY_MULTIPLIER", 1.2),           // 1.2x worse per level consumed

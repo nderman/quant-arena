@@ -24,6 +24,7 @@ Hourly cron on VPS at :05 runs `auto_rotate.py --commit`. Picks top SAFE engines
 Manual override paths:
 - Edit `data/live_engines.json` directly — file-watcher reloads, cron respects via auto-detected manual-cull cooldown.
 - Touch `data/auto_rotation.disabled` — cron exits early.
+- Edit `config/sim_unreliable.json` — `(engine, arena)` blacklist for engines whose sim score is known not to translate to live (e.g. extreme-price entries before May 2026 referee patch). Auto-rotate excludes from candidate pool. Versioned in git (unlike `data/` which is runtime-only).
 - See `data/auto_rotation.log` for hourly decisions, `data/auto_rotation_cooldown.json` for active cooldowns.
 
 `bankrollUsd` per engine is the **sizing basis** (scales sim positions to live), NOT a wallet allocation. All engines share the single PM funder wallet. Bump per-engine `bankrollUsd` when the wallet tops up.
@@ -78,6 +79,7 @@ fee = amount × 0.25 × (P × (1 − P))²
 - **Ingestion-time PM book filtering** (`parsePmL2` + `isBookUpdateReasonable` in pulse.ts): drops invalid levels, rejects crossed books at parse time, filters transient quotes where best price jumps > `PM_BOOK_MAX_JUMP_FRACTION` (default 25%) in a single update. Catches PM's occasional bad/transient WS messages before they pollute our books.
 - **Dual-book consistency check**: BUY/SELL actions reject when `thisToken_ask + oppositeToken_ask < CONFIG.DUAL_BOOK_MIN_SUM` (default $0.85). Real PM keeps the sum near $1.00; impossibly cheap sums indicate stale/corrupt book data on one side.
 - **Snipe-stale-makers cancellation model**: taker BUY/SELL rejects with probability scaling on Binance momentum when the local PM book is stale relative to a recent move. Models real-world MM cancellation latency (~30-50ms). At default 5bps cumulative momentum over 5s + 100ms book staleness, rejection prob is ~50%; 10bps → ~95%. Configurable via `SNIPE_*` env vars.
+- **Extreme-price adverse selection (May 2026)**: at fill prices >$0.30 from mid (i.e. <$0.20 or >$0.80), `simulateToxicFlow` amplifies both probability and bps magnitude. Models that depth at extreme prices is informed traders dumping their winning side, not random liquidity. Calibration came from chop-fader-v1 sim:live divergence (-$22/fire on 16-17¢ entries). Knobs: `EXTREME_PRICE_THRESHOLD` (0.30), `EXTREME_PRICE_ADVERSE_PROB_MAX` (0.65), `EXTREME_PRICE_FILL_REJECT_BPS` (30), `EXTREME_PRICE_ENABLED` (true).
 - **Settlement** writes a `SETTLE` row to the trades table with the true payout pnl, so `SUM(pnl)` is honest
 - **Phantom alpha detector**: arena.runRound flags any engine with > $500 single-round PnL (impossible from $50 starting cash) as a likely sim bug.
 

@@ -232,6 +232,14 @@ let config: RefereeConfig = { ...defaultConfig };
 const MAKER_ADVERSE_BUY = 1 + CONFIG.MAKER_ADVERSE_BPS / 10000;   // worse entry (higher price)
 const MAKER_ADVERSE_SELL = 1 - CONFIG.MAKER_ADVERSE_BPS / 10000;  // worse exit (lower price)
 
+// Hot-path constants for extreme-price adverse selection (avoid CONFIG lookups + arith per fill)
+const MID_PRICE = 0.5;
+const EXTREME_PRICE_ENABLED = CONFIG.EXTREME_PRICE_ENABLED;
+const EXTREME_PRICE_THRESHOLD = CONFIG.EXTREME_PRICE_THRESHOLD;
+const EXTREME_PRICE_RANGE = MID_PRICE - EXTREME_PRICE_THRESHOLD;  // denominator for linear interp
+const EXTREME_PRICE_PROB_BOOST_MAX = CONFIG.EXTREME_PRICE_ADVERSE_PROB_BOOST_MAX;
+const EXTREME_PRICE_EXTRA_BPS = CONFIG.EXTREME_PRICE_EXTRA_ADVERSE_BPS / 10000;
+
 export function setRefereeConfig(overrides: Partial<RefereeConfig>): void {
   config = { ...defaultConfig, ...overrides };
 }
@@ -447,12 +455,31 @@ function simulateToxicFlow(
   else if (volSpike > 2) toxicProb = Math.min(0.95, toxicProb + 0.20);
   else if (volSpike > 1.5) toxicProb = Math.min(0.95, toxicProb + 0.10);
 
+  // Extreme-price amplification: at deep prices (<30c or >70c), the orderbook
+  // depth is INFORMED traders dumping their winning side. Probability of toxic
+  // flow scales with how extreme the entry price is. Modeled May 2026 after
+  // chop-fader-v1 sim:live divergence (-$22/fire) on 16-17c entries.
+  let extremePriceMult = 1.0;
+  if (EXTREME_PRICE_ENABLED) {
+    const distFromMid = Math.abs(action.price - MID_PRICE);
+    if (distFromMid > EXTREME_PRICE_THRESHOLD) {
+      // Linear ramp: at threshold (0.30) → 0; at MID (entry @ 5c/95c) → 1.0.
+      // extremity is in (0, 1] so extremePriceMult is in (1, 2] — the bps
+      // formula below safely uses (extremePriceMult - 1) without a guard.
+      const extremity = Math.min(1.0, (distFromMid - EXTREME_PRICE_THRESHOLD) / EXTREME_PRICE_RANGE);
+      toxicProb = Math.min(0.95, toxicProb + extremity * EXTREME_PRICE_PROB_BOOST_MAX);
+      extremePriceMult = 1 + extremity;
+    }
+  }
+
   if (random() > toxicProb) {
     return { adjustedPrice: action.price, toxicHit: false, slippage: 0 };
   }
 
-  // Magnitude scales with Binance move size, floored at config minimum
-  const bpsMagnitude = Math.max(config.toxicFlowBps / 10000, absDelta * 2);
+  // Magnitude scales with Binance move size, floored at config minimum,
+  // amplified at extreme entry prices.
+  const baseBps = Math.max(config.toxicFlowBps / 10000, absDelta * 2);
+  const bpsMagnitude = baseBps * extremePriceMult + EXTREME_PRICE_EXTRA_BPS * (extremePriceMult - 1);
 
   if (action.side === "BUY") {
     const adversePrice = action.price * (1 + bpsMagnitude);

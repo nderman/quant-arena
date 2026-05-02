@@ -52,6 +52,7 @@ DISABLED_FLAG = DATA_DIR / "auto_rotation.disabled"
 ROTATION_LOG = DATA_DIR / "auto_rotation.log"
 COOLDOWN_PATH = DATA_DIR / "auto_rotation_cooldown.json"
 LAST_SEEN_ROSTER_PATH = DATA_DIR / "auto_rotation_last_seen.json"
+SIM_UNRELIABLE_PATH = Path(os.environ.get("QUANT_CONFIG_DIR", "config")) / "sim_unreliable.json"
 FUNDER_ADDRESS = os.environ.get("FUNDER", "0xda848fc283c4543fCB5dd996d81a21E06072F93e")
 
 ARENAS = [
@@ -103,6 +104,25 @@ def load_live_engines() -> Dict[str, list]:
         return json.loads(LIVE_ENGINES_PATH.read_text())
     except Exception:
         return {}
+
+
+def load_sim_unreliable() -> set[tuple[str, str]]:
+    """(engine, arena) pairs whose sim score is known not to translate to live.
+
+    Format of sim_unreliable.json:
+      {"pairs": [["chop-fader-v1", "eth"], ["stingo43-late-v1", "btc"]],
+       "reason": "deep-price entries adversely selected; sim doesn't model"}
+
+    These are excluded from candidate selection until the sim referee is
+    fixed (typically: extreme-price adverse-selection penalty in walkBook).
+    """
+    if not SIM_UNRELIABLE_PATH.exists():
+        return set()
+    try:
+        data = json.loads(SIM_UNRELIABLE_PATH.read_text())
+    except json.JSONDecodeError:
+        return set()
+    return {(p[0], p[1]) for p in data.get("pairs", []) if isinstance(p, list) and len(p) >= 2}
 
 
 def load_cooldown() -> Dict[str, float]:
@@ -429,18 +449,22 @@ def candidates(
     cooldown: Dict[str, float],
     current_set: set,
     live_pnl_by_coin: Dict[str, float],
+    sim_unreliable: set[tuple[str, str]] | None = None,
 ) -> List[Dict[str, Any]]:
     """Build scored candidate list across all (engine, arena) pairs.
 
     Score = recent_sharpe × regime_fit × incumbent_bonus × live_pnl_penalty
-    Hard filters: SAFE worst-round, MIN_ROUNDS, cooldown.
+    Hard filters: SAFE worst-round, MIN_ROUNDS, cooldown, sim-unreliable blacklist.
     """
     now = time.time()
+    sim_unreliable = sim_unreliable or set()
     out = []
     for arena in ARENAS:
         coin_upper = arena.split("-")[0].upper()
         per_engine = gather_engine_rounds(arena)
         for engine_id, rounds in per_engine.items():
+            if (engine_id, arena) in sim_unreliable:
+                continue
             if len(rounds) < MIN_ROUNDS:
                 continue
             pnls = [p for _, p in rounds]
@@ -617,7 +641,11 @@ def main() -> int:
     if live_pnl:
         log(f"live PnL last {LIVE_PNL_LOOKBACK_HOURS}h: " + ", ".join(f"{c}=${v:+.2f}" for c, v in live_pnl.items()))
 
-    cands = candidates(regime, cooldown, current_set, live_pnl)
+    sim_unreliable = load_sim_unreliable()
+    if sim_unreliable:
+        log(f"sim_unreliable blacklist: {len(sim_unreliable)} (engine, arena) pair(s) excluded")
+
+    cands = candidates(regime, cooldown, current_set, live_pnl, sim_unreliable)
     log(f"candidates passing SAFE+cooldown: {len(cands)}")
 
     chosen = construct_roster(cands)
