@@ -39,7 +39,7 @@ Usage:
 Phase 1a: dry-run only. Phase 1b: flip --commit on, wire cron.
 """
 from __future__ import annotations
-import argparse, json, os, sys, time, datetime as dt, statistics
+import argparse, functools, json, os, sys, time, datetime as dt, statistics
 from pathlib import Path
 from collections import defaultdict
 from typing import Dict, List, Tuple, Any
@@ -78,8 +78,7 @@ LIVE_PNL_LOSS_PENALTY = 0.5 # multiplier when an engine has bled live in lookbac
 LIVE_PNL_LOSS_THRESHOLD = -2.0  # USD — engine penalized if it's lost more than this
 MIN_PENALTY_FLOOR = 0.5     # cap compound penalty; TREND(0.5) × LP(0.5) = 0.25 was killing chop-fader (proven winner)
 ALLOW_MULTIPLE_PER_ARENA = True  # user prefers performance over arena diversification
-STREAK_CULL_THRESHOLD = int(os.environ.get("STREAK_CULL_THRESHOLD", "5"))  # N consecutive sim losses → auto-cull
-STREAK_CULL_LOOKBACK = int(os.environ.get("STREAK_CULL_LOOKBACK", "5"))    # check last N firing rounds (must == THRESHOLD for "all losses")
+STREAK_CULL_N = int(os.environ.get("STREAK_CULL_N", "5"))  # N most-recent sim rounds — all negative triggers auto-cull
 
 # Regime fit multipliers
 REGIME_POSITIVE_MULT = 1.5
@@ -88,7 +87,11 @@ REGIME_NEUTRAL_MULT = 1.0
 
 # ── Data loading ─────────────────────────────────────────────────────────────
 
+@functools.lru_cache(maxsize=16)
 def load_round_history(arena: str) -> List[dict]:
+    """Cached per-arena loader. One main() invocation reads each arena file once,
+    even if both detect_streak_culls and candidates() consult it.
+    """
     p = DATA_DIR / f"round_history_{arena}.json"
     if not p.exists():
         return []
@@ -226,10 +229,10 @@ def detect_streak_culls(current_set: set, cooldown: Dict[str, float]) -> List[Tu
         if cooldown.get(cd_key, 0) > now:
             continue  # already cooled, no need to re-flag
         rounds = gather_engine_rounds(arena).get(engine_id, [])
-        if len(rounds) < STREAK_CULL_LOOKBACK:
+        if len(rounds) < STREAK_CULL_N:
             continue
         # Sort by timestamp ascending; check last N
-        recent = sorted(rounds, key=lambda r: r[0])[-STREAK_CULL_LOOKBACK:]
+        recent = sorted(rounds, key=lambda r: r[0])[-STREAK_CULL_N:]
         if all(pnl < 0 for _, pnl in recent):
             cooldown[cd_key] = cooldown_until
             culls.append((engine_id, arena))
@@ -670,7 +673,7 @@ def main() -> int:
     # cooled, regardless of aggregate sharpe. Pre-filter before scoring.
     streak_culls = detect_streak_culls(current_set, cooldown)
     for engine_id, arena in streak_culls:
-        log(f"[streak_cull] {engine_id}@{arena}: {STREAK_CULL_LOOKBACK}L sim streak — applied {COOLDOWN_HOURS}h cooldown")
+        log(f"[streak_cull] {engine_id}@{arena}: {STREAK_CULL_N}L sim streak — applied {COOLDOWN_HOURS}h cooldown")
         current_set.discard((engine_id, arena))
     if streak_culls:
         save_cooldown(cooldown)
