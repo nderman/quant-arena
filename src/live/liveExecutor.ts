@@ -19,6 +19,7 @@ import type { LiveEngineState, PendingOrder } from "./liveState";
 import { canTrade, rolloverDailyLossIfNeeded } from "./riskManager";
 import { sizeForLive, computeCandleExposure, type SizingConfig } from "./liveSizing";
 import { recordFill } from "./liveLedger";
+import { logEmit } from "./liveEmitLog";
 
 export type SubmitResult =
   | { ok: true; clientOrderId: string; filledSize: number; avgFillPrice: number }
@@ -127,15 +128,31 @@ async function submitAndRecord(
   coin?: string,
   arenaInstanceId?: string,
 ): Promise<ExecuteResult> {
+  // Log the SUBMIT attempt to data/live_emit.log BEFORE we hit the wire.
+  // Persisted to disk (independent of PM2 buffer) so we can answer
+  // "did our PM2 try to place this trade?" months later.
+  const emitFields = {
+    engineId,
+    arenaInstanceId,
+    side: sizedAction.side,
+    positionSide,
+    size: sizedAction.size,
+    price: sizedAction.price,
+    tokenId: sizedAction.tokenId,
+  };
+  logEmit("SUBMIT", emitFields);
+
   let submitResult: SubmitResult;
   try {
     submitResult = await submit(sizedAction);
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
+    logEmit("ERROR", { ...emitFields, reason });
     return { ...base, sizedAction, reason: `submit threw: ${reason}` };
   }
 
   if (!submitResult.ok) {
+    logEmit("REJECT", { ...emitFields, reason: submitResult.reason });
     return { ...base, sizedAction, submitResult, reason: `submit rejected: ${submitResult.reason}` };
   }
 
@@ -162,6 +179,12 @@ async function submitAndRecord(
   if (submitResult.filledSize >= sizedAction.size) {
     applyFill(state, sizedAction, submitResult, positionSide);
     state.pendingOrders.delete(submitResult.clientOrderId);
+    logEmit("FILLED", {
+      ...emitFields,
+      size: submitResult.filledSize,
+      price: submitResult.avgFillPrice,
+      clientOrderId: submitResult.clientOrderId,
+    });
     // Ledger emission — only on confirmed fills, not pending submissions.
     // If context is missing, audit rows would be silently lost — warn loudly
     // so we notice (every wire-point should pass coin + arenaInstanceId).
