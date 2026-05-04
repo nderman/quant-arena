@@ -112,6 +112,15 @@ export function readLedger(): (FillEvent | SettleEvent)[] {
  * Without this, restarts wipe positions Map → engines re-fire on the same
  * candle thinking they hold nothing → double-buy bug (observed Apr 30 + May 1).
  */
+/** Phantom-position guard: any FILL older than this without a matching SETTLE
+ *  is treated as stale state (PM2 restart before SETTLE wrote, sync cron drift,
+ *  oracle never resolved, etc) and skipped on rehydration. All our markets
+ *  resolve within a few hours; 24h is a safe cutoff that won't drop legitimate
+ *  open positions. Discovered May 4 2026 when momentum-settle-v1 stayed silent
+ *  for 36+ hours blocked by a phantom from a non-existent SETTLE.
+ */
+const REHYDRATE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
 export function rehydratePositionsFromLedger(
   engineIds: Set<string>,
   arenaInstanceId?: string,  // when set, only rows with matching arenaInstanceId are replayed
@@ -121,6 +130,7 @@ export function rehydratePositionsFromLedger(
   const rows = readLedger();
   const matchesArena = (r: FillEvent | SettleEvent) =>
     !arenaInstanceId || r.arenaInstanceId === arenaInstanceId;
+  const phantomCutoffMs = Date.now() - REHYDRATE_MAX_AGE_MS;
 
   // First pass: mark settled (engine, token) pairs (within arena scope)
   for (const r of rows) {
@@ -130,12 +140,17 @@ export function rehydratePositionsFromLedger(
   }
 
   // Second pass: accumulate FILLs that haven't been settled (within arena scope)
+  let phantomsSkipped = 0;
   for (const r of rows) {
     if (r.type !== "FILL") continue;
     if (!engineIds.has(r.engineId)) continue;
     if (!matchesArena(r)) continue;
     const key = `${r.engineId}:${r.tokenId}`;
     if (settled.has(key)) continue;
+    if (r.ts < phantomCutoffMs) {
+      phantomsSkipped++;
+      continue;
+    }
 
     let engineMap = out.get(r.engineId);
     if (!engineMap) {
@@ -160,6 +175,11 @@ export function rehydratePositionsFromLedger(
     } else {
       engineMap.delete(r.tokenId);
     }
+  }
+
+  if (phantomsSkipped > 0) {
+    const scope = arenaInstanceId ? `arena=${arenaInstanceId}` : "all arenas";
+    console.warn(`[live-ledger] rehydrate: skipped ${phantomsSkipped} phantom FILL(s) older than ${REHYDRATE_MAX_AGE_MS / 3600_000}h with no matching SETTLE (${scope})`);
   }
 
   return out;

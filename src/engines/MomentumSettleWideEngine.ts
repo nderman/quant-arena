@@ -3,19 +3,23 @@ import { getBookForToken } from "../pulse";
 import type { EngineAction, EngineState, MarketTick, SignalSnapshot } from "../types";
 
 /**
- * Buy the leading side at 60-75¢ and hold to settlement.
- * Discovered empirically: vol-regime-v1 accidentally ran as pure momentum
- * (broken vol calc) and hit 81% settlement WR on ETH at 61-68¢ entries.
- * This engine formalizes that signal with maker orders for better economics.
+ * Momentum Settle — wide entry band variant.
+ *
+ * Same strategy as momentum-settle-v1 but accepts entries from 0.55-0.80
+ * (vs 0.60-0.75). Hypothesis: less-volatile arenas (BTC, ETH) form clear
+ * leaders earlier in the candle and rarely reach the tighter 0.60-0.75
+ * window before the leader resolves. May 3 2026 cross-arena experiment
+ * after sol-4h proven (70% WR, n=23).
  */
-export class MomentumSettleEngine extends AbstractEngine {
-  id = "momentum-settle-v1";
-  name = "Momentum Settle";
+export class MomentumSettleWideEngine extends AbstractEngine {
+  id = "momentum-settle-wide-v1";
+  name = "Momentum Settle (wide)";
   version = "1.0.0";
 
-  private readonly entryMin = 0.60;
-  private readonly entryMax = 0.75;
+  private readonly entryMin = 0.55;
+  private readonly entryMax = 0.80;
   private readonly maxCashPct = 0.25;
+
   onTick(tick: MarketTick, state: EngineState, _signals?: SignalSnapshot): EngineAction[] {
     if (tick.source !== "polymarket") return [];
 
@@ -26,9 +30,6 @@ export class MomentumSettleEngine extends AbstractEngine {
     this.updatePendingOrders();
     if (this.hasPendingOrder()) return [];
 
-    // Drop phantom positions on stale tokens (e.g. survived market rotation).
-    // The "skip if I have a position" guard below would otherwise block fires
-    // forever if rehydration loaded an unsettled position from a prior candle.
     this.clearStalePositions();
 
     const upPos = this.getPosition(upTokenId);
@@ -55,30 +56,24 @@ export class MomentumSettleEngine extends AbstractEngine {
     const shares = Math.floor((state.cashBalance * this.maxCashPct) / askPrice);
     if (shares < 5) return [];
 
-    // Maker limit 1.5¢ below ask: 1 tick on 0.01 markets leaves the order too
-    // close to the ask — any book drift makes us cross and fill as taker.
-    // 1.5¢ floor-aligned to the tick keeps us ≥1 tick under the ask even on
-    // tick-0.01 markets. Fix: Apr 24 live trades filled as takers because the
-    // 0.5¢ offset rounded to the same tick as the ask.
     const makerPrice = Math.round((askPrice - 0.015) * 1000) / 1000;
     const makerBook = buyUp ? upBook : downBook;
     const bestAsk = makerBook.asks[0]?.price ?? 0;
 
     if (makerPrice >= bestAsk) {
-      // Would cross spread — fall back to taker
       this.markPending(tokenId);
       return [this.buy(tokenId, askPrice, shares, {
         orderType: "taker",
-        note: `momentum-settle: taker ${buyUp ? "UP" : "DOWN"} @ ${askPrice.toFixed(3)}, hold to settle`,
-        signalSource: "momentum_settle",
+        note: `momentum-settle-wide: taker ${buyUp ? "UP" : "DOWN"} @ ${askPrice.toFixed(3)}, hold to settle`,
+        signalSource: "momentum_settle_wide",
       })];
     }
 
     this.markPending(tokenId);
     return [this.buy(tokenId, makerPrice, shares, {
       orderType: "maker",
-      note: `momentum-settle: maker ${buyUp ? "UP" : "DOWN"} @ ${makerPrice.toFixed(3)}, hold to settle`,
-      signalSource: "momentum_settle",
+      note: `momentum-settle-wide: maker ${buyUp ? "UP" : "DOWN"} @ ${makerPrice.toFixed(3)}, hold to settle`,
+      signalSource: "momentum_settle_wide",
     })];
   }
 

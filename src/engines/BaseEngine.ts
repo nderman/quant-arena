@@ -88,6 +88,26 @@ export abstract class AbstractEngine implements IBaseEngine {
     return this.state.positions.has(tokenId);
   }
 
+  /** Drop any positions whose tokenId isn't part of the current active market.
+   *  Belt-and-braces guard against phantom positions surviving market rotation
+   *  (rehydration also has a 24h cutoff in liveLedger.ts but this catches drift
+   *  during a single arena lifecycle). Engines using `if (positions > 0) skip`
+   *  self-gating should call this in onTick or onRoundEnd to avoid being
+   *  blocked by leftovers from a previous candle. Returns count cleared. */
+  protected clearStalePositions(): number {
+    const activeUp = this.getUpTokenId();
+    const activeDown = this.getDownTokenId();
+    if (!activeUp || !activeDown) return 0;
+    let cleared = 0;
+    for (const tokenId of Array.from(this.state.positions.keys())) {
+      if (tokenId !== activeUp && tokenId !== activeDown) {
+        this.state.positions.delete(tokenId);
+        cleared++;
+      }
+    }
+    return cleared;
+  }
+
   protected totalPositionValue(_currentPrice?: number): number {
     let value = 0;
     for (const [tokenId, pos] of this.state.positions) {
