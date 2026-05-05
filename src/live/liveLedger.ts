@@ -126,27 +126,35 @@ export function rehydratePositionsFromLedger(
   arenaInstanceId?: string,  // when set, only rows with matching arenaInstanceId are replayed
 ): Map<string, Map<string, { shares: number; costBasis: number; avgEntry: number; side: "YES" | "NO" }>> {
   const out = new Map<string, Map<string, { shares: number; costBasis: number; avgEntry: number; side: "YES" | "NO" }>>();
-  const settled = new Set<string>(); // engineId:tokenId pairs that have settled
+  // Settled tokens by (arena, tokenId) — NOT by (engineId, tokenId). Reason:
+  // sync cron misattributes SETTLE rows to a stale engineId (e.g. baseline
+  // momentum-settle-v1 when the live engine is momentum-settle-wide-v1).
+  // If a tokenId settled in an arena, no engine should still hold it open
+  // — it's the same on-chain market regardless of which engine fired it.
+  // Discovered May 5 2026: wide variant blocked from firing for hours
+  // because rehydration loaded 3 phantom positions whose SETTLEs existed
+  // but were keyed under the wrong engineId.
+  const settledTokens = new Set<string>();
   const rows = readLedger();
   const matchesArena = (r: FillEvent | SettleEvent) =>
     !arenaInstanceId || r.arenaInstanceId === arenaInstanceId;
   const phantomCutoffMs = Date.now() - REHYDRATE_MAX_AGE_MS;
 
-  // First pass: mark settled (engine, token) pairs (within arena scope)
+  // First pass: mark settled tokens (arena-scoped, engineId-agnostic)
   for (const r of rows) {
-    if (r.type === "SETTLE" && engineIds.has(r.engineId) && matchesArena(r)) {
-      settled.add(`${r.engineId}:${r.tokenId}`);
+    if (r.type === "SETTLE" && matchesArena(r)) {
+      settledTokens.add(`${r.arenaInstanceId}:${r.tokenId}`);
     }
   }
 
-  // Second pass: accumulate FILLs that haven't been settled (within arena scope)
+  // Second pass: accumulate FILLs whose token hasn't settled in this arena
   let phantomsSkipped = 0;
   for (const r of rows) {
     if (r.type !== "FILL") continue;
     if (!engineIds.has(r.engineId)) continue;
     if (!matchesArena(r)) continue;
-    const key = `${r.engineId}:${r.tokenId}`;
-    if (settled.has(key)) continue;
+    const tokenKey = `${r.arenaInstanceId}:${r.tokenId}`;
+    if (settledTokens.has(tokenKey)) continue;
     if (r.ts < phantomCutoffMs) {
       phantomsSkipped++;
       continue;
