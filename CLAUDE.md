@@ -18,10 +18,28 @@ Evolutionary arena for Polymarket 5M crypto binary markets. AI-bred engines comp
 - `python3 scripts/backfillLiveLedger.py --reset --write` — rebuild ledger from Polymarket Activity API + ROSTER_HISTORY (script-internal).
 - `python3 scripts/syncManualTrades.py --write` — incrementally sync recent Activity API events into the ledger. Catches manual UI buys/sells + any forward-emit gaps. Wired on VPS as `*/10 * * * *`.
 
+## Known operational issue: phantom-position silence
+
+If wide variant (or any engine using `if (positions > 0) skip` self-gating) goes silent for >12h on a 4h arena, suspect **phantom positions stuck in liveArena state** because `pollLiveSettlements` is failing on Gamma API errors (returns HTML instead of JSON when rate-limited). The May 5 rehydration fix (arena-keyed settled tracking) handles this on RESTART but not at runtime.
+
+Workaround: `pm2 restart quant-arena-<arena>`. Rehydration will skip settled tokens correctly.
+
+Real fix pending (task #93): make liveSettlement use the local ledger's SETTLE rows as auth source for "this position is settled" instead of (or in addition to) Gamma polling.
+
+Diagnostic (the lesson from May 4 — always check first, don't assume regime):
+```bash
+ssh root@VPS 'pm2 logs quant-arena-<arena> --lines 5000 --nostream --raw 2>&1 | grep -E "live snapshot|wide-v1: cash=.* positions="'
+```
+If `positions=N` for N>0 with no recent SETTLE → phantom. Restart unblocks.
+
 ## Safety Nets
 - **Portfolio halt watcher** (`scripts/portfolioHaltWatcher.py`, cron `*/5 * * * *`): sums realized P&L from `data/live_trades.jsonl` over rolling `PORTFOLIO_HALT_LOOKBACK_HOURS` (default 12h). If loss exceeds `PORTFOLIO_HALT_LOSS_USD` (default $25), touches `data/live_halt.flag`. User must manually `rm` the flag to resume. Built after May 2 2026 incident (-$52 in 24h with no system-level circuit breaker).
 - **Streak cull in auto_rotate**: any incumbent live engine with `STREAK_CULL_LOOKBACK` (default 5) consecutive sim losses gets auto-removed + 6h cooldown, regardless of aggregate sharpe. Prevents incumbent_bonus from holding declining engines.
 - **Live halt flag** (`data/live_halt.flag`): if exists, liveArena/liveExecutor refuse new orders. Manual: `touch ~/quant-arena/data/live_halt.flag`.
+- **Flat $$ ceiling on per-trade size** (`MAX_LIVE_TRADE_USD`, default $8): per-order USD capped at `min(bankroll × MAX_POSITION_PCT, MAX_LIVE_TRADE_USD)`. Prevents adverse-fill selection (polymarket-ai-bot lesson: stakes >$10 drop WR 75%→40%). Scale horizontally (more engines, more arenas) instead of vertically (bigger trades).
+- **Trial gate on engine promotions** (`auto_rotate.py`, May 6): new engines run at `TRIAL_BANKROLL_USD` (default $5) for first `TRIAL_FIRE_COUNT` (default 5) settled live fires. After N: promote to full bankroll if net positive realized PnL, drop from candidates if net negative. Catches sim:live divergence at -$3 instead of -$13 like chop-fader did.
+- **Engine-class haircut on auto_rotate scoring** (`auto_rotate.py CLASS_HAIRCUTS`, May 6): sim Sharpe multiplied by class confidence (1.0 momentum-settle, 0.6 vol-regime-gate / mid-price-hold, 0.3 maker-stack, 0.0 chop-fader). Live-validated engines (5+ positive settles) override class default with 1.0. Belt-and-braces with the `config/sim_unreliable.json` blacklist.
+- **Ledger fallback for live settlement** (`liveSettlement.ts applyLedgerSettlements`, May 6): when Gamma API fails (returns HTML), pollLiveSettlements scans local `data/live_trades.jsonl` SETTLE rows to clear positions. Fixes the chronic phantom-position freeze where Gamma rate-limits → settlements never process → engine self-gates → silence.
 
 ## Auto-Rotation
 Hourly cron on VPS at :05 runs `auto_rotate.py --commit`. Picks top SAFE engines by `recent_sharpe × regime_fit × incumbent_bonus × live_pnl_penalty` (compound penalty floored at 0.5×). Writes `data/live_engines.json`; `liveArena.ts` fs.watch picks up the new roster within 30s, no PM2 restart.

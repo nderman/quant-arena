@@ -21,7 +21,7 @@
 
 import { fetchJson } from "../http";
 import type { LiveEngineState } from "./liveState";
-import { recordSettle } from "./liveLedger";
+import { recordSettle, readLedger } from "./liveLedger";
 
 export interface LiveSettlementResult {
   engineId: string;
@@ -80,9 +80,19 @@ export async function pollLiveSettlements(
 
   const url = `https://gamma-api.polymarket.com/markets?closed=true&limit=50&order=endDate&ascending=false&end_date_min=${endMin}&end_date_max=${endMax}`;
   const markets = await fetchJson<GammaMarket[]>(url, 8000);
-  if (!markets || markets.length === 0) return [];
 
   const results: LiveSettlementResult[] = [];
+
+  // Belt-and-braces ledger fallback: if Gamma is down or returns nothing,
+  // scan the local ledger for SETTLE rows matching unsettled positions in
+  // the live arena state. This stops the chronic phantom-position freeze
+  // (May 4 + May 6 incidents) where Gamma rate-limits → settlements never
+  // process → positions accumulate → engine self-gates → silence.
+  // We do this BEFORE the Gamma loop so it runs unconditionally; Gamma
+  // results below are still authoritative for fresh settles.
+  applyLedgerSettlements(states, results, options);
+
+  if (!markets || markets.length === 0) return results;
 
   for (const m of markets) {
     if (!m.closed || !m.slug?.includes(slugPrefix)) continue;
@@ -176,4 +186,71 @@ export async function pollLiveSettlements(
  */
 export function _resetSettledCache(): void {
   settledByEngine.clear();
+}
+
+/**
+ * Ledger-based settlement fallback. For each engine's open positions, check
+ * if a SETTLE row exists in the local ledger (written by sync cron after the
+ * on-chain redemption). If yes AND we haven't already settled this token,
+ * apply it. Catches the case where Gamma polling is failing.
+ *
+ * SETTLE rows are matched arena-keyed (engineId on sync rows is unreliable
+ * — sync cron misattributes — but tokenId is unique per market). The
+ * engine-keyed `settledByEngine` cache below shares state with the Gamma
+ * path so neither double-credits the other.
+ */
+function applyLedgerSettlements(
+  states: Map<string, LiveEngineState>,
+  results: LiveSettlementResult[],
+  options: { coin?: string; arenaInstanceId?: string },
+): void {
+  if (!options.arenaInstanceId) return;
+
+  // Build (tokenId -> SettleEvent) map for this arena. Latest wins on conflicts.
+  const ledgerSettles = new Map<string, { won: boolean; payout: number; pnl: number; costBasis: number; marketSlug: string }>();
+  for (const r of readLedger()) {
+    if (r.type !== "SETTLE") continue;
+    if (r.arenaInstanceId !== options.arenaInstanceId) continue;
+    ledgerSettles.set(r.tokenId, {
+      won: r.won,
+      payout: r.payout,
+      pnl: r.pnl,
+      costBasis: r.costBasis,
+      marketSlug: r.marketSlug,
+    });
+  }
+  if (ledgerSettles.size === 0) return;
+
+  for (const [engineId, state] of states) {
+    const settled = getSettledSet(engineId);
+    for (const [tokenId, pos] of Array.from(state.positions.entries())) {
+      if (settled.has(tokenId)) continue;
+      const settle = ledgerSettles.get(tokenId);
+      if (!settle) continue;
+      if (pos.shares <= 0) continue;
+
+      settled.add(tokenId);
+      const payout = settle.won ? pos.shares : 0;
+      const pnl = payout - pos.costBasis;
+      state.cashBalance += payout;
+      state.positions.delete(tokenId);
+      if (pnl < 0) state.dailyLossUsd += -pnl;
+
+      results.push({
+        engineId,
+        tokenId,
+        won: settle.won,
+        payout,
+        shares: pos.shares,
+        pnl,
+        costBasis: pos.costBasis,
+        marketSlug: settle.marketSlug,
+      });
+
+      console.log(
+        `[live-settle:ledger] ${settle.won ? "✓ WIN" : "✗ LOSS"} ${engineId}: ${pos.shares} shares @ avg $${pos.avgEntry.toFixed(4)} → ` +
+        `$${payout.toFixed(2)} | pnl: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} | ${settle.marketSlug} (ledger fallback)`
+      );
+    }
+  }
 }

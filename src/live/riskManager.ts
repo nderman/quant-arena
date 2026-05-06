@@ -23,6 +23,13 @@ export const RISK_CONFIG = {
   MAX_PENDING_ORDERS: 10,        // unfilled orders cap
   MIN_ORDER_USD: 0.5,            // PM does not actually enforce $1 notional — share count is the real protocol min (see MIN_ORDER_SHARES). Lowered Apr 25: chop-fader entries at 18-22¢ × 5 shares = $0.90-$1.10 were rejected pre-bump on small bankrolls.
   MIN_ORDER_SHARES: 5,           // PM maker minimum — resting orders < 5 shares get "Size (N) lower than the minimum: 5". Takers crossing the book bypass this.
+  // Flat $$ ceiling on per-order USD. Polymarket-ai-bot's hard-won lesson:
+  // adverse-fill selection drops WR 75% → 40% above ~$10/trade. Cap at $8 to
+  // stay safely under that threshold regardless of bankroll growth. Scale
+  // horizontally (more engines, more arenas) instead of vertically (bigger
+  // trades). May 6 2026 fix: prevents future May 2-style -56% drawdowns
+  // when bankroll grows and PCT-based cap balloons trade size.
+  MAX_LIVE_TRADE_USD: parseFloat(process.env.MAX_LIVE_TRADE_USD ?? "8"),
   HALT_FLAG_PATH: path.join(DATA_DIR, "live_halt.flag"),
   HALT_RECHECK_MS: 5_000,        // re-stat the halt flag at most this often
 };

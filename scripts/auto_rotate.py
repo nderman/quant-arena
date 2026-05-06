@@ -80,6 +80,15 @@ MIN_PENALTY_FLOOR = 0.5     # cap compound penalty; TREND(0.5) × LP(0.5) = 0.25
 ALLOW_MULTIPLE_PER_ARENA = True  # user prefers performance over arena diversification
 STREAK_CULL_N = int(os.environ.get("STREAK_CULL_N", "5"))  # N most-recent sim rounds — all negative triggers auto-cull
 
+# Trial gate (May 6 2026): new engine promotions use a small bankroll for
+# their first N live fires before graduating to full size. Catches
+# sim:live divergence at ~$3 loss instead of $13. After TRIAL_FIRE_COUNT
+# settled fires, promote to full bankroll if net positive; demote (skip
+# from candidates) if net negative.
+TRIAL_BANKROLL_USD = float(os.environ.get("TRIAL_BANKROLL_USD", "5"))
+TRIAL_FIRE_COUNT = int(os.environ.get("TRIAL_FIRE_COUNT", "5"))
+LIVE_LEDGER_PATH = DATA_DIR / "live_trades.jsonl"
+
 # Regime fit multipliers
 REGIME_POSITIVE_MULT = 1.5
 REGIME_NEGATIVE_MULT = 0.5
@@ -475,6 +484,62 @@ def regime_fit_mult(engine_id: str, arena: str, regime: str) -> float:
     return eng_fits.get(regime, REGIME_NEUTRAL_MULT)
 
 
+# ── Engine-class sim:live calibration ────────────────────────────────────────
+
+# Empirical sim:live ratios observed over the past month (May 2026):
+# - momentum-settle family @ sol-4h: ratio ~0.7-1.0 (sim slightly optimistic, close)
+# - extreme-price contrarian (chop-fader, signal-contrarian): ratio ~ -0.5 (sim said +$15 → live -$7)
+# - maker-fill heavy (maker-momentum, maker-merge-arb): ratio ~0.3 (sim too generous on fill prob)
+# - regime-gated (vol-regime-gate family): TBD — never validated live, default conservative
+# - bred-* engines: highly variable, default conservative until each is proven
+# Haircut is applied as a multiplier on the score AFTER all other penalties.
+
+CLASS_HAIRCUTS = {
+    "momentum-settle": 1.0,        # proven family — momentum-settle-v1 + variants
+    "vol-regime-gate": 0.6,        # gated, mid-price typically — modest haircut
+    "rotation-fade": 0.6,          # modest haircut, mid-price hold pattern
+    "baguette-drift": 0.6,         # similar
+    "depth-drain": 0.4,            # one live test was a loss; conservative
+    "spread-compression": 0.5,     # was live winning then bleeding; ambiguous
+    "stingo43": 0.4,               # extreme entries documented
+    "chop-fader": 0.0,             # blacklisted entirely — defensive belt
+    "maker-momentum": 0.3,         # maker-stack class
+    "maker-merge-arb": 0.3,
+    "maker-settle": 0.3,
+    "maker-queue-edge": 0.3,
+    "dca-extreme": 0.2,            # name says "extreme" — adverse selection class
+    "dca-native-tick": 0.2,        # high best/worst spread = extreme-price
+    "dca-settle": 0.4,
+    "bred-": 0.5,                  # all bred engines until individually proven
+    "book-imbalance": 0.4,         # microstructure — typically diverges
+    "trend-confirmer": 0.6,
+    "adaptive-trend": 0.6,
+}
+
+DEFAULT_CLASS_HAIRCUT = 0.5
+
+
+def engine_class_haircut(engine_id: str, arena: str, rounds: List[Tuple[float, float]]) -> float:
+    """Returns multiplier in (0, 1] for sim:live calibration. Lower = less trust.
+
+    Uses (engine_id, arena) blacklist first (hard-coded 0 for proven divergers),
+    then engine prefix lookup, then a conservative default.
+
+    If engine has 5+ live settles with positive realized PnL, bump back to 1.0
+    (live-validated overrides the conservative default).
+    """
+    # Sim_unreliable check is upstream; engines getting here aren't blacklisted.
+    # Live-validated takes precedence over class default.
+    t_status, _realized = trial_status(engine_id, arena)
+    if t_status == "validated_positive":
+        return 1.0
+
+    for prefix, mult in CLASS_HAIRCUTS.items():
+        if engine_id.startswith(prefix):
+            return mult
+    return DEFAULT_CLASS_HAIRCUT
+
+
 # ── Selection ────────────────────────────────────────────────────────────────
 
 def candidates(
@@ -507,6 +572,11 @@ def candidates(
             cd_until = cooldown.get(cd_key, 0)
             if cd_until > now:
                 continue
+            # Trial gate: if engine has TRIAL_FIRE_COUNT+ live settles AND net
+            # negative realized PnL, exclude — sim signal didn't translate.
+            t_status, _ = trial_status(engine_id, arena)
+            if t_status == "validated_negative":
+                continue
             sharpe = recent_sharpe(pnls)
             if sharpe <= 0:
                 continue
@@ -527,7 +597,11 @@ def candidates(
             penalty_product = mult * live_penalty
             if penalty_product < MIN_PENALTY_FLOOR:
                 penalty_product = MIN_PENALTY_FLOOR
-            score = sharpe * penalty_product * inc_bonus
+            # Engine-class haircut: apply sim:live calibration multiplier based
+            # on the engine's strategy class (extreme-price, maker-stack, etc).
+            # Conservative defaults until live history validates each class.
+            haircut = engine_class_haircut(engine_id, arena, rounds)
+            score = sharpe * penalty_product * inc_bonus * haircut
             out.append({
                 "engine_id": engine_id,
                 "arena": arena,
@@ -580,15 +654,65 @@ def current_roster_set(live: Dict[str, list]) -> set:
     return {(r.get("engineId"), r.get("arenaInstanceId") or arena) for arena, recs in live.items() for r in recs}
 
 
+@functools.lru_cache(maxsize=1)
+def _read_live_ledger_cached() -> List[dict]:
+    """Read live_trades.jsonl once per main() invocation."""
+    if not LIVE_LEDGER_PATH.exists():
+        return []
+    rows = []
+    with LIVE_LEDGER_PATH.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return rows
+
+
+def trial_status(engine_id: str, arena: str) -> Tuple[str, float]:
+    """Returns (status, realized_pnl) where status is one of:
+      - 'trial' — < TRIAL_FIRE_COUNT settled live fires
+      - 'validated_positive' — N+ settles, realized PnL >= 0
+      - 'validated_negative' — N+ settles, realized PnL < 0
+    Used to gate promotion sizing + filter candidates that have failed trial.
+    """
+    rows = _read_live_ledger_cached()
+    fills = sum(1 for r in rows
+                if r.get("type") == "FILL"
+                and r.get("side") == "BUY"
+                and r.get("engineId") == engine_id
+                and r.get("arenaInstanceId") == arena)
+    settles = [r for r in rows
+               if r.get("type") == "SETTLE"
+               and r.get("arenaInstanceId") == arena
+               and r.get("engineId") == engine_id]
+    realized = sum(r.get("pnl", 0) for r in settles)
+    n_settled = len(settles)
+    if n_settled < TRIAL_FIRE_COUNT:
+        return ("trial", realized)
+    return ("validated_positive" if realized >= 0 else "validated_negative", realized)
+
+
 def proposed_roster_dict(chosen: List[dict], bankroll: float) -> Dict[str, list]:
     today = dt.date.today().isoformat()
     out: Dict[str, list] = {}
     for c in chosen:
+        status, _realized = trial_status(c["engine_id"], c["arena"])
+        # Trial engines run at small bankroll until proven; validated engines
+        # get full bankroll. Negative-validated engines should have been
+        # filtered upstream in candidates() — defensive double-check.
+        if status == "validated_negative":
+            continue
+        actual_bankroll = TRIAL_BANKROLL_USD if status == "trial" else bankroll
         out[c["arena"]] = [{
             "engineId": c["engine_id"],
             "coin": c["coin"],
             "arenaInstanceId": c["arena"],
-            "bankrollUsd": bankroll,
+            "bankrollUsd": actual_bankroll,
+            "trialStatus": status,
             "graduationRoundId": f"auto-{today}-{c['engine_id']}-{c['arena']}",
             "graduatedAt": today,
         }]

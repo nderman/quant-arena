@@ -67,8 +67,11 @@ export function sizeForLive(
   let targetUsd = originalUsd * scaleRatio;
 
   // 2. Per-order cap (risk manager also enforces this, but we clip here
-  //    to avoid round-trip-rejections)
-  const maxOrderUsd = cfg.liveBankrollUsd * RISK_CONFIG.MAX_POSITION_PCT;
+  //    to avoid round-trip-rejections). Take the MIN of (PCT × bankroll) and
+  //    (flat $$ ceiling) — flat ceiling protects against adverse-fill
+  //    selection at larger sizes regardless of bankroll growth.
+  const pctCapUsd = cfg.liveBankrollUsd * RISK_CONFIG.MAX_POSITION_PCT;
+  const maxOrderUsd = Math.min(pctCapUsd, RISK_CONFIG.MAX_LIVE_TRADE_USD);
   let clippedBy: SizingResult["clippedBy"];
   if (targetUsd > maxOrderUsd) {
     targetUsd = maxOrderUsd;

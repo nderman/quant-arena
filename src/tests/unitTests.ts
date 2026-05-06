@@ -917,6 +917,13 @@ class StableRegimeEngine extends AbstractEngine {
 
 import { sizeForLive, computeCandleExposure } from "../live/liveSizing";
 import { createLiveState } from "../live/liveState";
+import { RISK_CONFIG } from "../live/riskManager";
+
+// Disable the May 6 flat $$ ceiling for the legacy scaling tests below —
+// those tests exercise the PCT-cap math in isolation. The $8 ceiling is
+// covered by its own test below ("flat ceiling caps at MAX_LIVE_TRADE_USD").
+const ORIGINAL_MAX_LIVE_TRADE_USD = RISK_CONFIG.MAX_LIVE_TRADE_USD;
+RISK_CONFIG.MAX_LIVE_TRADE_USD = Number.POSITIVE_INFINITY;
 
 function mkLiveState(bankroll: number, cash?: number): ReturnType<typeof createLiveState> {
   const s = createLiveState("test-engine", "0xwallet", bankroll, "R0001-test");
@@ -1091,6 +1098,26 @@ console.log("\n=== LiveSizingWrapper ===");
   });
   const exp = computeCandleExposure(live);
   assert(Math.abs(exp - 7) < 0.001, `exposure: expected $7 ($5 cost + $2 pending), got ${exp}`);
+}
+
+// ── Flat $$ ceiling (May 6 2026) — adverse-fill prevention ─────────────────
+// Polymarket-ai-bot's hard lesson: stakes >$10 drop WR 75%→40%. Cap at $8.
+// Verifies the ceiling clips even when bankroll PCT cap would allow more.
+{
+  RISK_CONFIG.MAX_LIVE_TRADE_USD = 8;  // set production value for this test only
+  const live = mkLiveState(1000);  // big bankroll — PCT cap = $150
+  const r = sizeForLive(
+    { side: "BUY", tokenId: "UP1", price: 0.10, size: 10 },  // sim wants $1 → 100x scale = $100
+    live,
+    { liveBankrollUsd: 1000, simBankrollUsd: 50 },  // 20x scale ratio
+  );
+  assert(r.action !== null, "flat ceiling test: action should not be null");
+  // $100 target, $150 PCT cap, but $8 flat ceiling → 80 shares @ $0.10
+  assert(r.action!.size === 80, `flat ceiling caps at MAX_LIVE_TRADE_USD ($8): expected 80, got ${r.action!.size}`);
+  assert(r.clippedBy === "bankroll_cap", `flat ceiling marks bankroll_cap, got ${r.clippedBy}`);
+  // Restore to the disabled (Infinity) state so the async LiveExecutor tests
+  // below don't hit the ceiling — they exercise scaling behavior in isolation.
+  RISK_CONFIG.MAX_LIVE_TRADE_USD = Number.POSITIVE_INFINITY;
 }
 
 // ── LiveExecutor (async — wrapped in IIFE because CommonJS) ────────────────
@@ -1646,6 +1673,11 @@ console.log(`  full extremity (0 or 1) → flip prob ${(max*100).toFixed(0)}% �
 
 Promise.all([runLiveExecutorTests(), runRejectionReasonTests(), runClobSubmitterTimeoutTests()])
   .then(() => {
+    // Restore RISK_CONFIG.MAX_LIVE_TRADE_USD to the captured original — we
+    // overrode it to Infinity at the top of the LiveSizing block to let the
+    // legacy scaling tests run without the May 6 ceiling clipping. Restore
+    // here so any process-wide state stays clean for downstream consumers.
+    RISK_CONFIG.MAX_LIVE_TRADE_USD = ORIGINAL_MAX_LIVE_TRADE_USD;
     console.log(`\n${"=".repeat(40)}`);
     console.log(`Tests: ${passed} passed, ${failed} failed`);
     if (failed > 0) {
