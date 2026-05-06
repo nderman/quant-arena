@@ -19,7 +19,7 @@ set -e
 #   bash scripts/deploy-engines.sh btc         # only BTC
 #   bash scripts/deploy-engines.sh btc eth     # BTC + ETH
 
-REMOTE_HOST="${VPS_HOST:-root@165.232.84.91}"
+REMOTE_HOST="${QUANT_VPS_HOST:-root@vps.example.com}"
 REMOTE_DIR="~/quant-arena"
 
 # Coins to flag for reload — defaults to all 3 if no arg given

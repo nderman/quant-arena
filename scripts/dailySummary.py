@@ -12,7 +12,7 @@ from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from statistics import mean, median
 
-VPS = "root@165.232.84.91"
+VPS = os.environ.get("QUANT_VPS_HOST", "root@vps.example.com")
 REMOTE_DIR = "~/quant-arena/data"
 LOCAL_DIR = "data"
 SUMMARIES_DIR = "data/summaries"

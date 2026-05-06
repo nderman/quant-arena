@@ -13,7 +13,7 @@ import json, sys, os, subprocess, argparse
 from collections import defaultdict
 from statistics import mean
 
-VPS = "root@165.232.84.91"
+VPS = os.environ.get("QUANT_VPS_HOST", "root@vps.example.com")
 REMOTE_DIR = "~/quant-arena/data"
 LOCAL_DIR = "data"
 COINS = ["btc", "eth", "sol"]

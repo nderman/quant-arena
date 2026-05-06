@@ -24,7 +24,9 @@ DATA_DIR = Path(os.environ.get("QUANT_DATA_DIR", "data"))
 ROSTER_PATH = DATA_DIR / "live_engines.json"
 COOLDOWN_PATH = DATA_DIR / "auto_rotation_cooldown.json"
 LOG_PATH = DATA_DIR / "auto_rotation.log"
-WALLET = os.environ.get("PM_FUNDER", "0xda848fc283c4543fCB5dd996d81a21E06072F93e")
+WALLET = os.environ.get("PM_FUNDER", "")
+if not WALLET:
+    raise SystemExit("PM_FUNDER env var required")
 
 
 def section(title: str):

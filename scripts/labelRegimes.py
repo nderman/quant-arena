@@ -18,7 +18,7 @@ import urllib.request
 from datetime import datetime
 from statistics import pstdev
 
-VPS = "root@165.232.84.91"
+VPS = os.environ.get("QUANT_VPS_HOST", "root@vps.example.com")
 
 ROUNDS = {
     "BTC": {

@@ -13,7 +13,7 @@ Sources:
 """
 import json, os, subprocess, glob
 
-VPS = "root@165.232.84.91"
+VPS = os.environ.get("QUANT_VPS_HOST", "root@vps.example.com")
 REMOTE_DIR = "~/quant-arena/data"
 BACKFILL_DIR = "data/backfill"
 LOCAL_DIR = "data"

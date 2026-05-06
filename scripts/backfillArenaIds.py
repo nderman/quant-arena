@@ -14,7 +14,7 @@ Usage:
 import json, os, subprocess, re, sys
 from collections import defaultdict
 
-VPS = "root@165.232.84.91"
+VPS = os.environ.get("QUANT_VPS_HOST", "root@vps.example.com")
 LOG_DIR = "/root/quant-arena/logs"
 DATA_DIR = "/root/quant-arena/data"
 

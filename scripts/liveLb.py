@@ -13,10 +13,10 @@ Usage:
   python3 scripts/liveLb.py --top 10  # top 10 only
   python3 scripts/liveLb.py --5m      # only 5M arenas (trustworthy data)
 """
-import subprocess, sys, re, argparse
+import os, subprocess, sys, re, argparse
 from collections import defaultdict
 
-VPS = "root@165.232.84.91"
+VPS = os.environ.get("QUANT_VPS_HOST", "root@vps.example.com")
 ARENA_DIR = "/root/quant-arena/logs"
 
 ARENAS = [

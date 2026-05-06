@@ -24,7 +24,9 @@ from typing import Optional
 
 DATA_DIR = Path(os.environ.get("QUANT_DATA_DIR", "data"))
 LEDGER_PATH = DATA_DIR / "live_trades.jsonl"
-FUNDER = os.environ.get("FUNDER", "0xda848fc283c4543fCB5dd996d81a21E06072F93e")
+FUNDER = os.environ.get("FUNDER", "")
+if not FUNDER:
+    raise SystemExit("FUNDER env var required")
 
 # Roster history — same as backfillLiveLedger.py. Keep in sync when major
 # rotations happen. Future: derive from auto_rotation_last_seen.json snapshots.

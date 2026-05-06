@@ -31,7 +31,7 @@ if "--coin" in sys.argv:
         COIN_FILTER = sys.argv[i + 1].lower()
 
 COIN_SYMBOLS = {"btc": "BTCUSDT", "eth": "ETHUSDT", "sol": "SOLUSDT", "xrp": "XRPUSDT"}
-VPS = "root@165.232.84.91"
+VPS = os.environ.get("QUANT_VPS_HOST", "root@vps.example.com")
 REMOTE_DIR = "~/quant-arena/data"
 LOCAL_DIR = "data"
 

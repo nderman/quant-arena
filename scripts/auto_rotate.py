@@ -53,7 +53,7 @@ ROTATION_LOG = DATA_DIR / "auto_rotation.log"
 COOLDOWN_PATH = DATA_DIR / "auto_rotation_cooldown.json"
 LAST_SEEN_ROSTER_PATH = DATA_DIR / "auto_rotation_last_seen.json"
 SIM_UNRELIABLE_PATH = Path(os.environ.get("QUANT_CONFIG_DIR", "config")) / "sim_unreliable.json"
-FUNDER_ADDRESS = os.environ.get("FUNDER", "0xda848fc283c4543fCB5dd996d81a21E06072F93e")
+FUNDER_ADDRESS = os.environ.get("FUNDER", "")
 
 ARENAS = [
     "btc", "eth", "sol",
