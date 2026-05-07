@@ -69,7 +69,11 @@ SAFE_LOSS_USD = 20.0        # worst round must be >= -this (40% of $50 sim bankr
 COOLDOWN_HOURS = 6          # how long swapped-out engine waits before re-entry
 SWAP_THRESHOLD = 0.30       # only swap if proposed score is > current * (1 + this)
 INCUMBENT_BONUS = 0.10      # was 0.20 — less sticky so winners can swap in faster
-ROSTER_SIZE = 5             # top K
+ROSTER_SIZE = 10            # top K. There are no "slots" — engines × arenas
+                            # all compete; whatever passes SAFE+score+coin_cap
+                            # goes live. Bumped from 5 (2026-05-07) after the
+                            # small cap was masking strong candidates by
+                            # forcing artificial scarcity.
 LIVE_BANKROLL_USD = 25.0    # used for cash buffer check
 MIN_CASH_PER_ENGINE = 5.0   # skip add if cash < this * roster size
 SHRINKAGE_K = 5             # Bayesian-style shrinkage: sharpe *= n/(n+K)
@@ -622,28 +626,28 @@ def candidates(
 
 
 def construct_roster(cands: List[dict], k: int = ROSTER_SIZE) -> List[dict]:
-    """Pick top K by score. No arena diversification (multiple engines per
-    arena allowed). Coin cap remains to bound concentration risk.
+    """Pick top K (engine, arena) candidates by score. There are no slots
+    — each (engine, arena) pair stands on its own evidence.
 
-    The same engine_id can't appear twice (would pyramid). Different engines
-    on the same arena is fine — they have independent state.
+    Dedup is on (engine_id, arena), not engine_id — the same engine_id
+    CAN run on multiple arenas (different markets, independent state).
+    Coin cap is the only diversification rule, to bound concentration risk.
     """
     chosen: List[dict] = []
-    used_engines: set = set()
+    used_pairs: set = set()
     coin_counts: Dict[str, int] = defaultdict(int)
-    max_per_coin = 3  # bumped from 2 since arena constraint dropped
+    max_per_coin = 5  # bumped from 3 along with ROSTER_SIZE → 10
 
     for c in cands:
         if len(chosen) >= k:
             break
-        if c["engine_id"] in used_engines:
-            continue
-        if not ALLOW_MULTIPLE_PER_ARENA and any(o["arena"] == c["arena"] for o in chosen):
+        pair = (c["engine_id"], c["arena"])
+        if pair in used_pairs:
             continue
         if coin_counts[c["coin"]] >= max_per_coin:
             continue
         chosen.append(c)
-        used_engines.add(c["engine_id"])
+        used_pairs.add(pair)
         coin_counts[c["coin"]] += 1
     return chosen
 
