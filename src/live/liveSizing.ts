@@ -17,6 +17,7 @@
  * Pure function — no I/O, no side effects, easy to test.
  */
 
+import { CONFIG } from "../config";
 import type { EngineAction } from "../types";
 import type { LiveEngineState } from "./liveState";
 import { RISK_CONFIG } from "./riskManager";
@@ -26,7 +27,7 @@ export interface SizingResult {
   reason?: string;
   originalUsd: number;
   scaledUsd: number;
-  clippedBy?: "bankroll_cap" | "cash" | "exposure_cap" | "min_order" | "rounding" | "maker_min_bump";
+  clippedBy?: "bankroll_cap" | "cash" | "exposure_cap" | "min_order" | "rounding" | "maker_min_bump" | "marketable_min_bump";
 }
 
 export interface SizingConfig {
@@ -136,6 +137,32 @@ export function sizeForLive(
         scaledUsd: newSize * simAction.price,
         clippedBy: "min_order",
       };
+    }
+  }
+
+  // 6b. Marketable BUY $1 minimum bump. Real PM CLOB rejects taker BUYs
+  // (orderType="taker" or unspecified) with notional < $1. After the share
+  // bump above we may still be under $1 (e.g. 5 sh × $0.16 = $0.80). Bump
+  // shares further if budget permits; reject if not. Makers (resting
+  // limits below the ask) are exempt — same rule as the sim referee.
+  const isMaker = simAction.orderType === "maker";
+  if (!isMaker && simAction.side === "BUY") {
+    const currentNotional = newSize * simAction.price;
+    if (currentNotional < CONFIG.CLOB_MIN_MARKETABLE_BUY_USD && simAction.price > 0) {
+      const sharesNeeded = Math.ceil(CONFIG.CLOB_MIN_MARKETABLE_BUY_USD / simAction.price);
+      const neededUsd = sharesNeeded * simAction.price;
+      if (neededUsd <= liveState.cashBalance && neededUsd <= remainingExposure) {
+        newSize = sharesNeeded;
+        clippedBy = "marketable_min_bump";
+      } else {
+        return {
+          action: null,
+          reason: `cannot meet $${CONFIG.CLOB_MIN_MARKETABLE_BUY_USD} marketable BUY min: need ${sharesNeeded}sh × $${simAction.price.toFixed(3)} = $${neededUsd.toFixed(2)}, cash=$${liveState.cashBalance.toFixed(2)}, exposure_remaining=$${remainingExposure.toFixed(2)}`,
+          originalUsd,
+          scaledUsd: newSize * simAction.price,
+          clippedBy: "min_order",
+        };
+      }
     }
   }
 

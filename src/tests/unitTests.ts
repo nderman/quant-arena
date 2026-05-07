@@ -1067,20 +1067,22 @@ console.log("\n=== LiveSizingWrapper ===");
   assert(r.clippedBy === "rounding", `min order: got ${r.clippedBy}`);
 }
 
-// 4d. Min-notional rejection: 5-share bump succeeds but final notional
-// is still below $0.50 floor at very-cheap underdog price.
-// $5 bankroll, sim 18@$0.05 → scaled target $0.09 → 1 share → bump to 5
-// (cash + exposure allow) → final $0.25 < $0.50 → reject.
+// 4d. Marketable BUY $1 bump: at $0.05 the maker-min bump (5 sh) yields
+// only $0.25 notional — below CLOB's $1 marketable BUY minimum. Code
+// further bumps to ⌈$1/$0.05⌉ = 20 shares ($1.00) when budget allows.
+// Replaces the older "min_order rej" expectation: the fix prefers
+// upsizing to a fillable order over rejecting, and 20 sh × $0.05 still
+// represents a cheap-tail bet that matches engine intent.
 {
   const live = mkLiveState(5);
   const r = sizeForLive(
-    { side: "BUY", tokenId: "UP1", price: 0.05, size: 18 },
+    { side: "BUY", tokenId: "UP1", price: 0.05, size: 18, orderType: "taker" },
     live,
     { liveBankrollUsd: 5, simBankrollUsd: 50 },
   );
-  assert(r.action === null, `notional rej: expected null, got ${JSON.stringify(r.action)}`);
-  assert(r.clippedBy === "min_order", `notional rej: expected min_order, got ${r.clippedBy}`);
-  assert(!!r.reason && r.reason.includes("final"), `reason should mention final: ${r.reason}`);
+  assert(r.action !== null, `marketable bump at $0.05: got null (reason=${r.reason})`);
+  assert(r.action!.size === 20, `marketable bump at $0.05: expected 20 shares, got ${r.action?.size}`);
+  assert(r.clippedBy === "marketable_min_bump", `expected marketable_min_bump, got ${r.clippedBy}`);
 }
 
 // 4b. Maker-min floor: tiny bankroll ($12.50) at $0.66 sizes to <5 shares.
@@ -1113,6 +1115,42 @@ console.log("\n=== LiveSizingWrapper ===");
   assert(r.action === null, `maker-min reject: expected null (got action=${JSON.stringify(r.action)})`);
   assert(r.clippedBy === "min_order", `maker-min reject: expected min_order, got ${r.clippedBy}`);
   assert(!!r.reason && r.reason.includes("5-share maker min"), `reason should mention 5-share min: ${r.reason}`);
+}
+
+// 4d-2. Marketable BUY $1 bump from already-rounded order. Bigger
+// bankroll so the rounding doesn't zero out: $25 bankroll, sim 18@$0.16
+// → scale 0.5×, target $1.44 → 9 shares = $1.44 already over $1 — but
+// re-test with smaller engine size to land at 4 shares ($0.64) which
+// triggers the bump.
+{
+  const live = mkLiveState(25);
+  const r = sizeForLive(
+    { side: "BUY", tokenId: "UP1", price: 0.16, size: 8, orderType: "taker" },
+    live,
+    { liveBankrollUsd: 25, simBankrollUsd: 50 },
+  );
+  // 8 × $0.16 = $1.28 sim, scale 0.5× = $0.64 target → 4 shares ($0.64).
+  // 4 < MIN_ORDER_SHARES → maker_min_bump to 5 ($0.80). $0.80 < $1 →
+  // marketable_min_bump to ⌈$1/$0.16⌉ = 7 ($1.12).
+  assert(r.action !== null, `marketable-min from rounded: got null (reason=${r.reason})`);
+  assert(r.action!.size === 7, `marketable-min from rounded: expected 7, got ${r.action?.size}`);
+  assert(r.clippedBy === "marketable_min_bump", `expected marketable_min_bump, got ${r.clippedBy}`);
+}
+
+// 4e. Marketable BUY exempt for makers: 5 sh × $0.16 = $0.80 stays at 5
+// when orderType=maker (resting orders below the ask are exempt from
+// CLOB's $1 marketable rule).
+{
+  const live = mkLiveState(25);
+  const r = sizeForLive(
+    { side: "BUY", tokenId: "UP1", price: 0.16, size: 8, orderType: "maker" },
+    live,
+    { liveBankrollUsd: 25, simBankrollUsd: 50 },
+  );
+  // Same scenario as 4d-2 but maker — should NOT bump beyond 5.
+  assert(r.action !== null, `marketable exempt for maker: got null (reason=${r.reason})`);
+  assert(r.action!.size === 5, `marketable exempt: expected 5 shares (maker_min only), got ${r.action?.size}`);
+  assert(r.clippedBy !== "marketable_min_bump", `maker shouldn't be marketable-bumped: got ${r.clippedBy}`);
 }
 
 // 5. Candle exposure cap
