@@ -207,18 +207,10 @@
     [
       "vol-regime-gate-v1",
       "sol"
-    ],
-    [
-      "vol-regime-gate-gemini-v1",
-      "btc"
-    ],
-    [
-      "vol-regime-gate-v1",
-      "eth"
     ]
   ],
-  "reason": "Engines flagged by /tmp/extreme_audit.py for likely extreme-price strategies (bestRound > $100 OR worstRound < -$30). The pre-May-2026 sim referee under-modeled adverse selection at deep prices (<30c, >70c). Sim Sharpe for these (engine, arena) pairs is unreliable until \u226510 fresh rounds accumulate post-EXTREME_PRICE_ENABLED patch. | 2026-05-07 fidelity audit: sim fired 11/23 + 7/22 rounds with +$134 / +$192 sim PnL, 0 live fires in matched window.",
-  "blacklisted_at": "2026-05-07T06:55:24.775245+00:00",
+  "reason": "Engines flagged by /tmp/extreme_audit.py for likely extreme-price strategies (bestRound > $100 OR worstRound < -$30). The pre-May-2026 sim referee under-modeled adverse selection at deep prices (<30c, >70c). Sim Sharpe for these (engine, arena) pairs is unreliable until \u226510 fresh rounds accumulate post-EXTREME_PRICE_ENABLED patch. | 2026-05-07 fidelity audit: sim fired 11/23 + 7/22 rounds with +$134 / +$192 sim PnL, 0 live fires in matched window. | 2026-05-07 reverted: roster-window audit showed both sim+live were silent during 19h rostered window \u2014 no divergence, just sample size.",
+  "blacklisted_at": "2026-05-07T08:16:30.691749+00:00",
   "review_after_round_count": 10,
   "exempt_current_roster": [
     "bred-fj25 @ btc-1h (worst only -$15 in this arena \u2014 kept)",
