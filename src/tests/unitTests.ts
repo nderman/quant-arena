@@ -1153,6 +1153,23 @@ console.log("\n=== LiveSizingWrapper ===");
   assert(r.clippedBy !== "marketable_min_bump", `maker shouldn't be marketable-bumped: got ${r.clippedBy}`);
 }
 
+// 4f. Marketable BUY rejection when budget can't cover the bump:
+// $25 bankroll but only $0.80 cash. After maker_min_bump to 5 shares the
+// notional is $0.80, but the further bump to 7 sh ($1.12) exceeds the
+// $0.80 cash. Should reject with "marketable BUY min" reason.
+{
+  const live = mkLiveState(25, 0.80); // bankroll $25, cash starved at $0.80
+  const r = sizeForLive(
+    { side: "BUY", tokenId: "UP1", price: 0.16, size: 8, orderType: "taker" },
+    live,
+    { liveBankrollUsd: 25, simBankrollUsd: 50 },
+  );
+  assert(r.action === null, `marketable-min reject: expected null, got ${JSON.stringify(r.action)}`);
+  assert(r.clippedBy === "min_order", `marketable-min reject: expected min_order, got ${r.clippedBy}`);
+  assert(!!r.reason && r.reason.includes("marketable BUY min"),
+    `reason should mention marketable BUY min: ${r.reason}`);
+}
+
 // 5. Candle exposure cap
 {
   const live = mkLiveState(1000);
