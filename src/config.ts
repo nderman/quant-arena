@@ -97,6 +97,12 @@ export const CONFIG = {
   MAKER_ADVERSE_BPS:      num("MAKER_ADVERSE_BPS", 5),                  // 5bps adverse selection on maker fills
   MIN_ORDER_SIZE:          num("MIN_ORDER_SIZE", 5),                     // CLOB rejects < 5 shares
   MIN_MERGE_SIZE:          num("MIN_MERGE_SIZE", 1),                     // merge is on-chain, not CLOB (1 share min)
+  // PM CLOB rejects MARKETABLE BUYs (taker, crossing the spread) when notional
+  // < $1 with `{"error":"invalid amount for a marketable BUY order ($X), min size: $1"}`.
+  // Maker (resting) BUYs are exempt. 2026-05-07 emit log: 6 of 7 bred-fw8t
+  // live attempts at 5sh × $0.17-0.18 = $0.85-0.90 hit this. Sim was filling
+  // them silently → phantom alpha at extreme prices.
+  CLOB_MIN_MARKETABLE_BUY_USD: num("CLOB_MIN_MARKETABLE_BUY_USD", 1.0),
 
   // ── Engine Safety ─────────────────────────────────────────────────────────
   ENGINE_TICK_TIMEOUT_MS:  num("ENGINE_TICK_TIMEOUT_MS", 50),            // kill onTick if > 50ms (OpenClaw safety)

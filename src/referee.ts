@@ -857,6 +857,24 @@ async function processActionNoLatency(
       }
     }
 
+    // CLOB marketable-BUY $1 minimum. PM rejects taker BUYs below $1
+    // notional with `{"error":"invalid amount for a marketable BUY order
+    // ($X), min size: $1"}`. Sim was filling sub-$1 takers silently —
+    // making engines that fire at extreme prices look more profitable
+    // than they actually are. Makers (resting orders below the ask) are
+    // exempt; they sit on the book and PM only enforces share count.
+    if (!isMaker && action.price > 0) {
+      const notional = action.size * action.price;
+      if (notional < CONFIG.CLOB_MIN_MARKETABLE_BUY_USD) {
+        return {
+          action, filled: false, fillPrice: 0, fillSize: 0,
+          fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
+          toxicFlowHit: toxicHit, orderType: "taker",
+          rejectionReason: "marketable_min_notional",
+        };
+      }
+    }
+
     // Post-Only enforcement: maker BUY must NOT cross the spread. If the
     // engine's limit price is at or above bestAsk, the order would execute
     // immediately as a taker. Reject (matches real PM Post-Only behavior).

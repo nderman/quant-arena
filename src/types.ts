@@ -129,6 +129,7 @@ export type RejectionReason =
   | "invalid_token"           // tokenId not in current market
   | "insufficient_cash"       // BUY cost exceeds cash balance
   | "maker_not_filled"        // maker lottery lost (directional fill probability)
+  | "marketable_min_notional" // taker BUY notional < CLOB_MIN_MARKETABLE_BUY_USD ($1)
   | "merge_window_closed"     // merge tx wouldn't mine before settlement
   | "other";                  // catch-all — fix the call site
 

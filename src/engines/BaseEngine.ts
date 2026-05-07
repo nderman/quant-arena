@@ -10,6 +10,7 @@
  * Engines extend this and implement onTick() with their strategy.
  */
 
+import { CONFIG } from "../config";
 import { calculateFeeAdjustedEdge, cheaperExit, isBookTradeable as _isBookTradeable } from "../referee";
 import {
   getBookForToken as _getBookForToken,
@@ -476,11 +477,23 @@ export abstract class AbstractEngine implements IBaseEngine {
   protected buy(tokenId: string, price: number, size: number, opts?: {
     note?: string; signalSource?: string; orderType?: "maker" | "taker";
   }): EngineAction {
+    // PM CLOB rejects marketable (taker) BUYs below $1 notional. Auto-bump
+    // size to meet the minimum so engine logic isn't accidentally emitting
+    // un-fillable orders. Makers are exempt — they sit on the book and the
+    // share count is the only constraint.
+    let finalSize = size;
+    if ((opts?.orderType ?? "taker") !== "maker" && price > 0) {
+      const notional = size * price;
+      if (notional < CONFIG.CLOB_MIN_MARKETABLE_BUY_USD) {
+        const needed = Math.ceil(CONFIG.CLOB_MIN_MARKETABLE_BUY_USD / price);
+        finalSize = Math.max(needed, CONFIG.MIN_ORDER_SIZE);
+      }
+    }
     return {
       side: "BUY",
       tokenId,
       price,
-      size,
+      size: finalSize,
       orderType: opts?.orderType,
       note: opts?.note,
       signalSource: opts?.signalSource,

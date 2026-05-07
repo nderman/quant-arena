@@ -532,6 +532,39 @@ async function runRejectionReasonTests(): Promise<void> {
       `referee should tally the reason, got ${JSON.stringify(state.rejectionCounts)}`);
     console.log("  referee tallies state.rejectionCounts ✓");
   }
+
+  // marketable_min_notional — taker BUY with notional < $1 must reject
+  // (matches PM CLOB's "invalid amount for a marketable BUY order" 400)
+  {
+    const state = mkState2();
+    const action: EngineAction = {
+      // 5 shares × $0.18 = $0.90 — below $1 marketable min
+      side: "BUY", tokenId: "UP_TOK", price: 0.18, size: 5, orderType: "taker",
+    };
+    const r = await processActions([action], state);
+    const fill = r.results[0];
+    assert(fill.filled === false, "sub-$1 marketable BUY should not fill");
+    assert(fill.rejectionReason === "marketable_min_notional",
+      `expected marketable_min_notional, got ${fill.rejectionReason}`);
+    console.log("  marketable_min_notional ✓");
+  }
+
+  // Maker BUYs are exempt from the $1 marketable minimum (resting orders
+  // sit on the book, PM only enforces share count for those).
+  {
+    const state = mkState2();
+    const action: EngineAction = {
+      // 5 shares × $0.18 = $0.90 but maker → must NOT trigger marketable_min
+      side: "BUY", tokenId: "UP_TOK", price: 0.18, size: 5, orderType: "maker",
+    };
+    const r = await processActions([action], state);
+    const fill = r.results[0];
+    // Maker may or may not fill depending on book state, but the rejection
+    // (if any) must NOT be marketable_min_notional.
+    assert(fill.rejectionReason !== "marketable_min_notional",
+      `maker BUY should be exempt from marketable_min_notional, got ${fill.rejectionReason}`);
+    console.log("  maker exempt from marketable_min_notional ✓");
+  }
 }
 
 // ── parsePmL2: validate + filter PM book quotes ─────────────────────────────
@@ -668,6 +701,9 @@ class TestEngine extends AbstractEngine {
   testHasPending() { return this.hasPendingOrder(); }
   testMarkPending(id: string) { this.markPending(id); }
   testClearPending() { this.clearPendingOrders(); }
+  testBuy(tokenId: string, price: number, size: number, opts?: { orderType?: "maker" | "taker" }) {
+    return this.buy(tokenId, price, size, opts);
+  }
 }
 
 function mkState(opts: { upToken?: string; downToken?: string; positions?: Map<string, PositionState> }): EngineState {
@@ -734,6 +770,35 @@ console.log("\n=== Pending-Order Helpers ===");
 
   e.testClearPending();
   assert(!e.testHasPending(), "clearPendingOrders resets all");
+}
+
+console.log("\n=== BaseEngine.buy() marketable-min size bump ===");
+{
+  const e = new TestEngine();
+  e.init(mkState({}));
+
+  // taker @ $0.18 × 5 = $0.90 (below $1) — must bump to ⌈1/0.18⌉ = 6
+  const subMin = e.testBuy("UP1", 0.18, 5, { orderType: "taker" });
+  assert(subMin.size === 6,
+    `expected size bumped to 6 (= ⌈1/0.18⌉), got ${subMin.size}`);
+  console.log("  taker BUY @ $0.18 × 5 → bumped to 6 ✓");
+
+  // taker @ $0.50 × 5 = $2.50 (above $1) — must NOT bump
+  const ok = e.testBuy("UP1", 0.50, 5, { orderType: "taker" });
+  assert(ok.size === 5, `taker BUY at $2.50 should not bump, got ${ok.size}`);
+  console.log("  taker BUY $2.50 unchanged ✓");
+
+  // maker @ $0.10 × 5 = $0.50 — exempt, must NOT bump
+  const maker = e.testBuy("UP1", 0.10, 5, { orderType: "maker" });
+  assert(maker.size === 5,
+    `maker BUY should not bump (exempt), got ${maker.size}`);
+  console.log("  maker BUY exempt from bump ✓");
+
+  // taker without explicit orderType defaults to taker semantics
+  const defaultTaker = e.testBuy("UP1", 0.10, 5);
+  assert(defaultTaker.size === 10,
+    `default-taker BUY should bump to ⌈1/0.10⌉=10, got ${defaultTaker.size}`);
+  console.log("  default-taker BUY bumped ✓");
 }
 
 // ── Regime Signals ─────────────────────────────────────────────────────────
