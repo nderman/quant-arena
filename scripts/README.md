@@ -8,6 +8,7 @@ When in doubt, look here first instead of writing a one-off. Every entry tells y
 |---|---|
 | **"What's the live state right now?"** (one-shot) | `python3 scripts/liveStatus.py` (on VPS) |
 | "How's live PnL by engine?" | `python3 scripts/livePnLByEngine.py --since 24h` (on VPS) |
+| "Does sim match live for engine X?" (roster-aware) | `python3 scripts/simLiveAudit.py --engine X` (on VPS) |
 | "What's the auto-rotation cron been doing?" | `tail -30 ~/quant-arena/data/auto_rotation.log` |
 | "What would auto-rotation do right now?" | `python3 scripts/auto_rotate.py` (dry-run) |
 | "Force a roster swap now" | `python3 scripts/auto_rotate.py --commit` |
@@ -30,6 +31,7 @@ When in doubt, look here first instead of writing a one-off. Every entry tells y
 | Script | Purpose | Key args | Status |
 |---|---|---|---|
 | `liveStatus.py` | **One-shot live state**: roster + cooldowns + last 3 cron runs + 24h ledger PnL + open Polymarket positions. | `--since 24h\|7d\|ISO` | ✅ active |
+| `simLiveAudit.py` | Roster-aware sim:live fidelity audit. Reconstructs each engine's actual rostering window from `live_engines.json.bak.*` + current state, then compares sim fires (`round_history_*.json`) to live fires (`live_trades.jsonl` + `live_emit.log`) within those windows ONLY. Required to avoid false-divergence calls — sim runs every engine on every arena 24/7, but live only mirrors rostered slots. | `--engine X`, `--arena Y`, `--min-n N` | ✅ active |
 | `auto_rotate.py` | Hourly cron — picks top SAFE engines, hot-swaps `data/live_engines.json`. Respects manual culls via 6h cooldown. | `--commit`, `--bankroll N` | ✅ active (cron :05) |
 | `livePnLByEngine.py` | Per-engine PnL from `data/live_trades.jsonl` (FILL+SETTLE). Ground-truth attribution. | `--since 24h\|7d\|ISO` | ✅ active |
 | `liveLb.py` | Live mid-round leaderboard scraped from PM2 log files. | `--top N`, `--active`, `--5m`, `[coin]` | ⚠️ broken — PM2 log files no longer on disk |
