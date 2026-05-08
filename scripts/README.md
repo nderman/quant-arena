@@ -9,6 +9,7 @@ When in doubt, look here first instead of writing a one-off. Every entry tells y
 | **"What's the live state right now?"** (one-shot) | `python3 scripts/liveStatus.py` (on VPS) |
 | "How's live PnL by engine?" | `python3 scripts/livePnLByEngine.py --since 24h` (on VPS) |
 | "Does sim match live for engine X?" (roster-aware) | `python3 scripts/simLiveAudit.py --engine X` (on VPS) |
+| "Did sim wins materialize in live?" (asymmetric divergence check) | `python3 scripts/liveSettleWatchdog.py` (on VPS, dry-run) |
 | "What's the auto-rotation cron been doing?" | `tail -30 ~/quant-arena/data/auto_rotation.log` |
 | "What would auto-rotation do right now?" | `python3 scripts/auto_rotate.py` (dry-run) |
 | "Force a roster swap now" | `python3 scripts/auto_rotate.py --commit` |
@@ -32,6 +33,7 @@ When in doubt, look here first instead of writing a one-off. Every entry tells y
 |---|---|---|---|
 | `liveStatus.py` | **One-shot live state**: roster + cooldowns + last 3 cron runs + 24h ledger PnL + open Polymarket positions. | `--since 24h\|7d\|ISO` | ✅ active |
 | `simLiveAudit.py` | Roster-aware sim:live fidelity audit. Reconstructs each engine's actual rostering window from `live_engines.json.bak.*` + current state, then compares sim fires (`round_history_*.json`) to live fires (`live_trades.jsonl` + `live_emit.log`) within those windows ONLY. Required to avoid false-divergence calls — sim runs every engine on every arena 24/7, but live only mirrors rostered slots. | `--engine X`, `--arena Y`, `--min-n N` | ✅ active |
+| `liveSettleWatchdog.py` | Auto-blacklist watchdog. Cron every 15 min: pulls Activity API, attributes settled live trades to `(engine, arena)` via the slug→tokenId bridge, and blacklists any pair with ≥4/5 live losses where sim claimed positive PnL in the same rounds (the "chop-fader pattern"). Appends to `config/sim_unreliable.json` + removes from live roster + logs to `data/auto_blacklist.log`. Idempotent — already-blacklisted pairs are skipped. | `--commit` (default dry-run) | ✅ active (cron */15) |
 | `auto_rotate.py` | Hourly cron — picks top SAFE engines, hot-swaps `data/live_engines.json`. Respects manual culls via 6h cooldown. | `--commit`, `--bankroll N` | ✅ active (cron :05) |
 | `livePnLByEngine.py` | Per-engine PnL from `data/live_trades.jsonl` (FILL+SETTLE). Ground-truth attribution. | `--since 24h\|7d\|ISO` | ✅ active |
 | `liveLb.py` | Live mid-round leaderboard scraped from PM2 log files. | `--top N`, `--active`, `--5m`, `[coin]` | ⚠️ broken — PM2 log files no longer on disk |
