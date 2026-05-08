@@ -133,6 +133,25 @@ export const CONFIG = {
   // ── Logging ────────────────────────────────────────────────────────────────
   LOG_LEVEL:              str("LOG_LEVEL", "info"),
   ROUND_INTEL_PATH:       str("ROUND_INTEL_PATH", `./data/round_intel_${_coin}.json`),
+  // Per-tick per-engine snapshot dump every 100 ticks. Disabled by default
+  // (2026-05-08) — generates ~60% of total log volume on a 38-engine arena
+  // process. Set LOG_VERBOSE=true for debug.
+  LOG_VERBOSE:            bool("LOG_VERBOSE", false),
+
+  // ── Polling cadence ────────────────────────────────────────────────────────
+  // Each arena process used to fetch signals every 15s and run the settlement
+  // poll every 30s — but with 12 PM2 processes that compounded to ~72 external
+  // API calls per minute, contributing to TLS/timeout cascades when the VPS was
+  // under CPU load. Doubled both intervals 2026-05-08; settlement still runs
+  // fast enough on 5m markets and signals are noisy on 15s scales anyway.
+  SIGNAL_POLL_INTERVAL_MS:     num("SIGNAL_POLL_INTERVAL_MS", 30_000),
+  SETTLEMENT_POLL_INTERVAL_MS: num("SETTLEMENT_POLL_INTERVAL_MS", 60_000),
+  // File-based signals cache shared across processes. First reader within
+  // the TTL gets cache hit; expired or missing → re-fetches fresh. Cuts
+  // external-API call rate by ~12× since all processes for a given symbol
+  // share one cached snapshot on disk.
+  SIGNALS_CACHE_PATH:          str("SIGNALS_CACHE_PATH", "./data/signals_cache"),
+  SIGNALS_CACHE_TTL_MS:        num("SIGNALS_CACHE_TTL_MS", 25_000),
 
   // ── Sanity / phantom alpha ────────────────────────────────────────────────
   PHANTOM_PNL_MULTIPLIER: num("PHANTOM_PNL_MULTIPLIER", 10),  // round PnL > STARTING_CASH × this is flagged as likely sim bug

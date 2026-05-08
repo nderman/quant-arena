@@ -7,6 +7,9 @@
  * Borrowed from: fearGreed.ts, fundingRate.ts, deribitVol.ts, binanceVol.ts
  */
 
+import * as fs from "fs";
+import * as path from "path";
+import { CONFIG } from "./config";
 import { fetchJson } from "./http";
 import type { SignalSnapshot } from "./types";
 
@@ -220,6 +223,57 @@ export async function fetchSignalSnapshot(symbol = "BTCUSDT"): Promise<SignalSna
     realizedVol: realizedVol.status === "fulfilled" ? realizedVol.value : null,
     binancePrice: binancePrice.status === "fulfilled" ? binancePrice.value : null,
   };
+}
+
+/**
+ * Cached version of fetchSignalSnapshot — reads from disk cache shared
+ * across processes if fresh (< CONFIG.SIGNALS_CACHE_TTL_MS), else fetches
+ * fresh and writes the cache. With 12 arena processes polling the same
+ * symbol, this cuts external API calls by ~12×.
+ *
+ * Cache layout: one file per symbol at `${CONFIG.SIGNALS_CACHE_PATH}_<symbol>.json`.
+ * Atomic write via tmp + rename. Stale-on-error fallback: if fetch fails,
+ * return whatever is on disk (even if expired) before giving up.
+ */
+export async function fetchSignalSnapshotCached(symbol = "BTCUSDT"): Promise<SignalSnapshot> {
+  const cachePath = `${CONFIG.SIGNALS_CACHE_PATH}_${symbol.toLowerCase()}.json`;
+  // Hot path: try to read fresh cache first.
+  try {
+    const stat = fs.statSync(cachePath);
+    const age = Date.now() - stat.mtimeMs;
+    if (age < CONFIG.SIGNALS_CACHE_TTL_MS) {
+      const data = JSON.parse(fs.readFileSync(cachePath, "utf-8")) as SignalSnapshot;
+      return data;
+    }
+  } catch {
+    // No cache yet, or unreadable — fall through to fetch.
+  }
+
+  // Cache miss or stale — fetch fresh.
+  let snap: SignalSnapshot;
+  try {
+    snap = await fetchSignalSnapshot(symbol);
+  } catch (err) {
+    // Network failure on fetch — last resort: return stale cache if present.
+    try {
+      const data = JSON.parse(fs.readFileSync(cachePath, "utf-8")) as SignalSnapshot;
+      return data;
+    } catch {
+      throw err;
+    }
+  }
+
+  // Write cache atomically (tmp + rename).
+  try {
+    const dir = path.dirname(cachePath);
+    if (dir && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const tmp = `${cachePath}.tmp.${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(snap));
+    fs.renameSync(tmp, cachePath);
+  } catch {
+    // Cache write failure shouldn't crash callers — they got a fresh snapshot.
+  }
+  return snap;
 }
 
 // ── Standalone Test ──────────────────────────────────────────────────────────

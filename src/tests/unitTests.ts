@@ -983,6 +983,7 @@ class StableRegimeEngine extends AbstractEngine {
 import { sizeForLive, computeCandleExposure } from "../live/liveSizing";
 import { createLiveState } from "../live/liveState";
 import { RISK_CONFIG } from "../live/riskManager";
+import { CONFIG } from "../config";
 
 // Disable the May 6 flat $$ ceiling for the legacy scaling tests below —
 // those tests exercise the PCT-cap math in isolation. The $8 ceiling is
@@ -1751,6 +1752,47 @@ console.log("\n── Signal Contrarian gate logic ───────");
   assert(mid.side === null, `F&G=64 below threshold: expected null, got ${mid.side}`);
   const mid2 = computeSignalBias(50, 0);
   assert(mid2.side === null, `F&G=50 neutral: expected null, got ${mid2.side}`);
+}
+
+// ── Signals shared cache (May 2026) ──────────────────────────────────────────
+console.log("\n=== fetchSignalSnapshotCached: shared file cache ===");
+{
+  const tmpDir = require("os").tmpdir();
+  const tmpPath = require("path").join(tmpDir, `qf-signals-cache-test-${process.pid}`);
+  // Override the CONFIG path for this test only.
+  const originalPath = CONFIG.SIGNALS_CACHE_PATH;
+  const originalTtl = CONFIG.SIGNALS_CACHE_TTL_MS;
+  (CONFIG as any).SIGNALS_CACHE_PATH = tmpPath;
+  (CONFIG as any).SIGNALS_CACHE_TTL_MS = 60_000;
+
+  // Hand-write a fresh cache file with a known sentinel value.
+  const sentinel = {
+    timestamp: Date.now(),
+    fearGreed: { value: 42, label: "TEST", timestamp: Date.now() },
+    funding: null,
+    impliedVol: null,
+    realizedVol: null,
+    binancePrice: 12345,
+  };
+  const cachePath = `${tmpPath}_btcusdt.json`;
+  require("fs").writeFileSync(cachePath, JSON.stringify(sentinel));
+
+  // First read should hit the cache (no network) and return our sentinel.
+  const { fetchSignalSnapshotCached: cachedFn } = require("../signals");
+  cachedFn("BTCUSDT").then((snap: any) => {
+    assert(snap.fearGreed?.value === 42, `cache hit: expected fearGreed.value=42, got ${snap.fearGreed?.value}`);
+    assert(snap.fearGreed?.label === "TEST", `cache hit: expected label TEST, got ${snap.fearGreed?.label}`);
+    assert(snap.binancePrice === 12345, `cache hit: expected binancePrice 12345, got ${snap.binancePrice}`);
+    console.log("  fresh cache hit → returns disk content without network ✓");
+
+    // Cleanup + restore.
+    try { require("fs").unlinkSync(cachePath); } catch {}
+    (CONFIG as any).SIGNALS_CACHE_PATH = originalPath;
+    (CONFIG as any).SIGNALS_CACHE_TTL_MS = originalTtl;
+  }).catch((err: any) => {
+    console.log(`  ✗ cache hit test threw: ${err.message}`);
+    failed++;
+  });
 }
 
 // ── Extreme-price settlement bias (May 2026) ────────────────────────────────

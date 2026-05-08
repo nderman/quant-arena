@@ -19,7 +19,7 @@ import { CONFIG } from "./config";
 import { pulseEvents, startSimulatedPulse, startPmChannel, startBinanceChannel, startMarketRotation, setPmSubscriptionTokens, shutdown as shutdownPulse } from "./pulse";
 import { processActions, processMergeActions, markToMarket, clearFeePool, clearFeePoolForMarket, snapshotTickBooks, processGtcOrders, expireGtcOrders, clearGtcOrders } from "./referee";
 import { recordFill, recordRoundStart, recordRoundEnd, getRoundSummary, closeDb, flushLedger } from "./ledger";
-import { fetchSignalSnapshot } from "./signals";
+import { fetchSignalSnapshotCached } from "./signals";
 import { discoverCryptoMarkets, discoverUpDownMarkets, discover5mMarkets } from "./discovery";
 import { pollAndSettle } from "./settlement";
 import { startChainlinkPoller } from "./chainlink";
@@ -286,22 +286,22 @@ async function runRound(
   let tickCount = 0;
   const allPendingMerges: { engineId: string; state: EngineState; merges: EngineAction[] }[] = [];
 
-  // ── Fetch signals periodically (every 15s) ──
-  // signals.ts has internal caching (F&G 1h, funding/DVOL by HTTP cache
-  // headers), so this polling rate doesn't hammer external APIs — mostly
-  // serves realized-vol freshness + funding drift within an 8h cycle.
+  // ── Fetch signals periodically (cadence in CONFIG.SIGNAL_POLL_INTERVAL_MS, default 30s) ──
+  // signals.ts has internal HTTP caching AND a file-based shared cache via
+  // fetchSignalSnapshotCached — multiple arena processes hit the same disk
+  // cache so external APIs see one fetch per CONFIG.SIGNALS_CACHE_TTL_MS.
   let latestSignals: SignalSnapshot | undefined;
   const signalInterval = setInterval(async () => {
     try {
-      latestSignals = await fetchSignalSnapshot(CONFIG.BINANCE_SYMBOL.toUpperCase());
+      latestSignals = await fetchSignalSnapshotCached(CONFIG.BINANCE_SYMBOL.toUpperCase());
     } catch { /* non-critical */ }
-  }, 15_000);
+  }, CONFIG.SIGNAL_POLL_INTERVAL_MS);
   // Initial fetch
-  fetchSignalSnapshot(CONFIG.BINANCE_SYMBOL.toUpperCase())
+  fetchSignalSnapshotCached(CONFIG.BINANCE_SYMBOL.toUpperCase())
     .then(s => { latestSignals = s; })
     .catch(() => {});
 
-  // ── Settlement: poll Gamma API every 30s for closed markets ──
+  // ── Settlement: poll Gamma API per CONFIG.SETTLEMENT_POLL_INTERVAL_MS (default 60s) ──
   const settlementInterval = setInterval(() => {
     const lookback = CONFIG.ARENA_MARKET_INTERVAL === "4h" ? 360
                    : CONFIG.ARENA_MARKET_INTERVAL === "1h" ? 120
@@ -309,7 +309,7 @@ async function runRound(
     pollAndSettle(statesForSettlement, { tokenSlugPrefix: CONFIG.ARENA_SLUG_PREFIX, roundId, lookbackMinutes: lookback, intervalTag: CONFIG.ARENA_MARKET_INTERVAL }).catch(err =>
       console.error("[arena] settlement error:", err.message)
     );
-  }, 30_000);
+  }, CONFIG.SETTLEMENT_POLL_INTERVAL_MS);
 
   // ── Tick handler: feed every tick to every engine ──
   const onTick = async (tick: MarketTick) => {
@@ -414,17 +414,20 @@ async function runRound(
     // Flush ledger buffer to disk every 50 ticks (not every tick — defeats buffering)
     if (tickCount % 50 === 0) flushLedger();
 
-    // Periodic status (every 100 ticks, PM price only)
+    // Periodic status — full per-engine dump only when LOG_VERBOSE.
+    // Otherwise just one tick + price line per 100 ticks for liveness signal.
     if (tickCount % 100 === 0 && lastPmTick) {
       const price = lastPmTick.midPrice;
       console.log(`\n[arena] === Tick #${tickCount} | Price: ${price.toFixed(4)} ===`);
-      for (const engine of engines) {
-        const s = states.get(engine.id)!;
-        const mtm = markToMarket(s, price);
-        const total = s.cashBalance + mtm;
-        const pnl = total - CONFIG.STARTING_CASH;
-        const rebateStr = s.feeRebate > 0 ? ` rebate=$${s.feeRebate.toFixed(4)}` : "";
-        console.log(`  ${engine.id}: cash=$${s.cashBalance.toFixed(2)} mtm=$${mtm.toFixed(2)} pnl=${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} trades=${s.tradeCount} fees=$${s.feePaid.toFixed(4)}${rebateStr}`);
+      if (CONFIG.LOG_VERBOSE) {
+        for (const engine of engines) {
+          const s = states.get(engine.id)!;
+          const mtm = markToMarket(s, price);
+          const total = s.cashBalance + mtm;
+          const pnl = total - CONFIG.STARTING_CASH;
+          const rebateStr = s.feeRebate > 0 ? ` rebate=$${s.feeRebate.toFixed(4)}` : "";
+          console.log(`  ${engine.id}: cash=$${s.cashBalance.toFixed(2)} mtm=$${mtm.toFixed(2)} pnl=${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} trades=${s.tradeCount} fees=$${s.feePaid.toFixed(4)}${rebateStr}`);
+        }
       }
     }
   };
