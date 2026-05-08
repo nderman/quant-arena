@@ -207,10 +207,26 @@
     [
       "vol-regime-gate-v1",
       "sol"
+    ],
+    [
+      "bred-fw8t",
+      "btc-4h"
+    ],
+    [
+      "bred-znra-small-v1",
+      "btc-1h"
+    ],
+    [
+      "maker-momentum-v1",
+      "eth-4h"
+    ],
+    [
+      "rotation-fade-v1",
+      "eth"
     ]
   ],
-  "reason": "Engines flagged by /tmp/extreme_audit.py for likely extreme-price strategies (bestRound > $100 OR worstRound < -$30). The pre-May-2026 sim referee under-modeled adverse selection at deep prices (<30c, >70c). Sim Sharpe for these (engine, arena) pairs is unreliable until \u226510 fresh rounds accumulate post-EXTREME_PRICE_ENABLED patch. | 2026-05-07 fidelity audit: sim fired 11/23 + 7/22 rounds with +$134 / +$192 sim PnL, 0 live fires in matched window. | 2026-05-07 reverted: roster-window audit showed both sim+live were silent during 19h rostered window \u2014 no divergence, just sample size.",
-  "blacklisted_at": "2026-05-07T08:16:30.691749+00:00",
+  "reason": "Engines flagged by /tmp/extreme_audit.py for likely extreme-price strategies (bestRound > $100 OR worstRound < -$30). The pre-May-2026 sim referee under-modeled adverse selection at deep prices (<30c, >70c). Sim Sharpe for these (engine, arena) pairs is unreliable until \u226510 fresh rounds accumulate post-EXTREME_PRICE_ENABLED patch. | 2026-05-07 fidelity audit: sim fired 11/23 + 7/22 rounds with +$134 / +$192 sim PnL, 0 live fires in matched window. | 2026-05-07 reverted: roster-window audit showed both sim+live were silent during 19h rostered window \u2014 no divergence, just sample size. | 2026-05-08 chop-fader-pattern blacklist: Activity API showed 25/29 settled live trades LOST (-$25 / $49 stake) while sim claimed +$50-107 per engine. Every extreme-price-tail engine in current roster diverged. Same asymmetric bias as chop-fader.",
+  "blacklisted_at": "2026-05-08T14:55:46.437393+00:00",
   "review_after_round_count": 10,
   "exempt_current_roster": [
     "bred-fj25 @ btc-1h (worst only -$15 in this arena \u2014 kept)",
