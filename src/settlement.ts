@@ -9,6 +9,7 @@
  * Survives arena restarts since state lives in engine positions, not here.
  */
 
+import * as fs from "fs";
 import { CONFIG } from "./config";
 import { fetchJson } from "./http";
 import { recordSettlement } from "./ledger";
@@ -21,11 +22,61 @@ const EXTREME_BIAS_THRESHOLD = CONFIG.EXTREME_PRICE_THRESHOLD;
 const EXTREME_BIAS_RANGE = 0.5 - EXTREME_BIAS_THRESHOLD;
 const EXTREME_BIAS_PROB_MAX = CONFIG.EXTREME_SETTLEMENT_BIAS_PROB_MAX;
 
+// Empirical flip-prob lookup (2026-05-11). Loaded lazily on first call.
+// JSON schema: { buckets: [{price_lo, price_hi, n, flip_prob}, ...], min_n_per_bucket, ... }
+interface EmpiricalBucket {
+  price_lo: number;
+  price_hi: number;
+  n: number;
+  flip_prob: number | null;
+}
+interface EmpiricalCalibration {
+  buckets: EmpiricalBucket[];
+  min_n_per_bucket: number;
+}
+let _empiricalCache: EmpiricalCalibration | null | undefined = undefined;
+
+function loadEmpirical(): EmpiricalCalibration | null {
+  if (_empiricalCache !== undefined) return _empiricalCache;
+  try {
+    const raw = fs.readFileSync(CONFIG.EMPIRICAL_FLIP_PROB_PATH, "utf-8");
+    _empiricalCache = JSON.parse(raw) as EmpiricalCalibration;
+  } catch {
+    _empiricalCache = null;
+  }
+  return _empiricalCache;
+}
+
+/** Test-only: reset the cache so unit tests can re-load a fresh JSON. */
+export function _resetEmpiricalCache(): void {
+  _empiricalCache = undefined;
+}
+
 /** Probability a sim position entered at `avgEntry` will be force-flipped
  *  to a loss at settle, modeling adverse selection at extreme entry prices.
- *  0 if not extreme. Exported for testing the calibration. */
+ *
+ *  Lookup order:
+ *    1. Empirical per-bucket curve (config/empirical_flip_prob.json) if
+ *       the bucket containing avgEntry has ≥ min_n_per_bucket samples.
+ *    2. Linear fallback formula (the May 2 v2 hand-tuned curve).
+ *    3. 0 if EXTREME_SETTLEMENT_BIAS_ENABLED=false.
+ *
+ *  Exported for testing. */
 export function extremeFlipProb(avgEntry: number): number {
   if (!EXTREME_BIAS_ENABLED) return 0;
+
+  // Try empirical first.
+  const cal = loadEmpirical();
+  if (cal) {
+    const bucket = cal.buckets.find(b =>
+      avgEntry >= b.price_lo && (avgEntry < b.price_hi || (avgEntry === 1.0 && b.price_hi === 1.0))
+    );
+    if (bucket && bucket.n >= cal.min_n_per_bucket && bucket.flip_prob !== null) {
+      return Math.max(0, Math.min(1, bucket.flip_prob));
+    }
+  }
+
+  // Fallback: linear formula.
   const distFromMid = Math.abs(avgEntry - 0.5);
   if (distFromMid <= EXTREME_BIAS_THRESHOLD) return 0;
   const extremity = Math.min(1.0, (distFromMid - EXTREME_BIAS_THRESHOLD) / EXTREME_BIAS_RANGE);

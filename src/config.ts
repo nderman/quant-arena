@@ -78,6 +78,22 @@ export const CONFIG = {
   // Live engines (liveSettlement.ts) are unaffected — they get real PM outcomes.
   EXTREME_SETTLEMENT_BIAS_ENABLED:    bool("EXTREME_SETTLEMENT_BIAS_ENABLED", true),
   EXTREME_SETTLEMENT_BIAS_PROB_MAX:   num("EXTREME_SETTLEMENT_BIAS_PROB_MAX", 0.40),  // up to 40% prob force-loss at full extremity (entry @ 5c/95c)
+  // 2026-05-11: empirical per-price-bucket flip curve calibrated from 169
+  // settled live trades. Overrides the linear formula above when the JSON
+  // exists. Falls back to linear for buckets with < min_n samples.
+  EMPIRICAL_FLIP_PROB_PATH:           str("EMPIRICAL_FLIP_PROB_PATH", "./config/empirical_flip_prob.json"),
+
+  // ── Price-zone gate (2026-05-11) ───────────────────────────────────────────
+  // Live data revealed that taker BUYs below 0.55 lose ~70-100% of the time
+  // across all engine classes (sim:live divergence is structural, not just
+  // extreme-price). Reject taker BUYs outside [LIVE_PRICE_ZONE_MIN,
+  // LIVE_PRICE_ZONE_MAX] at the referee AND liveSizing layers. Makers exempt
+  // — they post resting orders and the marketable rule doesn't apply.
+  // Disable to study fills outside the alpha zone. The zone is empirical
+  // and should be re-tuned as more data lands.
+  LIVE_PRICE_ZONE_ENABLED:            bool("LIVE_PRICE_ZONE_ENABLED", true),
+  LIVE_PRICE_ZONE_MIN:                num("LIVE_PRICE_ZONE_MIN", 0.55),
+  LIVE_PRICE_ZONE_MAX:                num("LIVE_PRICE_ZONE_MAX", 0.70),
 
   // ── Fill Decay (reactive market makers) ────────────────────────────────────
   FILL_DECAY_ENABLED:     bool("FILL_DECAY_ENABLED", true),

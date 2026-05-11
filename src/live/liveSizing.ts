@@ -140,12 +140,28 @@ export function sizeForLive(
     }
   }
 
+  // 6a. Price-zone gate (2026-05-11). Live data showed taker BUYs outside
+  // the alpha zone (default 0.55-0.70) lose 70-100%. Reject before any
+  // further sizing/bumping. Makers exempt (resting orders, different
+  // dynamics). Mirrors the same gate in referee.ts so sim:live stays aligned.
+  const isMaker = simAction.orderType === "maker";
+  if (!isMaker && simAction.side === "BUY" && CONFIG.LIVE_PRICE_ZONE_ENABLED) {
+    if (simAction.price < CONFIG.LIVE_PRICE_ZONE_MIN || simAction.price > CONFIG.LIVE_PRICE_ZONE_MAX) {
+      return {
+        action: null,
+        reason: `taker BUY @ $${simAction.price.toFixed(3)} outside alpha zone [${CONFIG.LIVE_PRICE_ZONE_MIN}, ${CONFIG.LIVE_PRICE_ZONE_MAX}]`,
+        originalUsd,
+        scaledUsd: 0,
+        clippedBy: "min_order",
+      };
+    }
+  }
+
   // 6b. Marketable BUY $1 minimum bump. Real PM CLOB rejects taker BUYs
   // (orderType="taker" or unspecified) with notional < $1. After the share
   // bump above we may still be under $1 (e.g. 5 sh × $0.16 = $0.80). Bump
   // shares further if budget permits; reject if not. Makers (resting
   // limits below the ask) are exempt — same rule as the sim referee.
-  const isMaker = simAction.orderType === "maker";
   if (!isMaker && simAction.side === "BUY") {
     const currentNotional = newSize * simAction.price;
     if (currentNotional < CONFIG.CLOB_MIN_MARKETABLE_BUY_USD && simAction.price > 0) {

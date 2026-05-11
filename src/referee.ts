@@ -875,6 +875,22 @@ async function processActionNoLatency(
       }
     }
 
+    // Empirical price-zone gate (2026-05-11). 169 settled live trades
+    // showed taker BUYs outside [LIVE_PRICE_ZONE_MIN, LIVE_PRICE_ZONE_MAX]
+    // lose 70-100% of the time regardless of engine logic. Reject sim
+    // fires outside the zone so sim:live PnL stays honest. Makers are
+    // exempt — they post resting orders, different fill dynamics.
+    if (!isMaker && action.price > 0 && CONFIG.LIVE_PRICE_ZONE_ENABLED) {
+      if (action.price < CONFIG.LIVE_PRICE_ZONE_MIN || action.price > CONFIG.LIVE_PRICE_ZONE_MAX) {
+        return {
+          action, filled: false, fillPrice: 0, fillSize: 0,
+          fee: 0, rebate: 0, slippage, pnl: 0, latencyMs: actualLatency,
+          toxicFlowHit: toxicHit, orderType: "taker",
+          rejectionReason: "outside_price_zone",
+        };
+      }
+    }
+
     // Post-Only enforcement: maker BUY must NOT cross the spread. If the
     // engine's limit price is at or above bestAsk, the order would execute
     // immediately as a taker. Reject (matches real PM Post-Only behavior).

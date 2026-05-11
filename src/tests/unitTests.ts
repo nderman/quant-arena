@@ -6,7 +6,7 @@
 
 import { calculateFee, calculateMergeFee, calculateFeeAdjustedEdge, cheaperExit, walkBook, isBookTradeable, shouldRejectStaleSnipe, shouldRejectCompetingTaker } from "../referee";
 import { parsePmL2, isBookUpdateReasonable } from "../pulse";
-import { extremeFlipProb } from "../settlement";
+import { extremeFlipProb, _resetEmpiricalCache } from "../settlement";
 import type { OrderBook } from "../types";
 
 // Helper to build minimal valid OrderBook for tests
@@ -481,6 +481,11 @@ async function runRejectionReasonTests(): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { processActions } = require("../referee");
 
+  // Disable price-zone gate for legacy tests (most use prices outside
+  // [0.55, 0.70]). Re-enabled below for the dedicated zone-gate tests.
+  const SAVED_ZONE_ENABLED = CONFIG.LIVE_PRICE_ZONE_ENABLED;
+  (CONFIG as any).LIVE_PRICE_ZONE_ENABLED = false;
+
   const mkState2 = (): EngineState => ({
     engineId: "reason-test",
     positions: new Map(),
@@ -535,6 +540,8 @@ async function runRejectionReasonTests(): Promise<void> {
 
   // marketable_min_notional — taker BUY with notional < $1 must reject
   // (matches PM CLOB's "invalid amount for a marketable BUY order" 400)
+  // Note: at $0.18 the price-zone gate ALSO rejects (outside 0.55-0.70).
+  // The min-notional check runs first, so this test still asserts that path.
   {
     const state = mkState2();
     const action: EngineAction = {
@@ -548,6 +555,49 @@ async function runRejectionReasonTests(): Promise<void> {
       `expected marketable_min_notional, got ${fill.rejectionReason}`);
     console.log("  marketable_min_notional ✓");
   }
+
+  // outside_price_zone — taker BUY at price outside [0.55, 0.70] rejects
+  // BEFORE making it to walkBook. Uses 10 shares to clear the $1 min check.
+  // Re-enable the gate for this block.
+  (CONFIG as any).LIVE_PRICE_ZONE_ENABLED = true;
+  {
+    const state = mkState2();
+    const action: EngineAction = {
+      side: "BUY", tokenId: "UP_TOK", price: 0.30, size: 10, orderType: "taker",
+    };
+    const r = await processActions([action], state);
+    const fill = r.results[0];
+    assert(fill.filled === false, "taker BUY @ $0.30 outside zone should not fill");
+    assert(fill.rejectionReason === "outside_price_zone",
+      `expected outside_price_zone, got ${fill.rejectionReason}`);
+    console.log("  outside_price_zone (low) ✓");
+  }
+  {
+    const state = mkState2();
+    const action: EngineAction = {
+      side: "BUY", tokenId: "UP_TOK", price: 0.80, size: 5, orderType: "taker",
+    };
+    const r = await processActions([action], state);
+    const fill = r.results[0];
+    assert(fill.filled === false, "taker BUY @ $0.80 outside zone should not fill");
+    assert(fill.rejectionReason === "outside_price_zone",
+      `expected outside_price_zone, got ${fill.rejectionReason}`);
+    console.log("  outside_price_zone (high) ✓");
+  }
+  // Maker exempt from price-zone gate
+  {
+    const state = mkState2();
+    const action: EngineAction = {
+      side: "BUY", tokenId: "UP_TOK", price: 0.30, size: 10, orderType: "maker",
+    };
+    const r = await processActions([action], state);
+    const fill = r.results[0];
+    assert(fill.rejectionReason !== "outside_price_zone",
+      `maker BUY should be exempt from price-zone gate, got ${fill.rejectionReason}`);
+    console.log("  maker exempt from price-zone gate ✓");
+  }
+  // Restore original zone flag before exiting the test block
+  (CONFIG as any).LIVE_PRICE_ZONE_ENABLED = SAVED_ZONE_ENABLED;
 
   // Maker BUYs are exempt from the $1 marketable minimum (resting orders
   // sit on the book, PM only enforces share count for those).
@@ -990,6 +1040,11 @@ import { CONFIG } from "../config";
 // covered by its own test below ("flat ceiling caps at MAX_LIVE_TRADE_USD").
 const ORIGINAL_MAX_LIVE_TRADE_USD = RISK_CONFIG.MAX_LIVE_TRADE_USD;
 RISK_CONFIG.MAX_LIVE_TRADE_USD = Number.POSITIVE_INFINITY;
+// Disable the May 11 price-zone gate for legacy sizing tests — most use
+// prices outside [0.55, 0.70] and would short-circuit at the gate. The
+// zone gate has its own dedicated tests (4e2, 4e3) where we re-enable it.
+const ORIGINAL_PRICE_ZONE_ENABLED = CONFIG.LIVE_PRICE_ZONE_ENABLED;
+(CONFIG as any).LIVE_PRICE_ZONE_ENABLED = false;
 
 function mkLiveState(bankroll: number, cash?: number): ReturnType<typeof createLiveState> {
   const s = createLiveState("test-engine", "0xwallet", bankroll, "R0001-test");
@@ -1153,6 +1208,40 @@ console.log("\n=== LiveSizingWrapper ===");
   assert(r.action!.size === 5, `marketable exempt: expected 5 shares (maker_min only), got ${r.action?.size}`);
   assert(r.clippedBy !== "marketable_min_bump", `maker shouldn't be marketable-bumped: got ${r.clippedBy}`);
 }
+
+// 4e2. Price-zone gate rejects taker BUYs outside [0.55, 0.70]
+// Re-enable for this test (disabled for legacy tests above).
+(CONFIG as any).LIVE_PRICE_ZONE_ENABLED = true;
+{
+  const live = mkLiveState(25);
+  const r = sizeForLive(
+    { side: "BUY", tokenId: "UP1", price: 0.30, size: 10, orderType: "taker" },
+    live,
+    { liveBankrollUsd: 25, simBankrollUsd: 50 },
+  );
+  assert(r.action === null, `price-zone gate: expected null, got ${JSON.stringify(r.action)}`);
+  assert(!!r.reason && r.reason.includes("outside alpha zone"),
+    `expected price-zone reason, got ${r.reason}`);
+  console.log("  liveSizing rejects taker BUY outside price zone ✓");
+}
+// 4e3. Maker BUY exempt from price-zone gate (different fill mechanics)
+{
+  const live = mkLiveState(25);
+  const r = sizeForLive(
+    { side: "BUY", tokenId: "UP1", price: 0.30, size: 10, orderType: "maker" },
+    live,
+    { liveBankrollUsd: 25, simBankrollUsd: 50 },
+  );
+  // Maker at $0.30 should NOT be rejected by the price-zone gate; may fail other
+  // checks but the reason should NOT be alpha zone.
+  if (r.action === null) {
+    assert(!r.reason || !r.reason.includes("alpha zone"),
+      `maker should not hit price-zone gate, got ${r.reason}`);
+  }
+  console.log("  liveSizing maker exempt from price-zone gate ✓");
+}
+// Disable again for subsequent legacy tests
+(CONFIG as any).LIVE_PRICE_ZONE_ENABLED = false;
 
 // 4f. Marketable BUY rejection when budget can't cover the bump:
 // $25 bankroll but only $0.80 cash. After maker_min_bump to 5 shares the
@@ -1798,6 +1887,13 @@ console.log("\n=== fetchSignalSnapshotCached: shared file cache ===");
 // ── Extreme-price settlement bias (May 2026) ────────────────────────────────
 console.log("\n=== Extreme-price settlement flip probability ===");
 
+// Point the empirical lookup at a non-existent path so the linear-fallback
+// path is exercised for the existing tests below. Restored after the new
+// empirical-path tests further down.
+const ORIGINAL_EMPIRICAL_PATH = CONFIG.EMPIRICAL_FLIP_PROB_PATH;
+(CONFIG as any).EMPIRICAL_FLIP_PROB_PATH = "/nonexistent/empirical_flip_prob.json";
+_resetEmpiricalCache();
+
 // Mid-prices below threshold should never flip
 assert(extremeFlipProb(0.50) === 0, `mid 0.50 should be 0, got ${extremeFlipProb(0.50)}`);
 assert(extremeFlipProb(0.65) === 0, `0.65 (dist 0.15 < threshold 0.30) should be 0`);
@@ -1831,6 +1927,48 @@ const max2 = extremeFlipProb(1);
 assert(approx(max, max2), `0 and 1 symmetric: ${max} vs ${max2}`);
 console.log(`  full extremity (0 or 1) → flip prob ${(max*100).toFixed(0)}% ✓`);
 
+// ── Empirical flip-prob lookup (May 11 2026) ────────────────────────────────
+console.log("\n=== Empirical flip-prob lookup ===");
+{
+  const tmpDir = require("os").tmpdir();
+  const tmpPath = require("path").join(tmpDir, `qf-empirical-${process.pid}.json`);
+  const calibration = {
+    calibrated_at: "2026-05-11T00:00:00Z",
+    n_trades: 100,
+    min_n_per_bucket: 5,
+    fallback: "linear",
+    buckets: [
+      { price_lo: 0.05, price_hi: 0.10, n: 10, wins: 0, losses: 10, live_loss_rate: 1.0, flip_prob: 1.0 },
+      { price_lo: 0.55, price_hi: 0.60, n: 20, wins: 8, losses: 12, live_loss_rate: 0.6, flip_prob: 0.0 },
+      { price_lo: 0.65, price_hi: 0.70, n: 3, wins: 1, losses: 2, live_loss_rate: 0.67, flip_prob: 0.4 },  // n<5, ignored
+    ],
+  };
+  require("fs").writeFileSync(tmpPath, JSON.stringify(calibration));
+  (CONFIG as any).EMPIRICAL_FLIP_PROB_PATH = tmpPath;
+  _resetEmpiricalCache();
+
+  // Bucket has enough samples and flip_prob=1.0 — exact lookup
+  const p = extremeFlipProb(0.07);
+  assert(p === 1.0, `0.07 in [0.05,0.10) with n=10 should be 1.0, got ${p}`);
+  console.log("  empirical bucket (n=10, prob=1.0) → 1.0 ✓");
+
+  // Alpha zone bucket: flip_prob=0
+  const alpha = extremeFlipProb(0.57);
+  assert(alpha === 0, `0.57 alpha zone (n=20) should be 0, got ${alpha}`);
+  console.log("  alpha zone bucket → 0.0 ✓");
+
+  // Insufficient samples → falls back to linear
+  const fallback = extremeFlipProb(0.67);
+  // 0.67: dist 0.17 < threshold 0.30 → linear formula returns 0
+  assert(fallback === 0, `0.67 with n<min → linear fallback should be 0, got ${fallback}`);
+  console.log("  bucket n<min → linear fallback ✓");
+
+  // Cleanup + restore
+  try { require("fs").unlinkSync(tmpPath); } catch {}
+  (CONFIG as any).EMPIRICAL_FLIP_PROB_PATH = ORIGINAL_EMPIRICAL_PATH;
+  _resetEmpiricalCache();
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 
 Promise.all([runLiveExecutorTests(), runRejectionReasonTests(), runClobSubmitterTimeoutTests()])
@@ -1840,6 +1978,7 @@ Promise.all([runLiveExecutorTests(), runRejectionReasonTests(), runClobSubmitter
     // legacy scaling tests run without the May 6 ceiling clipping. Restore
     // here so any process-wide state stays clean for downstream consumers.
     RISK_CONFIG.MAX_LIVE_TRADE_USD = ORIGINAL_MAX_LIVE_TRADE_USD;
+    (CONFIG as any).LIVE_PRICE_ZONE_ENABLED = ORIGINAL_PRICE_ZONE_ENABLED;
     console.log(`\n${"=".repeat(40)}`);
     console.log(`Tests: ${passed} passed, ${failed} failed`);
     if (failed > 0) {
