@@ -104,13 +104,18 @@ export function buildClobSubmitter(cfg: ClobSubmitterConfig): OrderSubmitter {
         orderType,
       );
 
-      // Timeout wrapper. Bumped 10s → 25s on Apr 29 — post-cutover PM
-      // can take 15-22s to confirm orders. Old 10s timeout produced
-      // false-rejections: the order would land server-side AFTER our
-      // timeout fired, then fill at whatever price the book had drifted
-      // to (one incident: maker-momentum order at 60c filled at 0.4c
-      // because the candle had already crashed during the wait).
-      const timeoutMs = cfg.timeoutMs ?? 25_000;
+      // Timeout wrapper. Bumped 10s → 25s on Apr 29 (post-cutover PM
+      // can take 15-22s to confirm), then 25s → 60s on 2026-05-13 after
+      // observing a 2m48s submit cycle where the underlying HTTP kept
+      // running past our local timeout and the probe got queued behind it.
+      // Old 10s timeout produced false-rejections: the order would land
+      // server-side AFTER our timeout fired, then fill at whatever price
+      // the book had drifted to (incident: maker-momentum order at 60c
+      // filled at 0.4c because the candle had already crashed during
+      // the wait). The 60s value gives slow-but-successful submits a
+      // chance to resolve naturally; the active-cancel below handles
+      // the case where they don't.
+      const timeoutMs = cfg.timeoutMs ?? 60_000;
       let timedOut = false;
       const resp = await Promise.race([
         postPromise.catch((e: Error) => { throw e; }),
@@ -121,14 +126,16 @@ export function buildClobSubmitter(cfg: ClobSubmitterConfig): OrderSubmitter {
           }, timeoutMs),
         ),
       ]).catch(async (err: Error) => {
-        // On timeout, the order MAY have been accepted server-side
-        // despite our local timeout. Probe getOpenOrders for our
-        // market to check before declaring rejection. This costs one
-        // extra API call but prevents phantom positions.
+        // On timeout, the order MAY have landed server-side. Probe
+        // getOpenOrders; if we find a matching open order, ACTIVELY
+        // CANCEL it (2026-05-13 change) rather than accepting as
+        // in-flight. The engine's view of the market is stale by now
+        // (60s+ have passed; the candle may have moved), so accepting
+        // the in-flight at the original price risks the "60c → 0.4c"
+        // pattern that motivated the original timeout bump. Better to
+        // cancel and let the engine retry on a fresh tick.
         if (timedOut) {
           try {
-            // Race: also bound the reconcile probe so we don't hang
-            // indefinitely if PM is fully unresponsive.
             const probe = (cfg.client as unknown as {
               getOpenOrders: (p: object) => Promise<Array<{ id?: string; market?: string; asset_id?: string; size?: string | number }>>
             }).getOpenOrders({ market: action.tokenId });
@@ -136,14 +143,24 @@ export function buildClobSubmitter(cfg: ClobSubmitterConfig): OrderSubmitter {
               probe,
               new Promise<never>((_, r) => setTimeout(() => r(new Error("probe timeout")), 5_000)),
             ]);
-            // Look for an open order matching our action size (within rounding)
             const match = (orders ?? []).find((o) => {
               const sz = Number(o.size ?? 0);
               return Math.abs(sz - action.size) <= 1;
             });
             if (match?.id) {
-              console.warn(`[clobSubmitter] post-timeout reconcile found order ${match.id} for ${action.size}@${roundedPrice} — accepting as in-flight`);
-              return { success: true, orderID: match.id };
+              console.warn(`[clobSubmitter] post-timeout reconcile found order ${match.id} — actively cancelling to prevent stale fill`);
+              try {
+                const cancelPromise = (cfg.client as unknown as {
+                  cancelOrders: (ids: string[]) => Promise<unknown>
+                }).cancelOrders([match.id]);
+                await Promise.race([
+                  cancelPromise,
+                  new Promise<never>((_, r) => setTimeout(() => r(new Error("cancel timeout")), 5_000)),
+                ]);
+                console.warn(`[clobSubmitter] cancel ${match.id} issued (best-effort)`);
+              } catch (cancelErr) {
+                console.warn(`[clobSubmitter] cancel ${match.id} failed: ${cancelErr instanceof Error ? cancelErr.message : String(cancelErr)} — order may still fill at stale price`);
+              }
             }
           } catch { /* probe failed — fall through to rejection */ }
         }

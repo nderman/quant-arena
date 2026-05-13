@@ -1627,18 +1627,26 @@ async function runClobSubmitterTimeoutTests(): Promise<void> {
   console.log("\n── clobSubmitter post-timeout reconcile ────");
 
   // Mock client where createAndPostOrder NEVER resolves (simulates PM hung)
-  function hungClient(getOpenOrdersResp: unknown[]) {
+  function hungClient(getOpenOrdersResp: unknown[], cancelTracker?: { ids: string[] }) {
     return {
       createAndPostOrder: () => new Promise(() => { /* never resolves */ }),
       getNegRisk: async () => false,
       getOpenOrders: async () => getOpenOrdersResp,
+      cancelOrders: async (ids: string[]) => {
+        if (cancelTracker) cancelTracker.ids.push(...ids);
+        return true;
+      },
     } as never;
   }
 
-  // Case 1: timeout fires AND open-order probe finds matching order → accepted
+  // Case 1: timeout fires AND probe finds matching order →
+  // ACTIVELY CANCEL + reject (2026-05-13 change). Previous behavior was
+  // "accept as in-flight" but that risked the stale-fill problem where
+  // an order found 60s+ after submit fills at a now-moved price.
   {
+    const cancelled = { ids: [] as string[] };
     const submit = buildClobSubmitter({
-      client: hungClient([{ id: "ord-found-123", market: "TOK1", asset_id: "TOK1", size: 5 }]),
+      client: hungClient([{ id: "ord-found-123", market: "TOK1", asset_id: "TOK1", size: 5 }], cancelled),
       timeoutMs: 200,
       tickSize: "0.01",
       negRisk: false,
@@ -1646,12 +1654,30 @@ async function runClobSubmitterTimeoutTests(): Promise<void> {
     const start = Date.now();
     const r = await submit({ side: "BUY", tokenId: "TOK1", price: 0.50, size: 5 });
     const elapsed = Date.now() - start;
-    assert(r.ok === true, `timeout-with-found-order: should accept, got ${JSON.stringify(r)}`);
-    if (r.ok) {
-      assert(r.clientOrderId === "ord-found-123", `expected clientOrderId=ord-found-123, got ${r.clientOrderId}`);
-    }
+    assert(r.ok === false, `timeout-with-found-order: should reject after cancel, got ${JSON.stringify(r)}`);
+    assert(cancelled.ids.includes("ord-found-123"),
+      `expected cancelOrders called with ord-found-123, got ${JSON.stringify(cancelled.ids)}`);
     assert(elapsed >= 200 && elapsed < 5000, `should take ~200ms+ (timeout duration), took ${elapsed}ms`);
-    console.log(`  timeout + getOpenOrders match → accepted as in-flight ✓ (${elapsed}ms)`);
+    console.log(`  timeout + getOpenOrders match → cancelled + rejected ✓ (${elapsed}ms)`);
+  }
+
+  // Case 1b: timeout fires, probe finds order, but cancel itself fails →
+  // still reject the order (best-effort cancel, log+warn, don't crash).
+  {
+    const submit = buildClobSubmitter({
+      client: {
+        createAndPostOrder: () => new Promise(() => {/* never */}),
+        getNegRisk: async () => false,
+        getOpenOrders: async () => [{ id: "ord-x", market: "TOK1", asset_id: "TOK1", size: 5 }],
+        cancelOrders: async () => { throw new Error("cancel server error"); },
+      } as never,
+      timeoutMs: 200,
+      tickSize: "0.01",
+      negRisk: false,
+    });
+    const r = await submit({ side: "BUY", tokenId: "TOK1", price: 0.50, size: 5 });
+    assert(r.ok === false, `cancel-fail: should still reject, got ${JSON.stringify(r)}`);
+    console.log(`  timeout + cancel error → rejected gracefully (best-effort) ✓`);
   }
 
   // Case 2: timeout fires AND open-order probe returns empty → rejected
