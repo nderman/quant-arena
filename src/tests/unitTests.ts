@@ -1210,8 +1210,11 @@ console.log("\n=== LiveSizingWrapper ===");
 }
 
 // 4e2. Price-zone gate rejects taker BUYs outside [0.55, 0.70]
-// Re-enable for this test (disabled for legacy tests above).
+// Re-enable for this test (disabled for legacy tests above). Also flip
+// off the 2026-05-13 live-side override so the gate actually fires.
 (CONFIG as any).LIVE_PRICE_ZONE_ENABLED = true;
+const ORIGINAL_OVERRIDE = CONFIG.LIVE_SIZING_OVERRIDE_ZONE_GATE;
+(CONFIG as any).LIVE_SIZING_OVERRIDE_ZONE_GATE = false;
 {
   const live = mkLiveState(25);
   const r = sizeForLive(
@@ -1240,8 +1243,31 @@ console.log("\n=== LiveSizingWrapper ===");
   }
   console.log("  liveSizing maker exempt from price-zone gate ✓");
 }
-// Disable again for subsequent legacy tests
+// 4e4. With LIVE_SIZING_OVERRIDE_ZONE_GATE=true (2026-05-13 default),
+// taker BUYs outside the zone are ALLOWED in live even when the gate flag
+// is still on — referee.ts still enforces the gate in sim, this just
+// bypasses the live side so engines can test tail-edge with real orders.
+(CONFIG as any).LIVE_PRICE_ZONE_ENABLED = true;
+(CONFIG as any).LIVE_SIZING_OVERRIDE_ZONE_GATE = true;
+{
+  const live = mkLiveState(25);
+  const r = sizeForLive(
+    { side: "BUY", tokenId: "UP1", price: 0.30, size: 10, orderType: "taker" },
+    live,
+    { liveBankrollUsd: 25, simBankrollUsd: 50 },
+  );
+  // Order should NOT be rejected for the zone — it may be sized differently
+  // by downstream checks but shouldn't fail with "outside alpha zone".
+  if (r.action === null) {
+    assert(!r.reason || !r.reason.includes("alpha zone"),
+      `override should bypass zone gate, got rejection: ${r.reason}`);
+  }
+  console.log("  liveSizing OVERRIDE allows taker BUY outside zone ✓");
+}
+
+// Disable again for subsequent legacy tests + restore the override
 (CONFIG as any).LIVE_PRICE_ZONE_ENABLED = false;
+(CONFIG as any).LIVE_SIZING_OVERRIDE_ZONE_GATE = ORIGINAL_OVERRIDE;
 
 // 4f. Marketable BUY rejection when budget can't cover the bump:
 // $25 bankroll but only $0.80 cash. After maker_min_bump to 5 shares the

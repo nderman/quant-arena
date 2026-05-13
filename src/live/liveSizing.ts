@@ -141,11 +141,16 @@ export function sizeForLive(
   }
 
   // 6a. Price-zone gate (2026-05-11). Live data showed taker BUYs outside
-  // the alpha zone (default 0.55-0.70) lose 70-100%. Reject before any
-  // further sizing/bumping. Makers exempt (resting orders, different
-  // dynamics). Mirrors the same gate in referee.ts so sim:live stays aligned.
+  // the alpha zone (default 0.55-0.70) lose 70-100% under OUR engines.
+  // 2026-05-13 update: LIVE_SIZING_OVERRIDE_ZONE_GATE bypasses the gate
+  // here — whale data (Marketing101) shows tail entries can be profitable
+  // with the right signal/timing. Referee.ts still enforces the gate in
+  // sim so sim PnL stays honest per empirical calibration; live now lets
+  // orders flow through so engines can test their own tail-selection edge.
   const isMaker = simAction.orderType === "maker";
-  if (!isMaker && simAction.side === "BUY" && CONFIG.LIVE_PRICE_ZONE_ENABLED) {
+  if (!isMaker && simAction.side === "BUY"
+      && CONFIG.LIVE_PRICE_ZONE_ENABLED
+      && !CONFIG.LIVE_SIZING_OVERRIDE_ZONE_GATE) {
     if (simAction.price < CONFIG.LIVE_PRICE_ZONE_MIN || simAction.price > CONFIG.LIVE_PRICE_ZONE_MAX) {
       return {
         action: null,

@@ -94,6 +94,13 @@ export const CONFIG = {
   LIVE_PRICE_ZONE_ENABLED:            bool("LIVE_PRICE_ZONE_ENABLED", true),
   LIVE_PRICE_ZONE_MIN:                num("LIVE_PRICE_ZONE_MIN", 0.55),
   LIVE_PRICE_ZONE_MAX:                num("LIVE_PRICE_ZONE_MAX", 0.70),
+  // 2026-05-13: whale analysis showed Marketing101 makes 13% margin on
+  // taker BUYs below 0.55. Our calibration captured what OUR engines do
+  // at tail prices (lose), not the absolute. Override the gate in live
+  // (real orders flow through) but keep it in sim (referee still rejects
+  // tail entries so sim scores stay honest per the empirical curve). This
+  // is an experiment to see if our engines have any tail-edge worth keeping.
+  LIVE_SIZING_OVERRIDE_ZONE_GATE:     bool("LIVE_SIZING_OVERRIDE_ZONE_GATE", true),
 
   // ── Fill Decay (reactive market makers) ────────────────────────────────────
   FILL_DECAY_ENABLED:     bool("FILL_DECAY_ENABLED", true),
