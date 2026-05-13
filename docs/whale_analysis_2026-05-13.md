@@ -141,3 +141,81 @@ E. **Save the leaderboard snapshot script:** `scripts/whaleScan.py` (TBD) — re
 - "Win rate" from REDEEMs only catches trades held to settlement. Many positions are sold before settle (especially ozpreezy at 56% pre-settle sells).
 - Top whales may have edge from off-chain info (Discord groups, custom signals, insider sources). Copying the trade pattern ≠ copying the alpha.
 - Polymarket has a long-tail of whales with much smaller volumes. The top 20 here is the visible head; the body may have different patterns.
+
+---
+
+# Bonereaper1 Deep-Dive (2026-05-13)
+
+After cross-referencing entry timestamps with Binance 1m klines, the strategy is much clearer.
+
+## Per-slug breakdown (19 markets, full settle history)
+
+```
+slug         buys  price_progression       outcome  pnl
+420400       112   $0.53 → $0.65 (rose)    WIN      +$1,316
+418900        74   $0.50 flat              WIN        +$485
+420400        61   $0.53 → $0.65           WIN        +$483
+412300        58   $0.60 → $0.52           WIN        +$436
+414100        28   $0.60 flat              WIN        +$786
+413500        27   $0.43 → $0.50           WIN        +$258
+419800        26   $0.35 flat              WIN        +$521
+410200        35   $0.50 flat              LOSS       -$441
+415600         9   $0.26 → $0.55 (jump)    LOSS       -$152
+411400         7   $0.47 flat              LOSS       -$343
+414700         2   $0.24 → $0.21 (drop)    LOSS        -$93
+418300         2   $0.36 (bail)            LOSS       -$105
+410800         1   $0.44 (one-shot)        LOSS        -$29
+```
+
+**12 wins / 7 losses (63% slug WR). Net +$4,221 on $6,916 stake = 61% ROI** in this 19-market window.
+
+## Strategy decoded
+
+1. **DCA into confirmed winners.** When the entry price stays flat or moves favorably, they keep adding. Top winners got 60-112 entries.
+
+2. **Bail fast on losers.** When price moves against them (or whipsaws like 415600's $0.26→$0.55 jump), they exit with minimal exposure (1-7 entries).
+
+3. **Entry prices clustered $0.20-$0.65** — covers our alpha zone AND lower band (which would be rejected by our current price-zone gate).
+
+4. **Binance correlation: 93% of fires in FLAT 1m windows.** They DCA during price stability, NOT during volatile candles. The signal is "the price is holding, conviction is rising" — not "Binance moved, predict same direction."
+
+5. **Side preference: 189 Up / 284 Down** — slight bearish lean during their UTC 10-13 trading window (pre-US-open).
+
+## What this means
+
+**The alpha is position management, not entry prediction.**
+
+- Our entire engine base assumes "predict candle outcome, single shot, hold to settle." Bonereaper1 doesn't predict — they ENTER MANY and let position management sort winners from losers.
+- This is a fundamentally different engine class than anything in our codebase.
+
+## What it'd take to replicate
+
+| Requirement | Have? | Cost to add |
+|---|---|---|
+| Multi-market position tracking | ❌ per-engine only | Cross-arena state needed |
+| DCA-on-stability logic | ❌ | New engine ~200 lines |
+| Bail-on-collapse logic | ❌ | New exit subsystem ~100 lines |
+| Capital for 5-10 concurrent positions | ❌ ($9 wallet) | Top up to $200-500 |
+| 5min market real-time price tracking per slug | ✅ pulse.ts has it | reuse |
+
+## Decision tree
+
+**Option A — Build the DCA-discipline engine.**
+- Need: top up wallet to $200+; ~2-3 days of engineering
+- Expected outcome: if signal is real, 50%+ ROI on the engaged capital
+- Risk: capital is allocated to whatever engines are running; can't run other strats in parallel
+
+**Option B — Profile Marketing101 next.**
+- Different shape (tail bets, single-shot, hold-to-settle)
+- May be simpler to replicate (no DCA logic needed)
+- Lower expected ROI per $
+
+**Option C — Don't replicate, build aware-of-whales infrastructure.**
+- Mirror their open positions in real-time via Activity API polling
+- Free-ride on their entries (we know the slug, price, side)
+- Risks: latency, no edge if other copycats do same, no understanding of when they exit
+
+**Option D — Accept current state.**
+- Current roster (stingo43-v1 + trade-settle-pinger) is mediocre but not bleeding
+- Wait for current engines to accumulate samples
+- Re-evaluate in a week
