@@ -22,6 +22,7 @@ import { recordFill, recordRoundStart, recordRoundEnd, getRoundSummary, closeDb,
 import { fetchSignalSnapshotCached } from "./signals";
 import { discoverCryptoMarkets, discoverUpDownMarkets, discover5mMarkets } from "./discovery";
 import { pollAndSettle } from "./settlement";
+import { logMirror } from "./live/liveMirrorLog";
 import { startChainlinkPoller } from "./chainlink";
 import { seedRng, random } from "./rng";
 import { startLiveArena, type LiveArenaHandle } from "./live/liveArena";
@@ -353,19 +354,44 @@ async function runRound(
           // orders that went to sim GTC queue (filled:false, reason=maker_not_filled).
           // Live CLOB will post the maker as a limit order that sits on the
           // real book and fills independently — tracked by the reconcile loop.
+          // 2026-05-13: every branch now logs to data/live_mirror.log via
+          // logMirror() so we can answer "why didn't this fire reach live?"
+          // without grep'ing for absence (see liveMirrorLog.ts).
           const shouldMirror = fill.filled || fill.rejectionReason === "maker_not_filled";
-          if (shouldMirror && liveArenaHandle) {
-            const positionSide = state.activeDownTokenId === fill.action.tokenId ? "NO" as const : "YES" as const;
+          const positionSide = state.activeDownTokenId === fill.action.tokenId ? "NO" as const : "YES" as const;
+          const mirrorBase = {
+            engineId: engine.id,
+            arenaInstanceId: CONFIG.ARENA_INSTANCE_ID,
+            side: fill.action.side,
+            positionSide,
+            size: fill.action.size,
+            price: fill.action.price,
+            tokenId: fill.action.tokenId,
+          };
+          if (!shouldMirror) {
+            // Sim referee rejected for a non-maker reason — never tried live.
+            logMirror("SKIPPED", { ...mirrorBase, reason: fill.rejectionReason || "filled=false" });
+          } else if (!liveArenaHandle) {
+            logMirror("NO_HANDLE", mirrorBase);
+          } else {
             liveArenaHandle.onSimAction(engine.id, fill.action, positionSide).then(result => {
-              if (result) {
-                if (result.accepted) {
-                  console.log(`[live] ${engine.id} ${fill.action.side} ${result.sizedAction?.size ?? 0}@${(result.sizedAction?.price ?? 0).toFixed(3)} → accepted`);
-                } else {
-                  console.log(`[live] ${engine.id} ${fill.action.side} rejected: ${result.reason}`);
-                }
+              if (result === null || result === undefined) {
+                logMirror("NULL_RESULT", mirrorBase);
+              } else if (result.accepted) {
+                logMirror("ACCEPTED", {
+                  ...mirrorBase,
+                  size: result.sizedAction?.size ?? fill.action.size,
+                  price: result.sizedAction?.price ?? fill.action.price,
+                });
+                console.log(`[live] ${engine.id} ${fill.action.side} ${result.sizedAction?.size ?? 0}@${(result.sizedAction?.price ?? 0).toFixed(3)} → accepted`);
+              } else {
+                logMirror("REJECTED", { ...mirrorBase, reason: result.reason || "no_reason" });
+                console.log(`[live] ${engine.id} ${fill.action.side} rejected: ${result.reason}`);
               }
             }).catch(err => {
-              console.warn(`[live-arena] ${engine.id} action failed: ${err.message}`);
+              const msg = err instanceof Error ? err.message : String(err);
+              logMirror("ERROR", { ...mirrorBase, reason: msg });
+              console.warn(`[live-arena] ${engine.id} action failed: ${msg}`);
             });
           }
         }
