@@ -2049,6 +2049,199 @@ console.log("\n=== Empirical flip-prob lookup ===");
   _resetEmpiricalCache();
 }
 
+// ── WangXingYu Copy Engine ─────────────────────────────────────────────────
+console.log("\n=== WangXingYu Copy Engine ===");
+{
+  // Hermetic: don't hit the live Activity API from tests
+  process.env.WANGXINGYU_DISABLE_FETCH = "1";
+  const { WangXingYuCopyEngine } = require("../engines/WangXingYuCopyEngine");
+  const wxActivity = require("../live/wangXingYuActivity");
+
+  // Subclass overrides book access — pulse module-state isn't writable from tests
+  class TestableWxEngine extends WangXingYuCopyEngine {
+    private testBooks = new Map<string, any>();
+    setBook(tokenId: string, book: any) { this.testBooks.set(tokenId, book); }
+    protected getBookForToken(tokenId: string) {
+      return this.testBooks.get(tokenId) ?? { bids: [], asks: [], timestamp: 0 };
+    }
+    protected isBookTradeable(_book: any) { return true; }
+  }
+
+  function mkPmTick(): MarketTick {
+    return { source: "polymarket" as const, symbol: "BTC", midPrice: 0.5, bestBid: 0.49, bestAsk: 0.51, timestamp: Date.now() } as MarketTick;
+  }
+  function mkBook(askPx: number, askSz: number) {
+    return {
+      bids: [{ price: Math.max(0.001, askPx - 0.02), size: 1000 }],
+      asks: [{ price: askPx, size: askSz }],
+      timestamp: Date.now(),
+    };
+  }
+
+  // Test 1: no signal → no action
+  wxActivity._resetForTest();
+  {
+    const e = new TestableWxEngine();
+    const st = mkState({ upToken: "UP_T1", downToken: "DOWN_T1" });
+    st.marketWindowEnd = Date.now() + 600_000;
+    e.init(st);
+    const actions = e.onTick(mkPmTick(), st);
+    assert(actions.length === 0, "no signal → no action");
+    console.log("  no signal → no action ✓");
+  }
+
+  // Test 2: signal on UP → fires BUY UP, marks consumed (no double-fire next tick)
+  wxActivity._resetForTest();
+  {
+    const e = new TestableWxEngine();
+    e.setBook("UP_T2", mkBook(0.5, 100));
+    e.setBook("DOWN_T2", mkBook(0.5, 100));
+    wxActivity._injectSignalForTest({
+      ts: Math.floor(Date.now() / 1000),
+      tokenId: "UP_T2", slug: "test-slug-2", side: "BUY",
+      price: 0.45, size: 50, title: "Bitcoin Up or Down - test",
+      fetchedAt: Date.now(),
+    });
+    const st = mkState({ upToken: "UP_T2", downToken: "DOWN_T2" });
+    st.marketWindowEnd = Date.now() + 600_000;
+    st.cashBalance = 100;
+    e.init(st);
+    const a1 = e.onTick(mkPmTick(), st);
+    assert(a1.length === 1, `signal → fires (got ${a1.length})`);
+    assert(a1[0].side === "BUY" && a1[0].tokenId === "UP_T2", "fires BUY on UP token");
+    console.log("  signal on UP → fires BUY UP ✓");
+
+    const a2 = e.onTick(mkPmTick(), st);
+    assert(a2.length === 0, "second tick → no double-fire (consumed)");
+    console.log("  consumed flag blocks double-fire ✓");
+  }
+
+  // Test 3: stale signal (older than max age) → no fire
+  wxActivity._resetForTest();
+  {
+    const e = new TestableWxEngine();
+    e.setBook("UP_T3", mkBook(0.5, 100));
+    e.setBook("DOWN_T3", mkBook(0.5, 100));
+    wxActivity._injectSignalForTest({
+      ts: Math.floor(Date.now() / 1000) - 999_999,
+      tokenId: "UP_T3", slug: "test-slug-3", side: "BUY",
+      price: 0.45, size: 50, title: "old", fetchedAt: Date.now(),
+    });
+    const st = mkState({ upToken: "UP_T3", downToken: "DOWN_T3" });
+    st.marketWindowEnd = Date.now() + 600_000;
+    st.cashBalance = 100;
+    e.init(st);
+    const actions = e.onTick(mkPmTick(), st);
+    assert(actions.length === 0, "stale signal → no fire");
+    console.log("  stale signal age → skip ✓");
+  }
+
+  // Test 4: candle window almost over → no fire (latency gate)
+  wxActivity._resetForTest();
+  {
+    const e = new TestableWxEngine();
+    e.setBook("UP_T4", mkBook(0.5, 100));
+    e.setBook("DOWN_T4", mkBook(0.5, 100));
+    wxActivity._injectSignalForTest({
+      ts: Math.floor(Date.now() / 1000),
+      tokenId: "UP_T4", slug: "test-slug-4", side: "BUY",
+      price: 0.45, size: 50, title: "test", fetchedAt: Date.now(),
+    });
+    const st = mkState({ upToken: "UP_T4", downToken: "DOWN_T4" });
+    st.marketWindowEnd = Date.now() + 30_000; // <90s remaining
+    st.cashBalance = 100;
+    e.init(st);
+    const actions = e.onTick(mkPmTick(), st);
+    assert(actions.length === 0, "<90s remaining → no fire");
+    console.log("  insufficient remaining time → skip ✓");
+  }
+
+  // Test 5: ask too high (>= 0.95) → no fire (engine ceiling)
+  wxActivity._resetForTest();
+  {
+    const e = new TestableWxEngine();
+    e.setBook("UP_T5", mkBook(0.97, 100));
+    e.setBook("DOWN_T5", mkBook(0.50, 100));
+    wxActivity._injectSignalForTest({
+      ts: Math.floor(Date.now() / 1000),
+      tokenId: "UP_T5", slug: "test-slug-5", side: "BUY",
+      price: 0.95, size: 50, title: "test", fetchedAt: Date.now(),
+    });
+    const st = mkState({ upToken: "UP_T5", downToken: "DOWN_T5" });
+    st.marketWindowEnd = Date.now() + 600_000;
+    st.cashBalance = 100;
+    e.init(st);
+    const actions = e.onTick(mkPmTick(), st);
+    assert(actions.length === 0, "ask >=0.95 → no fire");
+    console.log("  ceiling ask 0.95 → skip ✓");
+  }
+
+  // Test 6: signal on DOWN side fires correctly
+  wxActivity._resetForTest();
+  {
+    const e = new TestableWxEngine();
+    e.setBook("UP_T6", mkBook(0.55, 100));
+    e.setBook("DOWN_T6", mkBook(0.45, 100));
+    wxActivity._injectSignalForTest({
+      ts: Math.floor(Date.now() / 1000),
+      tokenId: "DOWN_T6", slug: "test-slug-6", side: "BUY",
+      price: 0.43, size: 50, title: "test", fetchedAt: Date.now(),
+    });
+    const st = mkState({ upToken: "UP_T6", downToken: "DOWN_T6" });
+    st.marketWindowEnd = Date.now() + 600_000;
+    st.cashBalance = 100;
+    e.init(st);
+    const actions = e.onTick(mkPmTick(), st);
+    assert(actions.length === 1 && actions[0].tokenId === "DOWN_T6", "fires BUY on DOWN token");
+    console.log("  signal on DOWN → fires BUY DOWN ✓");
+  }
+
+  // Test 7: already holding → no fire (hold-to-settle, no DCA)
+  wxActivity._resetForTest();
+  {
+    const e = new TestableWxEngine();
+    e.setBook("UP_T7", mkBook(0.5, 100));
+    e.setBook("DOWN_T7", mkBook(0.5, 100));
+    wxActivity._injectSignalForTest({
+      ts: Math.floor(Date.now() / 1000),
+      tokenId: "UP_T7", slug: "test-slug-7", side: "BUY",
+      price: 0.45, size: 50, title: "test", fetchedAt: Date.now(),
+    });
+    const posMap = new Map<string, PositionState>();
+    posMap.set("UP_T7", { shares: 10, avgEntry: 0.5, costBasis: 5, side: "YES", tokenId: "UP_T7" });
+    const st = mkState({ upToken: "UP_T7", downToken: "DOWN_T7", positions: posMap });
+    st.marketWindowEnd = Date.now() + 600_000;
+    st.cashBalance = 100;
+    e.init(st);
+    const actions = e.onTick(mkPmTick(), st);
+    assert(actions.length === 0, "already holding → no fire");
+    console.log("  position already exists → skip (no DCA) ✓");
+  }
+
+  // Test 8: stale signals + their consumed flags get pruned (bounded growth)
+  wxActivity._resetForTest();
+  {
+    const nowSec = Math.floor(Date.now() / 1000);
+    wxActivity._injectSignalForTest({
+      ts: nowSec - 10_000, // way past 2× maxAge
+      tokenId: "OLD_T", slug: "old", side: "BUY",
+      price: 0.5, size: 10, title: "stale", fetchedAt: Date.now(),
+    });
+    wxActivity._injectSignalForTest({
+      ts: nowSec, tokenId: "FRESH_T", slug: "fresh", side: "BUY",
+      price: 0.5, size: 10, title: "fresh", fetchedAt: Date.now(),
+    });
+    // Mark the old one consumed (simulates earlier fire)
+    wxActivity.markConsumed("OLD_T");
+    wxActivity._pruneStaleForTest(600);
+    assert(wxActivity.getSignalForToken("OLD_T") === null, "stale signal pruned");
+    assert(wxActivity.getSignalForToken("FRESH_T") !== null, "fresh signal kept");
+    console.log("  stale signals + consumed flags pruned ✓");
+  }
+
+  wxActivity._resetForTest();
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 
 Promise.all([runLiveExecutorTests(), runRejectionReasonTests(), runClobSubmitterTimeoutTests()])

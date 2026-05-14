@@ -219,3 +219,196 @@ slug         buys  price_progression       outcome  pnl
 - Current roster (stingo43-v1 + trade-settle-pinger) is mediocre but not bleeding
 - Wait for current engines to accumulate samples
 - Re-evaluate in a week
+
+---
+
+## 2026-05-14 — METHODOLOGY CORRECTION + LB top-20 screen
+
+**Two critical bugs in the May 13 analysis:**
+
+1. **REDEEM-only exit tracking missed MERGE and SELL events.** Realized P&L
+   should be `sum(buy.cost) - sum(sell.proceeds + merge.value + redeem.payout)`
+   for any slug with ANY exit. Counting only REDEEM systematically over-reports
+   losses because wallets like gobblewobble exit primarily via MERGE (buying
+   YES + NO sides of arbed pairs, then merging for guaranteed $1/pair).
+
+2. **500-event windows are ~0.6 days for high-frequency wallets.** Bonereaper1,
+   Marketing101, ozpreezy were all analyzed on slices of less than one day.
+   For HF traders deploying $5K-$300K/day, that's a single trading session —
+   completely unreliable as a signal of edge.
+
+The activity API supports `end=<unix_ts>` cursor pagination (1000 events max
+per page). To get a real 30-day view of an HF whale, expect 30-50 page pulls.
+The lowercase address rejects but checksum case works. See `whale_month.py`.
+
+### LB top-20 screen (May 14, 30d-or-cap windows, full SELL+MERGE+REDEEM exits)
+
+**16 of 20 wallets show positive realized P&L** once MERGE is counted. The
+"everyone is losing" finding from May 14 morning was a methodology artifact.
+
+**The four archetypes that emerged from the screen:**
+
+| Archetype | Top examples | Mechanism |
+|---|---|---|
+| **Exit-discipline** | ExitLiquidty (77% sell), SchrodingerBet (57%), Adam888 (46%) | Active sells into strength, cut losers |
+| **High-selection hold** | BadTattoo (100% WR), JanAMEX (96% WR), splaym (90%) | Few entries, high WR, hold to settle |
+| **DCA + MERGE** | gobblewobble (+$321K), justdance (+$59K), Bonereaper3 (+$55K) | Heavy buys, merge YES+NO pairs for $1/pair |
+| **Tail-bet sniper** | 0xd293F90 (1 trade +$83K), liudapao1 (1 trade), NeverYES | Few entries, single big payoffs |
+
+**The 4 losers had clear pathology:** HandsomeLi (-$191K, 234% sell ratio
+liquidating pre-window inventory), WangXingYu (49% WR but asymmetric losses),
+JaneStTrader (1% sells, big single losses), avenger (35% sells but exit
+timing wrong).
+
+### Top 5 candidates for further investigation
+
+1. **ExitLiquidty** — 77% sell:buy, +$319K, +63% ROI on $514K deployed, 79% WR
+   over 95 closed positions. The dream find: active exit management with real
+   edge. Best portability candidate.
+
+2. **gobblewobble** — +$321K via 88 MERGE events + 137 redeems on $2M deployed.
+   If the MERGE pattern is "buy both sides when YES+NO ask sum < $0.95 then
+   merge for $1," this is pure arb and we already have MERGE plumbing in
+   referee.ts.
+
+3. **JanAMEX** — 96% WR over 167 closed positions, +$400K, 111-day window,
+   $3.8M deployed. Pure selection — figure out what gates 96% WR.
+
+4. **SchrodingerBet** — 57% sell ratio, 85% WR, +$45K. Mid-conviction
+   exit-discipline trader with high signal-to-noise.
+
+5. **BadTattoo** — 100% WR over 12 closed positions, +$102K. Extreme
+   selectivity. Either edge or selection bias on small sample.
+
+### What this means for the May 13 archetypes
+
+The May 13 doc identified Bonereaper1 (DCA-discipline, +22% margin),
+Marketing101 (tail-bet, +13% margin), ozpreezy (event-driven, +25% margin)
+based on 1-day slices with REDEEM-only exits. **None of those numbers should
+be trusted.** A re-run on 30d windows with proper exit accounting is required
+to know if those archetypes are real or were lucky-slice artifacts.
+
+The new candidates above are 30-day-validated with proper exit accounting and
+should be the priority targets going forward.
+
+---
+
+## 2026-05-14 (PM) — WangXingYu: the candle-market whale we can replicate
+
+**The candle-market screen (10-page activity per wallet, 30d window, full
+SELL+MERGE+REDEEM exit accounting) surfaced one wallet trading our exact
+market universe with a $1.88M realized edge.** The headline LB shows them
+at only +$31K (their largest single-event row); the real edge is invisible
+on the standard biggest-winners ranking.
+
+**Wallet:** `0x4c353dd347c2e7d8bcdc5cd6ee569de7baf23e2f` — userName
+"WangXingYu"
+
+### 82-day stats (2026-02-10 → 2026-05-03)
+
+- 14,025 events: 11,857 buys / 136 sells / 2,027 redeems / 0 merges
+- **1% sell ratio** — pure hold-to-settle
+- 1,848 unique slugs, median 5 buys/slug (DCA but moderate)
+- 143 buys/day, 24 redeems/day
+- Total deployed: **$5,589,045**
+
+### Market mix — they ARE quant-farm
+
+```
+Coin:        97.6% BTC, 2.3% ETH, 0% SOL
+Resolution:  91% timed (5m/15m/hourly/4hr), 9% daily
+```
+
+Sample titles (all from a single recent day):
+- `"Bitcoin Up or Down - May 3, 10:10PM-10:15PM ET"`  ← 5min
+- `"Bitcoin Up or Down - May 3, 10:00PM-10:15PM ET"`  ← 15min
+- `"Bitcoin Up or Down - May 3, 11PM ET"`              ← 1-hour
+- `"Bitcoin Up or Down - May 3, 4:00PM-8:00PM ET"`     ← 4-hour
+
+They trade all four resolutions our arena was built for, on the coin our
+arena was tuned on. Different time scales of the same call — sometimes
+multiple resolutions of the same hour on the same day.
+
+### Entry-price distribution — moderate discount, never confirmed
+
+```
+<$0.20       10%
+$0.20-$0.40  30%
+$0.40-$0.55  38%   ← peak
+$0.55-$0.70  18%
+$0.70-$0.85   1%
+$0.85+        0%
+```
+
+**Median entry: $0.44.** They peak at $0.40-$0.55 (38% of all buys).
+**They essentially never buy above $0.70.** That's the signature: they
+fade confirmed sides and take the cheap-and-likely side.
+
+### Realized P&L
+
+- **837W / 28L → 96% WR** on 865 closed positions
+- Cost $2.67M → payout $5.47M
+- **Net +$2,797,871 (+105% ROI)**
+- 28 losers concentrated on regime-fail days (5 of top-8 worst losses are
+  March 6, 2026 — one bad day stacked multiple wrong calls)
+
+### Loser anatomy (28 of 865)
+
+| Metric | Winners (837) | Losers (28) |
+|---|---|---|
+| Avg entry | $0.463 | $0.396 |
+| Median buys/slug | 4 | 11 |
+| Median cost | $2,486 | $4,743 |
+
+**Losers are over-DCA'd cheaper entries.** When wrong, they double-down
+harder at lower prices — exactly the failure mode we've seen in our own
+chop-fader engines. The 96% WR is signal selection; the 4% losses are
+DCA-into-broken-thesis.
+
+### Stakes
+
+- median $500 per buy
+- p90 $1,000
+- max $6,499
+
+Way bigger than our current $8 cap, but the price+resolution structure
+matches our arena exactly.
+
+### Implications for quant-farm
+
+1. **They confirm our universe is profitable** with the right signal.
+   The 96% WR + 105% ROI says edge exists in BTC candles 5m through 4h.
+   Our problem isn't the universe — it's the signal.
+
+2. **Entry zone should widen.** Our current `[0.55, 0.70]` gate misses
+   the 0.40-0.55 band where 38% of WangXingYu's volume lives. Don't
+   widen until we have a signal to gate on, or we'll just bleed money in
+   the wider zone.
+
+3. **DCA discipline matters.** Their winners average 4 buys/slug, losers
+   11. Our breeder should be selecting against engines that pile on losers.
+
+4. **They never trade > $0.70.** Confirmation bias is a loser's game on
+   candle markets. The premium-priced side is dominated by informed flow.
+
+### Forward paths
+
+**Path A — Copy-trade engine (1 day eng):** Poll their Activity API
+every 2-5 min. Mirror each new BUY at $5-10 size to the same outcome
+token. Exit when they REDEEM. Latency risk + dependency on a single
+wallet's continued activity. **Cheapest, fastest alpha capture.**
+
+**Path B — Signal reverse-engineering (~1 week eng):** Pull all 11,857
+buy timestamps + entry prices + outcome. Pull Binance BTCUSDT OHLCV at
+each buy time (and the candle their bet resolved on). Train a classifier
+to predict "WangXingYu buys YES vs NO" from market state at decision
+time. Even partial signal recovery (80% of their accuracy) gives us an
+independent edge engine that doesn't depend on them staying active.
+
+**Path C — Cross-validation (also part of Path B):** Once we hypothesize
+a signal, validate it against the 28 losers — do they all fail the same
+classifier check? That would confirm the signal model.
+
+**Do both.** Path A captures alpha while Path B is being built. If Path
+B yields a real signal, retire the copytrader and run our own; if not,
+the copytrader remains the bridge.
