@@ -354,10 +354,20 @@ async function runRound(
           // orders that went to sim GTC queue (filled:false, reason=maker_not_filled).
           // Live CLOB will post the maker as a limit order that sits on the
           // real book and fills independently — tracked by the reconcile loop.
-          // 2026-05-13: every branch now logs to data/live_mirror.log via
-          // logMirror() so we can answer "why didn't this fire reach live?"
-          // without grep'ing for absence (see liveMirrorLog.ts).
+          //
+          // 2026-05-14 fix: only log when we ACTUALLY attempt to mirror —
+          // i.e. shouldMirror=true AND the engine is on the live roster.
+          // The earlier "log every branch" approach produced 768 MB of
+          // SKIPPED noise overnight (one line per per-tick sim rejection
+          // for blacklisted/non-rostered engines). The interesting signal
+          // is "did the mirror attempt succeed/fail", not "did sim reject
+          // a non-roster engine's emit" — that's already in round_history
+          // rejectionCounts.
           const shouldMirror = fill.filled || fill.rejectionReason === "maker_not_filled";
+          if (!shouldMirror) continue;
+          if (!liveArenaHandle) continue;
+          if (!liveArenaHandle.states.has(engine.id)) continue; // not on live roster
+
           const positionSide = state.activeDownTokenId === fill.action.tokenId ? "NO" as const : "YES" as const;
           const mirrorBase = {
             engineId: engine.id,
@@ -368,32 +378,25 @@ async function runRound(
             price: fill.action.price,
             tokenId: fill.action.tokenId,
           };
-          if (!shouldMirror) {
-            // Sim referee rejected for a non-maker reason — never tried live.
-            logMirror("SKIPPED", { ...mirrorBase, reason: fill.rejectionReason || "filled=false" });
-          } else if (!liveArenaHandle) {
-            logMirror("NO_HANDLE", mirrorBase);
-          } else {
-            liveArenaHandle.onSimAction(engine.id, fill.action, positionSide).then(result => {
-              if (result === null || result === undefined) {
-                logMirror("NULL_RESULT", mirrorBase);
-              } else if (result.accepted) {
-                logMirror("ACCEPTED", {
-                  ...mirrorBase,
-                  size: result.sizedAction?.size ?? fill.action.size,
-                  price: result.sizedAction?.price ?? fill.action.price,
-                });
-                console.log(`[live] ${engine.id} ${fill.action.side} ${result.sizedAction?.size ?? 0}@${(result.sizedAction?.price ?? 0).toFixed(3)} → accepted`);
-              } else {
-                logMirror("REJECTED", { ...mirrorBase, reason: result.reason || "no_reason" });
-                console.log(`[live] ${engine.id} ${fill.action.side} rejected: ${result.reason}`);
-              }
-            }).catch(err => {
-              const msg = err instanceof Error ? err.message : String(err);
-              logMirror("ERROR", { ...mirrorBase, reason: msg });
-              console.warn(`[live-arena] ${engine.id} action failed: ${msg}`);
-            });
-          }
+          liveArenaHandle.onSimAction(engine.id, fill.action, positionSide).then(result => {
+            if (result === null || result === undefined) {
+              logMirror("NULL_RESULT", mirrorBase);
+            } else if (result.accepted) {
+              logMirror("ACCEPTED", {
+                ...mirrorBase,
+                size: result.sizedAction?.size ?? fill.action.size,
+                price: result.sizedAction?.price ?? fill.action.price,
+              });
+              console.log(`[live] ${engine.id} ${fill.action.side} ${result.sizedAction?.size ?? 0}@${(result.sizedAction?.price ?? 0).toFixed(3)} → accepted`);
+            } else {
+              logMirror("REJECTED", { ...mirrorBase, reason: result.reason || "no_reason" });
+              console.log(`[live] ${engine.id} ${fill.action.side} rejected: ${result.reason}`);
+            }
+          }).catch(err => {
+            const msg = err instanceof Error ? err.message : String(err);
+            logMirror("ERROR", { ...mirrorBase, reason: msg });
+            console.warn(`[live-arena] ${engine.id} action failed: ${msg}`);
+          });
         }
 
         // Queue merges for global delay
