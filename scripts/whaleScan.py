@@ -24,10 +24,20 @@ DATA_DIR = Path(os.environ.get("QUANT_DATA_DIR", "data")) / "whale_scan"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_PATH = DATA_DIR / "diffs.log"
 
+# Endpoint discovered 2026-05-14 from a curl trace of Polymarket's UI.
+# Returns BIGGEST WINNERS per event (one row per (wallet, market) win),
+# not unique wallets — so we aggregate by proxyWallet below to get the
+# canonical "top-by-monthly-pnl" list. Needs browser-like headers or
+# the API returns 404.
 API_URL = (
-    "https://data-api.polymarket.com/v1/leaderboard"
-    "?category=CRYPTO&timePeriod=MONTH&orderBy=PNL&limit=50"
+    "https://data-api.polymarket.com/v1/biggest-winners"
+    "?timePeriod=month&limit=200&offset=0&category=crypto"
 )
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Referer": "https://polymarket.com/",
+    "Accept": "application/json, text/plain, */*",
+}
 
 
 def log(msg: str) -> None:
@@ -38,9 +48,35 @@ def log(msg: str) -> None:
 
 
 def pull_leaderboard() -> list[dict]:
-    req = urllib.request.Request(API_URL, headers={"User-Agent": "qf-whale-scan/1.0"})
+    """Pull the biggest-winners endpoint and aggregate per-event rows by
+    proxyWallet → one row per wallet with summed monthly pnl."""
+    req = urllib.request.Request(API_URL, headers=HEADERS)
     with urllib.request.urlopen(req, timeout=30) as r:
-        return json.loads(r.read())
+        rows = json.loads(r.read())
+    if not isinstance(rows, list):
+        return []
+    # Aggregate: each row is a single (wallet, event) win. Sum pnl per wallet.
+    by_wallet: dict[str, dict] = {}
+    for row in rows:
+        wallet = (row.get("proxyWallet") or "").lower()
+        if not wallet:
+            continue
+        bucket = by_wallet.setdefault(wallet, {
+            "proxyWallet": wallet,
+            "userName": row.get("userName") or "",
+            "totalPnl": 0.0,
+            "eventCount": 0,
+            "topEventSlug": row.get("eventSlug"),
+            "topEventPnl": float(row.get("pnl") or 0),
+        })
+        pnl = float(row.get("pnl") or 0)
+        bucket["totalPnl"] += pnl
+        bucket["eventCount"] += 1
+        if pnl > bucket["topEventPnl"]:
+            bucket["topEventPnl"] = pnl
+            bucket["topEventSlug"] = row.get("eventSlug")
+    # Sort descending by total pnl
+    return sorted(by_wallet.values(), key=lambda r: -r["totalPnl"])
 
 
 def latest_snapshot() -> tuple[str | None, list[dict] | None]:
@@ -60,15 +96,13 @@ def write_snapshot(rows: list[dict]) -> Path:
 
 
 def normalize(row: dict) -> dict:
-    """Extract a small canonical record from a leaderboard row."""
-    # The API may return different field names depending on version — handle
-    # both `proxyWallet` and `address`, `pnl` and `profit`, etc.
-    addr = row.get("proxyWallet") or row.get("address") or row.get("user") or ""
+    """Extract a small canonical record from an aggregated leaderboard row."""
+    addr = row.get("proxyWallet") or row.get("address") or ""
     return {
         "address": addr.lower() if addr else "",
-        "name": row.get("name") or row.get("pseudonym") or "",
-        "pnl": float(row.get("amount") or row.get("pnl") or row.get("profit") or 0),
-        "volume": float(row.get("volume") or row.get("totalVolume") or 0),
+        "name": row.get("userName") or row.get("name") or "",
+        "pnl": float(row.get("totalPnl") or row.get("pnl") or 0),
+        "eventCount": int(row.get("eventCount") or 0),
     }
 
 
@@ -108,10 +142,10 @@ def main() -> int:
         log(f"=== diff vs {prior_name} ===")
         log(f"  added ({len(d['added'])}):")
         for w in d["added"][:10]:
-            log(f"    + {w['name'] or w['address'][:10]} pnl=${w['pnl']:,.0f} vol=${w['volume']:,.0f}")
+            log(f"    + {w['name'] or w['address'][:10]} pnl=${w['pnl']:,.0f} events={w['eventCount']}")
         log(f"  dropped ({len(d['dropped'])}):")
         for w in d["dropped"][:10]:
-            log(f"    - {w['name'] or w['address'][:10]} pnl=${w['pnl']:,.0f} vol=${w['volume']:,.0f}")
+            log(f"    - {w['name'] or w['address'][:10]} pnl=${w['pnl']:,.0f}")
         log(f"  persisted ({len(d['persisted'])}):")
         for (p, c) in d["persisted"][:10]:
             d_pnl = c["pnl"] - p["pnl"]
@@ -120,7 +154,7 @@ def main() -> int:
         log("no prior snapshot — first run")
         for r in rows[:10]:
             n = normalize(r)
-            log(f"  rank: {n['name'] or n['address'][:10]} pnl=${n['pnl']:,.0f}")
+            log(f"  rank: {n['name'] or n['address'][:10]} pnl=${n['pnl']:,.0f} events={n['eventCount']}")
 
     if not args.dry_run:
         path = write_snapshot(rows)
