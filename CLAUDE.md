@@ -12,7 +12,7 @@ Evolutionary arena for Polymarket 5M crypto binary markets. AI-bred engines comp
 - `npm run arena:dry` — simulated data, no APIs
 - `npm run arena:live` — live PM + Binance data (auto-discovers markets)
 - `npm run arena:1round:dry` — quick test (1 min round)
-- `npm run test:unit` — 310 tests, must all pass
+- `npm run test:unit` — 325 tests, must all pass
 - `python3 scripts/auto_rotate.py` — dry-run engine roster selection (prints ranked candidates + diff). Add `--commit` to actually swap.
 - `python3 scripts/livePnLByEngine.py` — per-engine PnL from data/live_trades.jsonl (FILL+SETTLE ledger). Add `--since 24h` for window.
 - `python3 scripts/backfillLiveLedger.py --reset --write` — rebuild ledger from Polymarket Activity API + ROSTER_HISTORY (script-internal).

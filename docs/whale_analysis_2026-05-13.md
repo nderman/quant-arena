@@ -412,3 +412,185 @@ classifier check? That would confirm the signal model.
 **Do both.** Path A captures alpha while Path B is being built. If Path
 B yields a real signal, retire the copytrader and run our own; if not,
 the copytrader remains the bridge.
+
+---
+
+## 2026-05-14 (LATER) — UNWIND: WangXingYu is not actually profitable
+
+After the WangXingYu engine shipped (`e946f3f`) and we pivoted to Path B
+signal RE, the descriptive feature split revealed a clean mean-rev signal
+in their decisions. But the rule's measured candle-WR was only 47% — the
+inverse of their reported 96%. Debugging this exposed **a third methodology
+bug**, bigger than the first two.
+
+### Bug #3: redeem-based exit accounting silently hides 100% of total losses
+
+Polymarket binary markets resolve such that:
+- Winning shares are worth $1 each → wallet calls REDEEM → on-chain event
+- Losing shares are worth $0 → no need to call REDEEM → no event, just
+  zero-value tokens sitting in the wallet
+
+The May 13 + May 14 morning methodology computed "settled WR" by joining
+buys → redeems and counting slugs where `redeem > cost`. **Every slug they
+lost on was invisible to that join** — no redeem event to find.
+
+Recomputing WangXingYu's 82d picture with `total_proceeds - total_deployed`
+across all slugs:
+
+```
+1848 unique slugs:  837 won / 1011 lost  → 45% WR
+Total deployed:   $5,605,130
+Total redeemed:   $5,486,732
+Net realized:    -$  118,398   ← break-even / slight underwater
+
+983 slugs had zero proceeds. At 10+ days past their last activity, virtually
+all are settled losses (5m–4h candles all resolved by now).
+Hidden cost in those "invisible" slugs: $2,927,351.
+```
+
+**WangXingYu is a 45%-WR break-even trader.** Not a 96%-WR superstar.
+
+The "+$2.8M / 96% WR" from earlier sections of this doc was the
+**winning-side slice only** — by definition, every slug we measured had
+already produced a positive REDEEM. The losing-side slice (almost identical
+in size — $2.93M of bought-and-died positions) was completely absent.
+
+### What this invalidates
+
+| Earlier section | Status |
+|---|---|
+| **May 13 archetypes** (Bonereaper1 +22%, Marketing101 +13%, ozpreezy +25%) | Likely overstated — same methodology bug |
+| **May 14 AM LB-top-20 screen** (16/20 wallets "profitable") | All numbers suspect — many "winners" may be break-even like WangXingYu |
+| **ExitLiquidty +$319K, gobblewobble +$321K, JanAMEX +$400K** | Need re-validation with deployed-vs-proceeds |
+| **WangXingYu +$2.8M / 96% WR** | UNWOUND. -$118K / 45% WR. Engine code shipped but not enabled. |
+
+The **mean-rev signal in WangXingYu's decisions is still real** (descriptive
+split shows -25 bps separation between YES/NO buys at 60min lookback). But
+copying their decisions = copying a break-even trader. Mean rev × 45% WR =
+~+$0.01/share at median $0.44 entry. Not alpha.
+
+### The honest methodology going forward
+
+For every wallet:
+
+```python
+deployed = sum(b.usdcSize for b in buys)
+proceeds = sum(e.usdcSize for e in sells + merges + redeems)
+realized = proceeds - deployed
+```
+
+Then for `slug_win_rate`, count won-slugs / total-slugs (where "won" means
+`per_slug_proceeds > per_slug_cost`), not won-slugs / redeemed-slugs.
+
+### Status of Path A and Path B
+
+- **Path A (copy-trade engine)** — code shipped at `e946f3f`. Targeting
+  WangXingYu yields a break-even strategy at best. Engine remains parked,
+  retargetable via env var if a truly profitable wallet emerges.
+- **Path B (signal RE)** — the mean-rev signal is in the data but is not
+  alpha by itself. Path B yields a feature classifier of "what WangXingYu
+  would have done", and WangXingYu loses money. Reframe: train a classifier
+  on actual candle outcomes (not their decisions), use Binance OHLCV for
+  prediction. The 82d Binance cache is already built.
+
+### Open question
+
+Are there ANY profitable candle-market whales when measured honestly?
+Re-screen top-20 LB with `proceeds - deployed`. If yes, redirect Path A.
+If no, abandon whale-replication entirely and pivot to first-principles
+signal engineering using BTC features.
+
+---
+
+## 2026-05-14 (END) — Merge-arb negative result + session conclusion
+
+After concluding the whale-replication branch as a dead end, ran one more
+structural-alpha test: **merge-arb on dual-book sum < $1.00**.
+
+Result: **infeasible at our latency tier.**
+
+- `MergeArbSniperEngine.ts` already exists (parallel-taker variant, fires when
+  ask_sum < 0.94). Sim history across 52 rounds: **0 fires.** Sim doesn't
+  generate the gap.
+- Live PM crypto book snapshot at peak hours: 0 of 42 readable markets had
+  ask_sum < $1.00. Sampled sums were 1.01-1.02 (wide spreads, no arb).
+- The merge-arb opportunity at sum < 0.94 is either (a) saturated by faster
+  MEV bots, or (b) too transient for our 2-min poll cadence.
+- gobblewobble's 88 merges weren't sniper-style — they were maker-side
+  inventory accumulation over time, with directional exposure during the
+  wait. That's a fundamentally different (and harder) engine to build, and
+  the directional risk during accumulation is the same prediction problem
+  we've failed to solve.
+
+### Three-test summary
+
+| Branch | Outcome |
+|---|---|
+| Copy-trade (Path A) | Engine shipped at `e946f3f`. Target wallet inactive 10d. No viable alternate target — all "candle whales" are either selection-biased non-winners or confirmation-buyers we can't catch at our latency. |
+| Signal reverse-engineering (Path B) | Mean-rev signal IS in WangXingYu's decisions. But WangXingYu loses money. Mean-rev rule alone wins ~52% of candles, below break-even after quartic fee. |
+| Merge-arb (structural) | Engine sound, gap doesn't open. 0/52 sim fires, 0/42 live book observations. |
+
+### What we definitively learned
+
+1. **Redeem-based exit accounting hides 100% of losses.** Always
+   `proceeds - deployed` across all slugs. Three different bugs in this
+   methodology cost us a full day before we found the third.
+
+2. **The leaderboard reports per-event WINS, not realized P&L.** Top wallets
+   can be net-losing on full accounting (JanAMEX, WangXingYu, gobblewobble
+   candles all flipped negative with honest math).
+
+3. **The viable candle-market winners are structurally protected by speed.**
+   jhz1122 and 0xea687b343 fire at $0.85+ where margin is 1-5% per trade —
+   our poll-and-fire latency makes those uncopyable. Their alpha is
+   "I can react in 100ms," not "I have a signal."
+
+4. **Merge-arb gaps don't open in live PM at our cadence.** The strategy is
+   mathematically clean but operationally infeasible without WS-level
+   monitoring across hundreds of markets simultaneously.
+
+5. **Three independent failure paths suggest the candle ecosystem at our
+   latency tier is saturated.** Time to either change market class
+   (event/dated markets where ExitLiquidty operates) or change role
+   (maker-side liquidity provision).
+
+The sim leaderboard is full of engines that look strong but most of them are
+chop-fader-pattern (sim says +$50-107, live says -$25). The few that have
+survived live trial (momentum-settle, vol-regime) are the only ones we trust.
+Further alpha is going to require a methodology shift, not another engine.
+
+---
+
+## 2026-05-14 (END OF DAY) — live ledger reality + halt
+
+Pulled actual live P&L from VPS:
+
+```
+30d realized: -$37.23  (225 fires, 56W/57L = 50% WR, $703 staked)
+7d realized:  -$ 8.95  (vol-regime engines lost this week)
+24h:           $ 0.00  (no fires)
+```
+
+**Only profitable engine: `momentum-settle-v1 @ sol-4h`** (+$6.28, 18 fires,
+69% WR). Everything else (17 other engine-arena cells) at break-even or
+losing. The "validated" vol-regime gates lost money in the past 7 days.
+
+**Live halted 2026-05-14 ~15:02 UTC** via `data/live_halt.flag`. Auto-rotation
+was already disabled May 7 (manual experiment). The experiment has run its
+course; the verdict is bleed.
+
+**Reverse chop-fader finding.** The one live winner (sol-4h) is NOT in the
+sim 4h leaderboard. Sim is too pessimistic about this cell. Class haircut
+in auto_rotate may be wrongly suppressing it. Worth a future investigation.
+
+**Plan when re-engaging:**
+- Curated roster around 4h arenas
+- Keep `momentum-settle-v1 @ sol-4h` (the proven cell)
+- Trial: `maker-momentum-v1 @ btc-4h` (+$2.42 sim, 56% WR, n=43),
+  `vol-regime-gate-v1 @ eth-4h` (+$1.38, 61% WR, n=23),
+  `book-imbalance-v1 @ sol-4h` (+$1.04, 61% WR, n=23)
+- Cull: chop-fader-v1, spread-compression-v1, maker-momentum-v1 @ eth-15m
+- `rm data/live_halt.flag` to re-enable
+
+End of session. Live trading stopped, sim continues, the alpha question
+remains open but the search has been honest.
